@@ -16,10 +16,19 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | GET | `/health` | Status service + koneksi database |
 | GET | `/api/transactions` | List transaksi (header + item), cursor pagination. Query: `limit` (≤100), `cursor`, `search`, `dateFrom`, `dateTo`, `branch`, `cache=false` |
 | GET | `/api/transactions/{sales_num}` | Detail satu transaksi beserta `items` |
-| POST | `/api/transactions/export` | Data siap Excel (44 kolom). Body: `{"dateFrom","dateTo","branch"}`, maks 50.000 transaksi |
 | GET | `/api/branches` | Daftar branch + jumlah transaksi 65 hari terakhir |
+| POST | `/api/exports` | Mulai job export Excel. Body: `{"dateFrom","dateTo","branch"}` → 202 + `id` |
+| GET | `/api/exports/{id}` | Status job: `status`, `daysDone/totalDays`, `rows`, `sheets`, `fileSize`, `downloadUrl` |
+| GET | `/api/exports/{id}/download` | Unduh file `.xlsx` (tersedia `EXPORT_TTL_HOURS`, default 24 jam) |
 
 Tanpa `dateFrom`/`dateTo`, rentang default adalah 65 hari terakhir (zona waktu Asia/Jakarta).
+
+### Export Excel
+
+- Tidak ada batas rentang. Data dibaca per hari (terbaru dulu) dan ditulis streaming oleh `app/xlsx_stream.py`.
+- Format: sheet `Summary` + `Transactions` (44 kolom, satu baris per item). Jika lebih dari 1.048.575 baris, otomatis lanjut ke `Transactions (2)`, dst.
+- Acuan performa di VPS: 1 hari ≈ 65 rb baris ≈ 9 dtk; September 2026 (740.762 transaksi, 1,88 jt baris) ≈ 4,6 menit, 258 MB.
+- Link unduhan relatif (lewat proxy Vercel) kecuali `PUBLIC_BASE_URL` di-set, misalnya `https://portal-api.kopicalf.co.id`, agar browser mengunduh langsung dari backend.
 Dokumentasi interaktif: `http://187.52.114.14:8002/docs`.
 
 ## Konfigurasi
@@ -32,6 +41,9 @@ Lihat [.env.example](.env.example). Kredensial database sama dengan yang dipakai
 | `DB_USER` / `DB_PASSWORD` | - | Wajib |
 | `DB_POOL_MAX` | 5 | Koneksi maksimal per worker (container menjalankan 2 worker) |
 | `CORS_ORIGINS` | `*` | Hanya relevan jika browser memanggil backend langsung |
+| `PUBLIC_BASE_URL` | kosong | Basis URL absolut untuk link unduhan export |
+| `EXPORT_TTL_HOURS` | 24 | Lama file export disimpan |
+| `EXPORT_MAX_CONCURRENT` | 2 | Job export bersamaan per worker |
 | `TIMEZONE` | `Asia/Jakarta` | Untuk rentang tanggal default |
 
 ## Development

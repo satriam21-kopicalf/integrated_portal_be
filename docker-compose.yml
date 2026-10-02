@@ -1,0 +1,14 @@
+services:
+  api:
+    build: .
+    image: integrated-portal-be:latest
+    container_name: integrated-portal-be
+    env_file: .env
+    ports:
+      - "8002:8002"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

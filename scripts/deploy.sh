@@ -15,8 +15,8 @@ cd "$(dirname "$0")/.."
 
 echo "==> Uploading source to ${VPS_HOST}:${VPS_PATH}"
 ssh "$VPS_HOST" "mkdir -p '$VPS_PATH'"
-tar czf - app requirements.txt Dockerfile docker-compose.yml .dockerignore .env.example \
-  | ssh "$VPS_HOST" "tar xzf - -C '$VPS_PATH'"
+tar czf - --exclude=__pycache__ app requirements.txt Dockerfile docker-compose.yml .dockerignore .env.example \
+  | ssh "$VPS_HOST" "rm -rf '$VPS_PATH/app' && tar xzf - -C '$VPS_PATH'"
 
 echo "==> Building and starting container"
 ssh "$VPS_HOST" VPS_PATH="$VPS_PATH" 'bash -s' <<'REMOTE'

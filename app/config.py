@@ -1,4 +1,6 @@
 """Application configuration loaded from environment variables / .env."""
+import os
+import tempfile
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,9 +27,16 @@ class Settings(BaseSettings):
 
     # Business defaults (mirrors the old Next.js API routes)
     default_days: int = 65
-    export_max_headers: int = 50_000
     transactions_cache_ttl: int = 60
     branches_cache_ttl: int = 300
+
+    # Excel export jobs
+    export_dir: str = os.path.join(tempfile.gettempdir(), "portal-exports")
+    export_ttl_hours: int = 24
+    export_max_concurrent: int = 2
+    # e.g. https://portal-api.kopicalf.co.id -> absolute download links that bypass the
+    # Vercel proxy. Empty = relative /api/exports/{id}/download (served via the proxy).
+    public_base_url: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:

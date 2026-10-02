@@ -6,9 +6,15 @@ services:
     env_file: .env
     ports:
       - "8002:8002"
+    volumes:
+      # Generated Excel exports (auto-deleted after EXPORT_TTL_HOURS)
+      - exports:/data/exports
     restart: unless-stopped
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  exports:

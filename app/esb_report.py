@@ -40,8 +40,6 @@ REPORT_COLUMN_WIDTHS = [
     34, 16, 10, 22, 12, 6, 11, 12, 10, 10, 10, 10, 12, 13, 8, 12,
     14, 16, 19,
 ]
-DATE_COLUMNS = {"Sales Date"}
-DATETIME_COLUMNS = {"Sales Date In", "Sales Date Out", "Order Time"}
 
 # Transaction types (h = transactions_pos_sales). "sales" is exactly ESB's
 # Sales Recapitulation report (Sales Type "Sales"); the others are what ESB leaves

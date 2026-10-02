@@ -13,12 +13,12 @@ from fastapi.responses import JSONResponse
 
 from app import database as db
 from app.config import get_settings
-from app.routes import branches_router, exports_router, transactions_router
+from app.routes import branches_router, exports_router, summary_router, transactions_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("integrated_portal_be")
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 
 class SelectiveGZipMiddleware(GZipMiddleware):
@@ -55,6 +55,7 @@ app.add_middleware(
 )
 
 app.include_router(transactions_router)
+app.include_router(summary_router)
 app.include_router(branches_router)
 app.include_router(exports_router)
 

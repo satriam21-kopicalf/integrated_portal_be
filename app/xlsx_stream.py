@@ -4,16 +4,17 @@ xlsxwriter manages ~2-3k rows/s for our 44-column rows, which turns a monthly
 export (~2M rows) into a 15+ minute job. This writer emits the worksheet XML
 directly into the zip archive in batches (inline strings, no shared-string
 table), which is an order of magnitude faster. It supports exactly what the
-ESB report needs: multiple sheets, a bold header row, column widths and a
-frozen header.
+ESB report needs: multiple sheets, title rows above a bold header row, column
+widths, a frozen header and real Excel dates (date / datetime values).
 
 Usage:
     with StreamingXlsxWriter(path) as xlsx:
-        sheet = xlsx.add_sheet("Transactions", widths=[20, 15], header=["A", "B"])
+        sheet = xlsx.add_sheet("Report", widths=[20, 15], header=["A", "B"], preamble=[["Title"], []])
         sheet.write_rows(rows)            # iterable of lists
         xlsx.add_static_sheet("Summary", rows, first=True)
 """
 import zipfile
+from datetime import date, datetime
 from typing import Any, Iterable, Optional, Sequence
 
 MAX_STRING_LEN = 32767  # Excel cell limit
@@ -39,6 +40,9 @@ def _escape(text: str) -> str:
     return text.translate(_ESCAPE)
 
 
+_EPOCH = datetime(1899, 12, 30)
+
+
 def _row_xml(row_num: int, values: Sequence[Any], style: int = 0) -> str:
     s = f' s="{style}"' if style else ""
     cells = []
@@ -46,7 +50,12 @@ def _row_xml(row_num: int, values: Sequence[Any], style: int = 0) -> str:
         if value is None or value == "":
             continue
         ref = f"{_COLS[col]}{row_num}"
-        if isinstance(value, bool):
+        if isinstance(value, datetime):
+            serial = (value.replace(tzinfo=None) - _EPOCH).total_seconds() / 86400
+            cells.append(f'<c r="{ref}" s="{DATETIME}"><v>{serial!r}</v></c>')
+        elif isinstance(value, date):
+            cells.append(f'<c r="{ref}" s="{DATE}"><v>{(value - _EPOCH.date()).days}</v></c>')
+        elif isinstance(value, bool):
             cells.append(f'<c r="{ref}"{s} t="b"><v>{int(value)}</v></c>')
         elif isinstance(value, (int, float)):
             cells.append(f'<c r="{ref}"{s}><v>{value!r}</v></c>')
@@ -63,29 +72,35 @@ _NS_R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relation
 _STYLES = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     f"<styleSheet {_NS}>"
+    '<numFmts count="2"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/>'
+    '<numFmt numFmtId="165" formatCode="yyyy-mm-dd hh:mm:ss"/></numFmts>'
     '<fonts count="2"><font><sz val="11"/><name val="Calibri"/><family val="2"/></font>'
     '<font><b/><sz val="11"/><name val="Calibri"/><family val="2"/></font></fonts>'
     '<fills count="2"><fill><patternFill patternType="none"/></fill>'
     '<fill><patternFill patternType="gray125"/></fill></fills>'
     '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
     '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-    '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
-    '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>'
+    '<cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+    '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+    '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
+    '<xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>'
     '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
     "</styleSheet>"
 )
 BOLD = 1
+DATE = 2
+DATETIME = 3
 
 
 class Sheet:
-    def __init__(self, stream, widths: Optional[Sequence[float]], freeze_header: bool):
+    def __init__(self, stream, widths: Optional[Sequence[float]], freeze_rows: int):
         self._stream = stream
         self.rows = 0
         parts = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>', f"<worksheet {_NS} {_NS_R}>"]
-        if freeze_header:
+        if freeze_rows:
             parts.append(
                 '<sheetViews><sheetView workbookViewId="0">'
-                '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
+                f'<pane ySplit="{freeze_rows}" topLeftCell="A{freeze_rows + 1}" activePane="bottomLeft" state="frozen"/>'
                 '<selection pane="bottomLeft"/></sheetView></sheetViews>'
             )
         else:
@@ -140,8 +155,13 @@ class StreamingXlsxWriter:
         return self._zip.open(f"xl/worksheets/sheet{number}.xml", "w", force_zip64=True)
 
     def add_sheet(self, name: str, widths: Optional[Sequence[float]] = None,
-                  header: Optional[Sequence[str]] = None) -> Sheet:
-        sheet = Sheet(self._open_part(name, False), widths, freeze_header=header is not None)
+                  header: Optional[Sequence[str]] = None,
+                  preamble: Sequence[Sequence[Any]] = ()) -> Sheet:
+        """preamble: title rows written above the (bold, frozen) header row."""
+        freeze = len(preamble) + 1 if header is not None else 0
+        sheet = Sheet(self._open_part(name, False), widths, freeze_rows=freeze)
+        for i, values in enumerate(preamble):
+            sheet.write_row(values, BOLD if i == 0 else 0)
         if header is not None:
             sheet.write_row(header, BOLD)
         self._current = sheet
@@ -149,7 +169,7 @@ class StreamingXlsxWriter:
 
     def add_static_sheet(self, name: str, rows: Sequence[Sequence[Any]], widths: Optional[Sequence[float]] = None,
                          bold_rows: Sequence[int] = (), first: bool = False) -> None:
-        sheet = Sheet(self._open_part(name, first), widths, freeze_header=False)
+        sheet = Sheet(self._open_part(name, first), widths, freeze_rows=0)
         for i, values in enumerate(rows):
             sheet.write_row(values, BOLD if i in bold_rows else 0)
         sheet.close()

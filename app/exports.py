@@ -1,8 +1,10 @@
 """Excel export jobs.
 
 An export runs in a background thread: it reads the date range one day at a
-time (newest first), streams the rows into an .xlsx file (app/xlsx_stream.py)
-and starts a new sheet whenever Excel's row limit is reached. Job state lives in a JSON file next to the export so every uvicorn
+time (oldest first), builds the ESB "Sales Recapitulation Detail Report" rows
+(app/esb_report.py) and streams them into an .xlsx file (app/xlsx_stream.py)
+laid out like the ESB export; a new sheet starts whenever Excel's row limit is
+reached. A "Ringkasan" sheet lists gross sales and the deductions per day. Job state lives in a JSON file next to the export so every uvicorn
 worker in the container can report progress and serve the download.
 """
 import json
@@ -17,8 +19,10 @@ from typing import Optional
 
 from app import database as db
 from app.config import get_settings
-from app.database import HEADER_COLUMNS, TABLE_TRANSACTIONS
-from app.report import EXCEL_COLUMN_WIDTHS, EXCEL_HEADERS, fetch_items, group_items, report_rows
+from app.database import SCHEMA, TABLE_TRANSACTIONS
+from app.esb_report import (REPORT_COLUMN_WIDTHS, REPORT_HEADERS, TYPE_CONDITIONS, TYPE_LABELS,
+                            iter_report_rows)
+from app.daily_report import DAILY_COLUMN_WIDTHS, DAILY_HEADERS, daily_rows
 from app.xlsx_stream import StreamingXlsxWriter
 
 logger = logging.getLogger(__name__)
@@ -89,14 +93,24 @@ def cleanup_old_exports() -> None:
             pass
 
 
-def _file_name(date_from: date, date_to: date, branch: Optional[str]) -> str:
-    name = f"ESB_Sales_{date_from.isoformat()}_to_{date_to.isoformat()}"
+# report kinds: ESB report title, file name prefix
+REPORTS = {
+    "detail": ("Sales Recapitulation Detail Report", "Sales_Recapitulation_Detail"),
+    "daily": ("Daily Sales Recapitulation Report", "Daily_Sales_Recapitulation"),
+}
+
+
+def _file_name(date_from: date, date_to: date, branch: Optional[str], tx_type: str, report: str) -> str:
+    name = f"{REPORTS[report][1]}_{date_from.isoformat()}_to_{date_to.isoformat()}"
+    if tx_type != "sales":
+        name += f"_{tx_type}"
     if branch:
         name += "_" + re.sub(r"[^A-Za-z0-9]+", "_", branch).strip("_")
     return f"{name}.xlsx"
 
 
-def create_job(date_from: date, date_to: date, branch: Optional[str]) -> dict:
+def create_job(date_from: date, date_to: date, branch: Optional[str], tx_type: str = "sales",
+               report: str = "detail") -> dict:
     cleanup_old_exports()
     job = {
         "id": uuid.uuid4().hex,
@@ -104,6 +118,8 @@ def create_job(date_from: date, date_to: date, branch: Optional[str]) -> dict:
         "dateFrom": date_from.isoformat(),
         "dateTo": date_to.isoformat(),
         "branch": branch,
+        "type": tx_type,
+        "report": report,
         "totalDays": (date_to - date_from).days + 1,
         "daysDone": 0,
         "currentDate": None,
@@ -111,7 +127,7 @@ def create_job(date_from: date, date_to: date, branch: Optional[str]) -> dict:
         "headers": 0,
         "items": 0,
         "sheets": 0,
-        "fileName": _file_name(date_from, date_to, branch),
+        "fileName": _file_name(date_from, date_to, branch, tx_type, report),
         "fileSize": None,
         "error": None,
         "createdAt": _now(),
@@ -141,71 +157,111 @@ def _run(job: dict) -> None:
             _update(job, status="error", error=str(exc), finishedAt=_now())
 
 
-def _fetch_day_headers(day: date, branch: Optional[str]) -> list[dict]:
-    where = ["sales_date >= %s", "sales_date < %s"]
+def _fetch_day_headers(day: date, branch: Optional[str], tx_type: str) -> list[dict]:
+    where = ["h.sales_date >= %s", "h.sales_date < %s", TYPE_CONDITIONS[tx_type]]
     params: list = [day.isoformat(), (day + timedelta(days=1)).isoformat()]
     if branch:
-        where.append("branch_name = %s")
+        where.append("h.branch_code = %s")
         params.append(branch)
     return db.fetch(
-        f"SELECT {HEADER_COLUMNS} FROM {TABLE_TRANSACTIONS} WHERE {' AND '.join(where)} "
-        f"ORDER BY sales_date DESC, sales_num DESC",
+        f"SELECT h.sales_num, h.raw_data FROM {TABLE_TRANSACTIONS} h WHERE {' AND '.join(where)} "
+        f"ORDER BY h.branch_code, h.sales_date_in, h.sales_num",
         params,
     )
 
 
+def _branch_name(code: Optional[str]) -> str:
+    if not code:
+        return "All"
+    row = db.fetchrow(f"SELECT branch_name FROM {SCHEMA}.master_branches WHERE branch_code = %s", (code,))
+    return row["branch_name"] if row else code
+
+
+def _preamble(job: dict) -> list[list]:
+    """Title rows identical to the ESB export (data header lands on row 11)."""
+    d = lambda iso: date.fromisoformat(iso).strftime("%d-%m-%Y")  # noqa: E731
+    daily = job.get("report") == "daily"
+    return [
+        [REPORTS[job.get("report") or "detail"][0]],
+        ["PT Yuda Prawira Group"],
+        [],
+        ["Generated", datetime.now().strftime("%d-%m-%Y %H:%M:%S")],
+        ["Period", f"{d(job['dateFrom'])} - {d(job['dateTo'])}"],
+        ["Branch", _branch_name(job["branch"])],
+        ["Sales Type", TYPE_LABELS[job["type"]]],
+        *([["Date Group Mode", "Daily"]] if daily else []),
+        ["Generated Username", "Integrated Portal"],
+        ["Report File Name", job["fileName"].removesuffix(".xlsx")],
+        [],
+    ]
+
+
+def _summary_rows(job: dict) -> list[list]:
+    from app.routes.transactions import summarize  # local import: routes import this module
+
+    s = summarize(job["dateFrom"], job["dateTo"], job["branch"])
+    header = ["Date", "Gross Subtotal", "Void & Cancelled", "Other Cost (CUPPING, WASTE, ...)",
+              "Open Bills", "Sales Subtotal (ESB)", "Sales Nett Sales", "Sales Transactions"]
+    rows = [["Ringkasan Penjualan"], ["Period", f"{job['dateFrom']} - {job['dateTo']}"],
+            ["Branch", _branch_name(job["branch"])], [], header]
+    for day in s["days"] + [{"date": "TOTAL", **s["totals"]}]:
+        rows.append([day["date"], day["gross"]["subtotal"], -day["void"]["subtotal"], -day["other_cost"]["subtotal"],
+                     -day["open"]["subtotal"], day["sales"]["subtotal"], day["sales"]["nettSales"],
+                     day["sales"]["transactions"]])
+    if s["otherCostByMethod"]:
+        rows += [[], ["Other Cost per metode", "Subtotal", "Transaksi"]]
+        rows += [[m, v["subtotal"], v["transactions"]] for m, v in s["otherCostByMethod"].items()]
+    return rows
+
+
 def _generate(job: dict) -> None:
-    date_to = date.fromisoformat(job["dateTo"])
+    if job.get("report") == "daily":
+        _generate_daily(job)
+        return
+    date_from = date.fromisoformat(job["dateFrom"])
     branch = job["branch"]
+    tx_type = job.get("type") or "sales"
     path = job_file(job["id"])
 
     sheet = None
     sheets = 0
-    rows = headers_count = items_count = 0
+    rows = headers_count = 0
+    preamble = _preamble(job)
+
+    def preamble_rows(sheet_number: int) -> int:
+        # the first sheet also holds the title rows
+        return len(preamble) if sheet_number == 1 else 0
 
     with StreamingXlsxWriter(str(path)) as xlsx:
         for offset in range(job["totalDays"]):
-            day = date_to - timedelta(days=offset)
-            headers = _fetch_day_headers(day, branch)
-            items_by_sales = group_items(fetch_items([h["sales_num"] for h in headers])) if headers else {}
+            day = date_from + timedelta(days=offset)
+            headers = _fetch_day_headers(day, branch, tx_type)
 
             batch: list[list] = []
-            for row, has_item in report_rows(headers, items_by_sales):
-                # sheet.rows includes the header row
-                if sheet is None or sheet.rows - 1 + len(batch) >= MAX_SHEET_ROWS:
+            for row in iter_report_rows(headers):
+                # data_rows counts rows already assigned to this sheet (written or batched)
+                if sheet is None or sheet.data_rows >= MAX_SHEET_ROWS - preamble_rows(sheets):
                     if sheet is not None:
                         sheet.write_rows(batch)
                         batch = []
                     sheets += 1
-                    name = "Transactions" if sheets == 1 else f"Transactions ({sheets})"
-                    sheet = xlsx.add_sheet(name, widths=EXCEL_COLUMN_WIDTHS, header=EXCEL_HEADERS)
+                    name = "Report" if sheets == 1 else f"Report ({sheets})"
+                    sheet = xlsx.add_sheet(name, widths=REPORT_COLUMN_WIDTHS, header=REPORT_HEADERS,
+                                           preamble=preamble if sheets == 1 else ())
+                    sheet.data_rows = 0
                 batch.append(row)
+                sheet.data_rows += 1
                 rows += 1
-                items_count += has_item
             if batch:
                 sheet.write_rows(batch)
 
             headers_count += len(headers)
             _update(job, daysDone=offset + 1, currentDate=day.isoformat(),
-                    rows=rows, headers=headers_count, items=items_count, sheets=sheets)
+                    rows=rows, headers=headers_count, items=rows, sheets=sheets)
 
-        xlsx.add_static_sheet(
-            "Summary",
-            [
-                ["ESB Sales Report"],
-                ["Generated", datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
-                ["Period", f"{job['dateFrom']} - {job['dateTo']}"],
-                ["Branch", branch or "All Branches"],
-                [],
-                ["Summary"],
-                ["Total Rows", rows],
-                ["Total Transactions", headers_count],
-                ["Total Items", items_count],
-            ],
-            widths=[20, 25],
-            bold_rows=(0, 5),
-            first=True,
-        )
+        if rows:
+            xlsx.add_static_sheet("Ringkasan", _summary_rows(job), widths=[22, 18, 18, 22, 14, 20, 18, 18],
+                                  bold_rows=(0, 4))
 
     if rows == 0:
         path.unlink(missing_ok=True)
@@ -214,3 +270,30 @@ def _generate(job: dict) -> None:
 
     _update(job, status="done", fileSize=path.stat().st_size, finishedAt=_now())
     logger.info("Export %s done: %s rows, %s sheet(s), %s bytes", job["id"], rows, sheets, job["fileSize"])
+
+
+def _generate_daily(job: dict) -> None:
+    """Daily Sales Recapitulation: one row per date and branch (small, one sheet)."""
+    date_from = date.fromisoformat(job["dateFrom"])
+    tx_type = job.get("type") or "sales"
+    path = job_file(job["id"])
+    rows = bills = 0
+    with StreamingXlsxWriter(str(path)) as xlsx:
+        sheet = xlsx.add_sheet("Report", widths=DAILY_COLUMN_WIDTHS, header=DAILY_HEADERS, preamble=_preamble(job))
+        for offset in range(job["totalDays"]):
+            day = date_from + timedelta(days=offset)
+            day_rows = daily_rows(day, job["branch"], tx_type)
+            sheet.write_rows(day_rows)
+            rows += len(day_rows)
+            bills += int(sum(r[3] for r in day_rows))
+            _update(job, daysDone=offset + 1, currentDate=day.isoformat(), rows=rows, headers=bills,
+                    items=rows, sheets=1)
+        if rows:
+            xlsx.add_static_sheet("Ringkasan", _summary_rows(job), widths=[22, 18, 18, 22, 14, 20, 18, 18],
+                                  bold_rows=(0, 4))
+    if rows == 0:
+        path.unlink(missing_ok=True)
+        _update(job, status="done", fileName=None, finishedAt=_now())
+        return
+    _update(job, status="done", fileSize=path.stat().st_size, finishedAt=_now())
+    logger.info("Daily export %s done: %s rows", job["id"], rows)

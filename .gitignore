@@ -12,3 +12,6 @@ env/
 .idea/
 .DS_Store
 Thumbs.db
+
+# ESB reference exports (contain customer data) - keep local only
+docs/*.xlsx

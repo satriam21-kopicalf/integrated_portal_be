@@ -7,12 +7,13 @@ import openpyxl
 
 from app import exports
 from app.config import get_settings
+from app.esb_report import REPORT_HEADERS
 
 
 def _start(client, **body):
     res = client.post("/api/exports", json=body)
     assert res.status_code == 202, res.text
-    return res.json()
+    return client.get(f"/api/exports/{res.json()['id']}").json()
 
 
 def _workbook(client, job):
@@ -21,50 +22,79 @@ def _workbook(client, job):
     assert res.headers["content-type"].startswith("application/vnd.openxmlformats")
     assert job["fileName"] in res.headers["content-disposition"]
     assert "content-encoding" not in res.headers  # not gzipped
-    return openpyxl.load_workbook(io.BytesIO(res.content), read_only=True)
+    return openpyxl.load_workbook(io.BytesIO(res.content))
 
 
-def test_export_job_writes_all_days_newest_first(client):
+def _data_rows(ws, header_row):
+    rows = list(ws.iter_rows(min_row=header_row, values_only=True))
+    assert list(rows[0]) == REPORT_HEADERS
+    return rows[1:]
+
+
+def test_export_matches_esb_layout(client):
     job = _start(client, dateFrom="2026-09-29", dateTo="2026-09-30")
-    status = client.get(f"/api/exports/{job['id']}").json()
-    assert status["status"] == "done"
-    assert status["totalDays"] == 2 and status["daysDone"] == 2
-    # S-002 (1 item) + S-001 (no items) + S-000 (2 items)
-    assert (status["rows"], status["headers"], status["items"], status["sheets"]) == (4, 3, 3, 1)
-    assert status["fileName"] == "ESB_Sales_2026-09-29_to_2026-09-30.xlsx"
-    assert status["downloadUrl"] == f"/api/exports/{job['id']}/download"
+    assert job["status"] == "done" and job["type"] == "sales"
+    assert (job["totalDays"], job["daysDone"], job["headers"], job["rows"], job["sheets"]) == (2, 2, 2, 4, 1)
+    assert job["fileName"] == "Sales_Recapitulation_Detail_2026-09-29_to_2026-09-30.xlsx"
 
-    wb = _workbook(client, status)
-    assert wb.sheetnames == ["Summary", "Transactions"]
-    # read-only mode drops trailing empty cells, so pad rows back to 44 columns
-    rows = [tuple(r) + (None,) * (44 - len(r)) for r in wb["Transactions"].iter_rows(values_only=True)]
-    assert len(rows) == 5 and all(len(r) == 44 for r in rows)
-    assert rows[0][0] == "Sales Number"
-    assert [r[0] for r in rows[1:]] == ["S-002", "S-001", "S-000", "S-000"]
-    assert rows[1][35] == "Latte" and rows[1][38] == 2
-    assert rows[2][35] is None  # header without items -> blank item columns
-    summary = {r[0]: r[1] for r in wb["Summary"].iter_rows(values_only=True) if len(r) == 2}
-    assert summary["Total Rows"] == 4 and summary["Total Transactions"] == 3
-    assert summary["Period"] == "2026-09-29 - 2026-09-30"
+    wb = _workbook(client, job)
+    assert wb.sheetnames == ["Report", "Ringkasan"]
+    ws = wb["Report"]
+    assert ws["A1"].value == "Sales Recapitulation Detail Report" and ws["A2"].value == "PT Yuda Prawira Group"
+    assert ws["A5"].value == "Period" and ws["B5"].value == "29-09-2026 - 30-09-2026"
+    assert ws["B6"].value == "All" and ws["B7"].value == "Sales"
+    assert ws.freeze_panes == "A12"
+    rows = _data_rows(ws, 11)
+    assert [r[0] for r in rows] == ["S-000", "S-003", "S-003", "S-003"]  # oldest day first
+    assert rows[1][27] == "Es Kopi Calf Premium" and rows[2][27] == "Normal Sugar (PACKAGE)"
+    assert rows[1][6] == datetime(2026, 9, 30)  # real Excel date
+    assert ws.cell(row=13, column=7).number_format == "yyyy-mm-dd"
+    assert rows[1][42] == 2500  # Bill Discount
+
+    summary = list(wb["Ringkasan"].iter_rows(values_only=True))
+    total = next(r for r in summary if r[0] == "TOTAL")
+    # gross, -void, -other cost, -open, sales subtotal
+    assert total[1:6] == (200000, -30000, -50000, 0, 120000)
+
+
+def test_daily_report_export(client):
+    job = _start(client, dateFrom="2026-09-29", dateTo="2026-09-30", report="daily")
+    assert job["status"] == "done" and job["report"] == "daily"
+    assert job["fileName"] == "Daily_Sales_Recapitulation_2026-09-29_to_2026-09-30.xlsx"
+    wb = _workbook(client, job)
+    assert wb.sheetnames == ["Report", "Ringkasan"]
+    ws = wb["Report"]
+    assert ws["A1"].value == "Daily Sales Recapitulation Report" and ws["B8"].value == "Daily"
+    rows = list(ws.iter_rows(min_row=12, values_only=True))
+    assert rows[0][:6] == ("Sales Date", "Sales Type", "Branch", "Number of Bill", "Pax Total", "Subtotal")
+    assert [(r[0], r[2], r[3], r[5], r[16], r[18]) for r in rows[1:]] == [
+        (datetime(2026, 9, 29), "Kopi Calf Supratman Bandung", 1, 20000, 20000, 20000),
+        (datetime(2026, 9, 30), "Kopi Calf Supratman Bandung", 1, 100000, 90000, 90000),
+    ]
+
+
+def test_export_types_and_branch(client):
+    job = _start(client, dateFrom="2026-09-30", dateTo="2026-09-30", type="other_cost")
+    assert job["rows"] == 1 and job["fileName"].endswith("_other_cost.xlsx")
+    rows = _data_rows(_workbook(client, job)["Report"], 11)
+    assert rows[0][0] == "S-001" and rows[0][44] == "Kasir Pamulang"
+
+    job = _start(client, dateFrom="2026-09-30", dateTo="2026-09-30", branch="TGP17")
+    assert job["rows"] == 0  # TGP17 only has an other-cost sale
 
 
 def test_export_splits_into_multiple_sheets(client, monkeypatch):
-    monkeypatch.setattr(exports, "MAX_SHEET_ROWS", 2)
-    job = client.get(f"/api/exports/{_start(client, dateFrom='2026-09-29', dateTo='2026-09-30')['id']}").json()
+    monkeypatch.setattr(exports, "MAX_SHEET_ROWS", 12)  # 10 title rows -> 2 data rows on sheet 1
+    job = _start(client, dateFrom="2026-09-29", dateTo="2026-09-30")
     assert job["sheets"] == 2
     wb = _workbook(client, job)
-    assert wb.sheetnames == ["Summary", "Transactions", "Transactions (2)"]
-    assert [len(list(wb[n].iter_rows())) for n in wb.sheetnames[1:]] == [3, 3]  # header + 2 rows each
-
-
-def test_export_branch_filter_and_file_name(client):
-    job = client.get(f"/api/exports/{_start(client, dateFrom='2026-09-29', dateTo='2026-09-30', branch='Calf B')['id']}").json()
-    assert job["rows"] == 1 and job["headers"] == 1
-    assert job["fileName"] == "ESB_Sales_2026-09-29_to_2026-09-30_Calf_B.xlsx"
+    assert wb.sheetnames == ["Report", "Report (2)", "Ringkasan"]
+    assert len(_data_rows(wb["Report"], 11)) == 2
+    assert len(_data_rows(wb["Report (2)"], 1)) == 2
 
 
 def test_export_without_data_has_no_file(client):
-    job = client.get(f"/api/exports/{_start(client, dateFrom='2026-01-01', dateTo='2026-01-02')['id']}").json()
+    job = _start(client, dateFrom="2026-01-01", dateTo="2026-01-02")
     assert job["status"] == "done" and job["rows"] == 0
     assert job["fileName"] is None and job["downloadUrl"] is None
     assert client.get(f"/api/exports/{job['id']}/download").status_code == 409
@@ -77,8 +107,7 @@ def test_export_absolute_download_url(client, monkeypatch):
 
 
 def test_export_default_range_when_no_dates(client):
-    job = _start(client)
-    assert job["totalDays"] == get_settings().default_days + 1
+    assert _start(client)["totalDays"] == get_settings().default_days + 1
 
 
 def test_export_validation(client):
@@ -89,7 +118,7 @@ def test_export_validation(client):
 
 def test_export_failure_is_reported(client, fake_db):
     fake_db.fail = True
-    job = client.get(f"/api/exports/{_start(client, dateFrom='2026-09-30', dateTo='2026-09-30')['id']}").json()
+    job = _start(client, dateFrom="2026-09-30", dateTo="2026-09-30")
     assert job["status"] == "error" and "database is down" in job["error"]
     assert not exports.job_file(job["id"]).exists()
 

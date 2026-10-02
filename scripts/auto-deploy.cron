@@ -1,0 +1,6 @@
+# integrated_portal_be: deploy new commits on origin/main (checked every 5 minutes).
+# Installed as /etc/cron.d/integrated-portal-be-deploy
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+*/5 * * * * root flock -n /tmp/integrated-portal-be-deploy.lock bash /opt/integrated-portal-be/repo/scripts/auto-deploy.sh >> /var/log/integrated-portal-be-deploy.log 2>&1

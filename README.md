@@ -78,6 +78,10 @@ pytest -q
 
 ## Deploy ke VPS
 
+**Otomatis:** setiap push ke `main` di-deploy oleh VPS dalam ≤ 5 menit (`scripts/auto-deploy.sh`, dijalankan cron `/etc/cron.d/integrated-portal-be-deploy`): test → build → restart → cek `/health`, rollback otomatis bila gagal. Log: `/var/log/integrated-portal-be-deploy.log`.
+
+**Manual** (dari komputer lokal):
+
 ```bash
 bash scripts/deploy.sh
 ```

@@ -37,6 +37,8 @@ fi
 # keep the running image for rollback
 docker image inspect "$IMAGE:latest" >/dev/null 2>&1 && docker tag "$IMAGE:latest" "$IMAGE:previous"
 
+# replace app/ wholesale so files deleted in git disappear on the server too
+rm -rf "$APP_DIR/app"
 cp -r app requirements.txt Dockerfile docker-compose.yml .dockerignore .env.example "$APP_DIR"/
 cd "$APP_DIR"
 docker compose up -d --build

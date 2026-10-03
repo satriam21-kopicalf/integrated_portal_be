@@ -201,7 +201,7 @@ def _summary_rows(job: dict) -> list[list]:
 
     s = summarize(job["dateFrom"], job["dateTo"], job["branch"])
     header = ["Date", "Gross Subtotal", "Void & Cancelled", "Other Cost (CUPPING, WASTE, ...)",
-              "Open Bills", "Sales Subtotal (ESB)", "Sales Nett Sales", "Sales Transactions"]
+              "Open Bills", "Sales Subtotal", "Sales Nett Sales", "Sales Transactions"]
     rows = [["Ringkasan Penjualan"], ["Period", f"{job['dateFrom']} - {job['dateTo']}"],
             ["Branch", _branch_name(job["branch"])], [], header]
     for day in s["days"] + [{"date": "TOTAL", **s["totals"]}]:

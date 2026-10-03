@@ -190,6 +190,28 @@ def sales_rows(f: Filters, start: date, end: date, group: tuple[str, ...] = (), 
         f"SELECT {cols}{measures}{', ' + select if select else ''} FROM {table} WHERE {where}{group_by}", params)
 
 
+def day_rows(f: Filters, start: date, end: date, group: tuple[str, ...], tx_type: Optional[str] = None) -> list[dict]:
+    """Like sales_rows, plus `days` = number of sales dates with transactions in each group.
+
+    Pre-aggregates to branch x date x type first, so the day count is a plain
+    count(*) instead of a (much slower) count(DISTINCT sales_date).
+    """
+    where, params = f.where(start, end)
+    if tx_type:
+        where += " AND tx_type = %(tx_type)s"
+        params["tx_type"] = tx_type
+    group_by = ", ".join(str(i) for i in range(1, len(group) + 1))
+    return db.fetch(
+        f"""SELECT {', '.join(group)}, sum(bills)::int AS bills, sum(subtotal) AS subtotal, sum(nett) AS nett,
+                   count(*)::int AS days
+            FROM (SELECT branch_code, sales_date, tx_type, sum(bills) AS bills, sum(subtotal) AS subtotal,
+                         sum(nett_sales) AS nett
+                  FROM {DAILY} WHERE {where} GROUP BY 1, 2, 3) d
+            GROUP BY {group_by}""",
+        params,
+    )
+
+
 def prev_rows(f: Filters, group: tuple[str, ...] = (), select: str = "") -> list[dict]:
     """sales_rows of the comparison period, empty when it reaches before the complete history."""
     return sales_rows(f, f.prev_start, f.prev_end, group, select) if f.prev_complete else []
@@ -302,8 +324,7 @@ def build_channels(f: Filters, granularity: str) -> dict:
 
 
 def build_branches(f: Filters, granularity: str) -> dict:
-    by_type = sales_rows(f, f.start, f.end, ("branch_code", "tx_type"),
-                         "count(DISTINCT sales_date)::int AS days", tx_type=None)
+    by_type = day_rows(f, f.start, f.end, ("branch_code", "tx_type"))
     daily = sales_rows(f, f.start, f.end, ("branch_code", f"{bucket_sql(granularity)} AS sales_date"))
     prev = {r["branch_code"]: _f(r["subtotal"]) for r in prev_rows(f, ("branch_code",))}
     names = branch_names()
@@ -554,9 +575,7 @@ def build_monthly(f: Filters, months: int) -> dict:
     last = end.replace(day=1)
     first = _add_months(last, -(months - 1))
     scan_from = max(_add_months(first, -12), data_from.replace(day=1))
-    rows = sales_rows(Filters(scan_from, end, f.branch, f.channels), scan_from, end,
-                      ("date_trunc('month', sales_date)::date AS month", "branch_code"),
-                      "count(DISTINCT sales_date)::int AS days")
+    rows = day_rows(f, scan_from, end, ("date_trunc('month', sales_date)::date AS month", "branch_code"), "sales")
     per_month: dict[date, dict[str, dict]] = {}
     for r in rows:
         per_month.setdefault(r["month"], {})[r["branch_code"]] = r

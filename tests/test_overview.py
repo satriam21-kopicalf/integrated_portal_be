@@ -95,6 +95,8 @@ def fake_hourly_rows(f):
 def fake_aggregates(monkeypatch):
     ov._cache._data.clear()
     monkeypatch.setattr(ov, "sales_rows", fake_sales_rows)
+    monkeypatch.setattr(ov, "day_rows", lambda f, start, end, group, tx_type=None:
+                        fake_sales_rows(f, start, end, group, tx_type=tx_type))
     monkeypatch.setattr(ov, "menu_rows", lambda f: [dict(m) for m in MENUS])
     monkeypatch.setattr(ov, "hourly_rows", fake_hourly_rows)
     monkeypatch.setattr(ov, "branch_names", lambda: {"CCI01": "Kopi Calf Supratman", "TGP17": "Kopi Calf To Go Pamulang"})

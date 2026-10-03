@@ -4,7 +4,8 @@ Routes are plain `def` functions, so FastAPI runs them in its threadpool and
 the synchronous pool is safe to use. This also avoids psycopg's async
 limitations with the Windows ProactorEventLoop during local development.
 """
-from typing import Any, Optional
+from contextlib import contextmanager
+from typing import Any, Iterator, Optional
 
 from psycopg import Connection
 from psycopg.conninfo import make_conninfo
@@ -49,7 +50,7 @@ def _configure(conn: Connection) -> None:
     conn.execute(f"SET statement_timeout = {int(timeout)}")
 
 
-def open_pool() -> None:
+def open_pool(wait: bool = False) -> None:
     global _pool
     if _pool is not None:
         return
@@ -72,8 +73,9 @@ def open_pool() -> None:
         configure=_configure,
         open=False,
     )
-    # Don't block startup if the DB is temporarily unreachable; /health reports it.
-    _pool.open(wait=False)
+    # The API doesn't block startup if the DB is temporarily unreachable (/health
+    # reports it); CLI jobs pass wait=True.
+    _pool.open(wait=wait)
 
 
 def close_pool() -> None:
@@ -81,6 +83,18 @@ def close_pool() -> None:
     if _pool is not None:
         _pool.close(timeout=5)
         _pool = None
+
+
+@contextmanager
+def transaction(timeout_ms: Optional[int] = None) -> Iterator[Connection]:
+    """A pooled connection inside one transaction (commit on success, rollback on error)."""
+    if _pool is None:
+        open_pool()
+    with _pool.connection() as conn:
+        with conn.transaction():
+            if timeout_ms:
+                conn.execute(f"SET LOCAL statement_timeout = {int(timeout_ms)}")
+            yield conn
 
 
 def fetch(query: str, params: Any = None) -> list[dict]:

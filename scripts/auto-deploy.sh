@@ -4,7 +4,9 @@
 # Every run: fetch origin/main; when it moved since the last successful deploy,
 # run the tests in a throwaway container, build the image, restart the service
 # and wait for /health. If the new container is unhealthy, the previous image
-# is restored. No secrets are needed in GitHub; the server .env is never touched.
+# is restored. A healthy deploy then applies pending integration_portal
+# migrations (app/migrations) and (re)installs the aggregates cron.
+# No secrets are needed in GitHub; the server .env is never touched.
 #
 # Install (once, on the VPS):
 #   git clone https://github.com/satriam21-kopicalf/integrated_portal_be.git /opt/integrated-portal-be/repo
@@ -45,6 +47,12 @@ docker compose up -d --build
 
 for _ in $(seq 1 30); do
   if curl -fsS http://127.0.0.1:8002/health >/dev/null 2>&1; then
+    # integration_portal schema changes (additive, idempotent)
+    if ! docker exec integrated-portal-be python -m app.migrate; then
+      log "migration failed - fix and push again (app stays on ${target:0:7})"
+      exit 1
+    fi
+    install -m 644 "$REPO_DIR/scripts/aggregates.cron" /etc/cron.d/integrated-portal-aggregates
     echo "$target" > "$STATE_FILE"
     docker image prune -f >/dev/null
     log "deployed ${target:0:7} - healthy"

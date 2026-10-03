@@ -1,7 +1,8 @@
 # Integrated Portal Backend (integrated_portal_be)
 
 Backend API (Python FastAPI) untuk [integrated_portal](https://github.com/satriam21-kopicalf/integrated_portal).
-Menyajikan data transaksi POS ESB dari Supabase PostgreSQL (schema `integration_esb`).
+Menyajikan data transaksi POS ESB dari Supabase PostgreSQL (schema `integration_esb`, milik engine ESB — hanya dibaca).
+Tabel milik portal sendiri (agregat Overview, nantinya juga akun user) ada di schema **`integration_portal`**.
 
 ```
 Browser ──> Next.js (Vercel) ──/api/* rewrite──> integrated_portal_be (VPS :8002) ──> Supabase PostgreSQL
@@ -21,6 +22,17 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | POST | `/api/exports` | Mulai job export. Body: `{"dateFrom","dateTo","branch","type","report"}` → 202 + `id` |
 | GET | `/api/exports/{id}` | Status job: `status`, `daysDone/totalDays`, `rows`, `sheets`, `fileSize`, `downloadUrl` |
 | GET | `/api/exports/{id}/download` | Unduh `.xlsx` (tersedia `EXPORT_TTL_HOURS`, default 24 jam) |
+| GET | `/api/overview/meta` | Opsi filter channel, periode default, cakupan & kesegaran data |
+| GET | `/api/overview/kpis` | Sales, Nett Sales, Bills, Avg Ticket + Δ% vs periode sebelumnya + nilai harian |
+| GET | `/api/overview/trend` | Seri Sales per `granularity` (`day`/`week`/`month`, default otomatis) + periode sebelumnya |
+| GET | `/api/overview/channels` | Per channel: bills, sales, share, avg ticket, diskon %, growth + mix per periode |
+| GET | `/api/overview/branches` | Leaderboard cabang: sales, bills, avg ticket, growth, void rate, sparkline |
+| GET | `/api/overview/hourly` | Hari-dalam-minggu × jam: rata-rata bills & sales per hari |
+| GET | `/api/overview/menus` | Top menu (`limit`, `sort=subtotal\|qty`), mix kategori, preferensi add-on |
+| GET | `/api/overview/deductions` | Void/Cancelled, Other Cost per metode, open bill; per hari & cabang (status `review` > P90) |
+| GET | `/api/overview/monthly` | Sales bulanan (`months`, default 13): MoM, YoY, same-store growth |
+| GET | `/api/overview/payments` | Mix metode pembayaran |
+| GET | `/api/overview/basket` | Baris menu & qty per bill, food share, food attach rate |
 
 Tanpa `dateFrom`/`dateTo`, rentang default adalah 65 hari terakhir (Asia/Jakarta). Dokumentasi interaktif: `http://187.52.114.14:8002/docs`.
 
@@ -46,6 +58,24 @@ Validasi (Sep 2026): Subtotal Sales per hari = ERP ESB 30/30 hari; export Sales 
 - Tanpa batas rentang: data dibaca per hari dan ditulis streaming (`app/xlsx_stream.py`); > 1.048.575 baris otomatis lanjut ke sheet `Report (2)`, dst.
 - Acuan di VPS: detail 1 hari ≈ 65 rb baris ≈ 9 dtk, 1 bulan ≈ 1,9 jt baris ≈ 5 menit; daily 1 bulan ≈ 40 dtk.
 
+### Overview (schema `integration_portal`)
+
+Endpoint `/api/overview/*` menerima `dateFrom`, `dateTo` (default 30 hari lengkap s/d kemarin), `branch` (kode) dan `channel` (dipisah koma). Periode pembanding = jumlah hari yang sama tepat sebelum `dateFrom`; bila menjangkau sebelum `OVERVIEW_DATA_FROM` (2025-08-01, roll-out ESB baru lengkap di seluruh cabang akhir Juli 2025) pembanding dikosongkan (`deltaPct: null`). Angka = ESB "Sales", sehingga total sama dengan `/api/summary` dan laporan ESB. Respons di-cache 5 menit.
+
+Data dibaca dari tabel agregat (bukan `raw_data`), dibangun ulang per tanggal oleh `app/aggregates.py`:
+
+| Tabel | Grain |
+|---|---|
+| `agg_sales_daily` | tanggal × cabang × channel × metode bayar × `tx_type` (bills, subtotal, nett, diskon, basket) |
+| `agg_sales_hourly` | tanggal × cabang × channel × jam (`salesDateIn`), hanya Sales |
+| `agg_menu_daily` / `agg_menu_monthly` | tanggal/bulan × cabang × channel × menu × `kind` (menu/package/extra) |
+| `agg_refresh_log` | 1 baris per tanggal: waktu refresh, `synced_at` sumber, rekonsiliasi subtotal |
+
+- **Migration**: file bernomor di `app/migrations/*.sql`, dijalankan otomatis setelah deploy (`python -m app.migrate`, riwayat di `integration_portal.schema_migrations`).
+- **Refresh**: cron `scripts/aggregates.cron` (dipasang otomatis ke `/etc/cron.d/integrated-portal-aggregates`) — tiap jam menit :20 (hari ini + kemarin, setelah sinkron ESB menit :05) dan 02:50 WIB (8 hari, setelah resync 7 hari). Log: `/var/log/integrated-portal-aggregates.log`.
+- Setiap tanggal di-rebuild dalam satu transaksi lalu direkonsiliasi: Σ subtotal Sales agregat harus sama dengan `transactions_pos_sales`.
+- **Backfill / rebuild manual** di VPS: `bash /opt/integrated-portal-be/repo/scripts/aggregates.sh --from 2025-06-09 --to 2026-10-03` (≈ 2 dtk per hari).
+
 ## Konfigurasi
 
 Lihat [.env.example](.env.example). Kredensial database sama dengan yang dipakai engine ESB di VPS (`/opt/esb-integration/.env`).
@@ -60,6 +90,7 @@ Lihat [.env.example](.env.example). Kredensial database sama dengan yang dipakai
 | `EXPORT_TTL_HOURS` | 24 | Lama file export disimpan |
 | `EXPORT_MAX_CONCURRENT` | 2 | Job export bersamaan per worker |
 | `TIMEZONE` | `Asia/Jakarta` | Untuk rentang tanggal default |
+| `OVERVIEW_DATA_FROM` | `2025-08-01` | Awal riwayat lengkap untuk perbandingan Overview |
 
 ## Development
 
@@ -78,7 +109,7 @@ pytest -q
 
 ## Deploy ke VPS
 
-**Otomatis:** setiap push ke `main` di-deploy oleh VPS dalam ≤ 5 menit (`scripts/auto-deploy.sh`, dijalankan cron `/etc/cron.d/integrated-portal-be-deploy`): test → build → restart → cek `/health`, rollback otomatis bila gagal. Log: `/var/log/integrated-portal-be-deploy.log`.
+**Otomatis:** setiap push ke `main` di-deploy oleh VPS dalam ≤ 5 menit (`scripts/auto-deploy.sh`, dijalankan cron `/etc/cron.d/integrated-portal-be-deploy`): test → build → restart → cek `/health` (rollback otomatis bila gagal) → migration `integration_portal` → pasang cron agregat. Log: `/var/log/integrated-portal-be-deploy.log`.
 
 **Manual** (dari komputer lokal):
 

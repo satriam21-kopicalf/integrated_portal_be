@@ -38,7 +38,11 @@ docker image prune -f >/dev/null
 
 echo "==> Waiting for health check"
 for i in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1:8002/health; then echo; exit 0; fi
+  if curl -fsS http://127.0.0.1:8002/health; then
+    echo
+    docker exec integrated-portal-be python -m app.migrate
+    exit 0
+  fi
   sleep 2
 done
 echo "Health check failed" >&2

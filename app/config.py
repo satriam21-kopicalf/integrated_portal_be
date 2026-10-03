@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     default_days: int = 65
     transactions_cache_ttl: int = 60
     branches_cache_ttl: int = 300
+    # Overview: first date of complete history (ESB roll-out reached all branches end of July 2025)
+    overview_data_from: str = "2025-08-01"
 
     # Excel export jobs
     export_dir: str = os.path.join(tempfile.gettempdir(), "portal-exports")

@@ -33,6 +33,7 @@ DAILY = f"{PORTAL}.agg_sales_daily"
 HOURLY = f"{PORTAL}.agg_sales_hourly"
 MENU = f"{PORTAL}.agg_menu_daily"
 MENU_MONTHLY = f"{PORTAL}.agg_menu_monthly"
+HOURLY_MONTHLY = f"{PORTAL}.agg_hourly_monthly"
 REFRESH_LOG = f"{PORTAL}.agg_refresh_log"
 DEFAULT_DAYS = 30
 MAX_DAYS = 3 * 366
@@ -155,6 +156,11 @@ def bucket_of(day: date, granularity: str) -> date:
     if granularity == "month":
         return day.replace(day=1)
     return day
+
+
+def bucket_sql(granularity: str) -> str:
+    """SQL equivalent of bucket_of (ISO weeks start on Monday)."""
+    return "sales_date" if granularity == "day" else f"date_trunc('{granularity}', sales_date)::date"
 
 
 def buckets(f: Filters, granularity: str) -> list[dict]:
@@ -298,7 +304,7 @@ def build_channels(f: Filters, granularity: str) -> dict:
 def build_branches(f: Filters, granularity: str) -> dict:
     by_type = sales_rows(f, f.start, f.end, ("branch_code", "tx_type"),
                          "count(DISTINCT sales_date)::int AS days", tx_type=None)
-    daily = sales_rows(f, f.start, f.end, ("branch_code", "sales_date"))
+    daily = sales_rows(f, f.start, f.end, ("branch_code", f"{bucket_sql(granularity)} AS sales_date"))
     prev = {r["branch_code"]: _f(r["subtotal"]) for r in prev_rows(f, ("branch_code",))}
     names = branch_names()
     marks = [b["date"] for b in buckets(f, granularity)]
@@ -350,9 +356,16 @@ def _period_days_per_dow(f: Filters, data_from: Optional[date], data_to: Optiona
     return counts
 
 
+def hourly_rows(f: Filters) -> list[dict]:
+    """Bills and sales per ISO weekday x hour over the period."""
+    src, params = rollup_source(f, HOURLY_MONTHLY, HOURLY, "dow, hour, bills, subtotal",
+                                "extract(isodow FROM sales_date)::smallint, hour, bills, subtotal")
+    return db.fetch(f"SELECT dow::int AS dow, hour, sum(bills)::int AS bills, sum(subtotal) AS subtotal "
+                    f"FROM ({src}) s GROUP BY 1, 2", params)
+
+
 def build_hourly(f: Filters) -> dict:
-    rows = sales_rows(f, f.start, f.end, ("extract(isodow FROM sales_date)::int AS dow", "hour"),
-                      table=HOURLY, tx_type=None)
+    rows = hourly_rows(f)
     fresh = freshness()
     data_from = date.fromisoformat(fresh["dataFrom"]) if fresh["dataFrom"] else None
     data_to = date.fromisoformat(fresh["dataTo"]) if fresh["dataTo"] else None
@@ -380,20 +393,27 @@ def full_months(start: date, end: date) -> tuple[date, date]:
     return (first, stop) if first < stop else (date.max, date.max)
 
 
-def menu_rows(f: Filters) -> list[dict]:
-    """Per menu and kind over the period: full months from agg_menu_monthly, edge days from agg_menu_daily."""
+def rollup_source(f: Filters, monthly: str, daily: str, monthly_cols: str, daily_cols: str) -> tuple[str, dict]:
+    """SQL union over the period: full months from the monthly rollup, edge days from the daily table."""
     dims, params = f.dims()
     first, stop = full_months(f.start, f.end)
     params.update(start=f.start, end=f.end, first=first, stop=stop)
     cond = "".join(f" AND {d}" for d in dims)
+    return (
+        f"""SELECT {monthly_cols} FROM {monthly} WHERE month >= %(first)s AND month < %(stop)s{cond}
+            UNION ALL
+            SELECT {daily_cols} FROM {daily} WHERE sales_date BETWEEN %(start)s AND %(end)s
+                AND NOT (sales_date >= %(first)s AND sales_date < %(stop)s){cond}""",
+        params,
+    )
+
+
+def menu_rows(f: Filters) -> list[dict]:
+    """Per menu and kind over the period."""
     cols = "menu_id, kind, menu_name, category, category_detail, bills, qty, subtotal, discount"
+    src, params = rollup_source(f, MENU_MONTHLY, MENU, cols, cols)
     return db.fetch(
-        f"""WITH src AS (
-                SELECT {cols} FROM {MENU_MONTHLY} WHERE month >= %(first)s AND month < %(stop)s{cond}
-                UNION ALL
-                SELECT {cols} FROM {MENU} WHERE sales_date BETWEEN %(start)s AND %(end)s
-                    AND NOT (sales_date >= %(first)s AND sales_date < %(stop)s){cond}
-            ), t AS (
+        f"""WITH src AS ({src}), t AS (
                 SELECT menu_id, kind, max(menu_name) AS name, max(category) AS category,
                        max(category_detail) AS category_detail, sum(bills)::int AS bills,
                        sum(qty) AS qty, sum(subtotal) AS subtotal, sum(discount) AS discount

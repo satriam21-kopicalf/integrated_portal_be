@@ -29,6 +29,13 @@ current=$(cat "$STATE_FILE" 2>/dev/null || true)
 log "deploying ${current:0:7} -> ${target:0:7}: $(git log -1 --format=%s "$target")"
 git reset -q --hard "$target"
 
+# bash keeps executing the file it started with; re-run the version being
+# deployed so changes to these deploy steps apply to their own deploy.
+if [ "${AUTO_DEPLOY_REEXEC:-}" != "$target" ]; then
+  export AUTO_DEPLOY_REEXEC="$target"
+  exec bash "$REPO_DIR/scripts/auto-deploy.sh"
+fi
+
 log "running tests"
 if ! docker run --rm -v "$REPO_DIR":/src:ro -w /src python:3.12-slim \
     sh -c "cp -r /src /tmp/app && cd /tmp/app && pip install -q -r requirements-dev.txt >/dev/null && pytest -q" ; then

@@ -44,19 +44,24 @@ MENUS = [
     {"menu_id": "137", "kind": "extra", "menu_name": "Less Sugar", "category": "EXTRA",
      "category_detail": "LEVEL SUGAR", "bills": 1, "qty": 1, "subtotal": 0, "discount": 0},
 ]
-GROUP_KEYS = {
-    "extract(isodow FROM sales_date)::int AS dow": ("dow", lambda r: r["sales_date"].isoweekday()),
-    "date_trunc('month', sales_date)::date AS month": ("month", lambda r: r["sales_date"].replace(day=1)),
+EXPRESSIONS = {
+    "date_trunc('month', sales_date)::date": lambda r: r["sales_date"].replace(day=1),
+    "date_trunc('week', sales_date)::date": lambda r: ov.bucket_of(r["sales_date"], "week"),
 }
 
 
+def group_key(g):
+    expr, _, alias = g.partition(" AS ")
+    name = alias or expr
+    return name, EXPRESSIONS.get(expr, lambda r, c=expr: r[c])
+
+
 def fake_sales_rows(f, start, end, group=(), select="", table=ov.DAILY, tx_type="sales"):
-    source = HOURLY if table == ov.HOURLY else DAILY
-    rows = [r for r in source if start <= r["sales_date"] <= end
+    rows = [r for r in DAILY if start <= r["sales_date"] <= end
             and (not f.branch or r["branch_code"] == f.branch)
             and (not f.channels or r["channel"] in f.channels)
-            and (not tx_type or table == ov.HOURLY or r["tx_type"] == tx_type)]
-    keys = [GROUP_KEYS.get(g, (g, lambda r, g=g: r[g])) for g in group]
+            and (not tx_type or r["tx_type"] == tx_type)]
+    keys = [group_key(g) for g in group]
     out: dict[tuple, dict] = {}
     days = defaultdict(set)
     for r in rows:
@@ -75,11 +80,23 @@ def fake_sales_rows(f, start, end, group=(), select="", table=ov.DAILY, tx_type=
     return list(out.values())
 
 
+def fake_hourly_rows(f):
+    out = {}
+    for r in HOURLY:
+        if f.start <= r["sales_date"] <= f.end and (not f.branch or r["branch_code"] == f.branch)                 and (not f.channels or r["channel"] in f.channels):
+            o = out.setdefault((r["sales_date"].isoweekday(), r["hour"]),
+                               {"dow": r["sales_date"].isoweekday(), "hour": r["hour"], "bills": 0, "subtotal": 0})
+            o["bills"] += r["bills"]
+            o["subtotal"] += r["subtotal"]
+    return list(out.values())
+
+
 @pytest.fixture(autouse=True)
 def fake_aggregates(monkeypatch):
     ov._cache._data.clear()
     monkeypatch.setattr(ov, "sales_rows", fake_sales_rows)
     monkeypatch.setattr(ov, "menu_rows", lambda f: [dict(m) for m in MENUS])
+    monkeypatch.setattr(ov, "hourly_rows", fake_hourly_rows)
     monkeypatch.setattr(ov, "branch_names", lambda: {"CCI01": "Kopi Calf Supratman", "TGP17": "Kopi Calf To Go Pamulang"})
     monkeypatch.setattr(ov, "freshness", lambda: {"dataFrom": "2026-08-01", "dataTo": "2026-09-02",
                                                   "lastSyncedAt": "2026-09-02T10:05:00+00:00",
@@ -204,9 +221,16 @@ def delta(cur, prev):
     return round((cur - prev) / prev * 100, 2)
 
 
+def test_branch_spark_weekly_buckets(client):
+    body = client.get(f"/api/overview/branches?{Q}&granularity=week").json()
+    assert body["buckets"] == ["2026-08-31"]
+    assert {b["branchCode"]: b["spark"] for b in body["branches"]}["CCI01"] == [2_000_000]
+
+
 def test_helpers():
     assert ov.full_months(date(2026, 8, 15), date(2026, 10, 31)) == (date(2026, 9, 1), date(2026, 11, 1))
     assert ov.full_months(date(2026, 9, 2), date(2026, 9, 20)) == (date.max, date.max)
     assert ov.auto_granularity(30) == "day" and ov.auto_granularity(120) == "week" and ov.auto_granularity(400) == "month"
     assert ov.bucket_of(date(2026, 9, 3), "week") == date(2026, 8, 31)
+    assert ov.bucket_sql("day") == "sales_date" and "week" in ov.bucket_sql("week")
     assert ov._p90([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) == pytest.approx(9.0)

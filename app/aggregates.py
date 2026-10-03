@@ -6,7 +6,7 @@
 
 Each sales date is rebuilt in one transaction (delete + insert), so a run is
 idempotent and readers never see a half-built day. Afterwards every month
-touched is rolled up again into agg_menu_monthly. The ESB engine updates at
+touched is rolled up again into agg_menu_monthly and agg_hourly_monthly. The ESB engine updates at
 most the last 7 days (hourly: today + yesterday, nightly: 7 days), which is
 what the cron jobs in scripts/aggregates.cron refresh.
 
@@ -124,6 +124,14 @@ FROM {PORTAL}.agg_menu_daily
 WHERE sales_date >= %(month)s::date AND sales_date < (%(month)s::date + interval '1 month')::date
 GROUP BY branch_code, channel, menu_id, kind
 """,
+    f"DELETE FROM {PORTAL}.agg_hourly_monthly WHERE month = %(month)s",
+    f"""
+INSERT INTO {PORTAL}.agg_hourly_monthly
+SELECT %(month)s::date, branch_code, channel, extract(isodow FROM sales_date)::smallint, hour, sum(bills), sum(subtotal)
+FROM {PORTAL}.agg_sales_hourly
+WHERE sales_date >= %(month)s::date AND sales_date < (%(month)s::date + interval '1 month')::date
+GROUP BY 2, 3, 4, 5
+""",
 ]
 
 SQL_LOG = f"""
@@ -161,13 +169,13 @@ def refresh_day(day: date) -> dict:
 
 
 def refresh_month(month: date) -> None:
-    """Roll agg_menu_daily of one calendar month up into agg_menu_monthly."""
+    """Roll one calendar month up into agg_menu_monthly and agg_hourly_monthly."""
     t0 = time.monotonic()
     params = {"month": month.replace(day=1).isoformat()}
     with db.transaction(timeout_ms=DAY_TIMEOUT_MS) as conn:
         for sql in SQL_MONTH:
             conn.execute(sql, params)
-    logger.info("%s monthly menu rollup (%sms)", params["month"][:7], int((time.monotonic() - t0) * 1000))
+    logger.info("%s monthly rollups (%sms)", params["month"][:7], int((time.monotonic() - t0) * 1000))
 
 
 def months_between(start: date, end: date) -> list[date]:

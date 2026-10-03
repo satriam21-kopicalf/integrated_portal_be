@@ -33,6 +33,7 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | GET | `/api/overview/monthly` | Sales bulanan (`months`, default 13): MoM, YoY, same-store growth |
 | GET | `/api/overview/payments` | Mix metode pembayaran |
 | GET | `/api/overview/basket` | Baris menu & qty per bill, food share, food attach rate |
+| GET | `/api/live` | Penjualan hari ini (vs kemarin di jam yang sama, per jam) + transaksi Sales terbaru yang masuk (`limit`, `branch`, `channel`); langsung dari `transactions_pos_sales`, cache 20 dtk |
 
 Tanpa `dateFrom`/`dateTo`, rentang default adalah 65 hari terakhir (Asia/Jakarta). Dokumentasi interaktif: `http://187.52.114.14:8002/docs`.
 

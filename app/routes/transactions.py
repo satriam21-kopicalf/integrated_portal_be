@@ -20,7 +20,7 @@ from app import database as db
 from app.config import get_settings
 from app.database import HEADER_COLUMNS, ITEM_COLUMNS, TABLE_ITEMS, TABLE_TRANSACTIONS
 from app.esb_report import REPORT_HEADERS, TYPE_CASE_SQL, TYPE_CONDITIONS, load_masters, report_rows
-from app.utils import TTLCache, escape_like, jsonable, resolve_date_range, to_json_value, today
+from app.utils import TTLCache, data_version, escape_like, jsonable, resolve_date_range, to_json_value, today
 
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
 summary_router = APIRouter(prefix="/api/summary", tags=["summary"])
@@ -127,7 +127,7 @@ def list_transactions(
     tx_type = resolve_type(type)
     date_from, date_to = resolve_date_range(dateFrom, dateTo)
 
-    cache_key = f"transactions:{tx_type}:{date_from}:{date_to}:{limit}"
+    cache_key = f"transactions:{tx_type}:{date_from}:{date_to}:{limit}:{data_version.get()}"
     cacheable = cache != "false" and not cursor and not search and not branch
     if cacheable:
         cached = _cache.get(cache_key)
@@ -297,7 +297,7 @@ def summarize(date_from: str, date_to: str, branch: Optional[str]) -> dict:
 def get_summary(dateFrom: Optional[str] = None, dateTo: Optional[str] = None, branch: Optional[str] = None):
     """Gross - Void/Cancelled - Other Cost (CUPPING, WASTE, ...) - open bills = Sales (ESB report)."""
     date_from, date_to = resolve_date_range(dateFrom, dateTo)
-    key = f"summary:{date_from}:{date_to}:{branch}"
+    key = f"summary:{date_from}:{date_to}:{branch}:{data_version.get()}"
     cached = _cache.get(key)
     if cached is None:
         cached = summarize(date_from, date_to, branch)

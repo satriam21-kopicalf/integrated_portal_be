@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse
 from app import database as db
 from app.config import get_settings
 from app.database import SCHEMA
-from app.utils import TTLCache, today
+from app.utils import TTLCache, data_version, today
 
 router = APIRouter(prefix="/api/overview", tags=["overview"])
 
@@ -245,7 +245,7 @@ def freshness() -> dict:
 
 
 def respond(name: str, f: Optional[Filters], extra: str, build: Callable[[], dict]) -> JSONResponse:
-    key = f"{name}:{f.key() if f else ''}:{extra}"
+    key = f"{name}:{f.key() if f else ''}:{extra}:{data_version.get()}"
     body = _cache.get(key)
     if body is None:
         body = build()

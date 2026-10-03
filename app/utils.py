@@ -1,5 +1,6 @@
 """Small helpers shared by the routes."""
 import time
+from contextvars import ContextVar
 from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 from decimal import Decimal
@@ -8,6 +9,12 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from app.config import get_settings
+
+
+# Data version the browser saw over the WebSocket (query parameter "v"). It is part
+# of every response-cache key, so a fetch triggered by an update never gets a
+# response cached before that update. Set per request by middleware in app/main.py.
+data_version: ContextVar[str] = ContextVar("data_version", default="")
 
 
 def today() -> date:

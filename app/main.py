@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from app import database as db
 from app.config import get_settings
+from app.utils import data_version
 from app.routes import (branches_router, exports_router, live_router, overview_router, realtime_router, summary_router,
                         transactions_router)
 
@@ -54,6 +55,15 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def remember_data_version(request: Request, call_next):
+    token = data_version.set(request.query_params.get("v", "")[:80])
+    try:
+        return await call_next(request)
+    finally:
+        data_version.reset(token)
+
 
 app.include_router(transactions_router)
 app.include_router(summary_router)

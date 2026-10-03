@@ -46,3 +46,16 @@ def test_origin_patterns():
 def test_http_fallback(client, stamps):
     body = client.get("/api/realtime/version").json()
     assert body["aggregatesRefreshedAt"] == STATE["aggregatesRefreshedAt"] and "version" in body
+
+
+def test_data_version_is_part_of_the_cache_key(client, monkeypatch):
+    from app.routes import overview as ov
+    calls = []
+    monkeypatch.setattr(ov, "build_payments", lambda f: calls.append(1) or {"methods": [], "types": []})
+    ov._cache._data.clear()
+    q = "/api/overview/payments?dateFrom=2026-09-01&dateTo=2026-09-02"
+    client.get(q + "&v=a")
+    client.get(q + "&v=a")
+    assert len(calls) == 1  # same version: cached
+    client.get(q + "&v=b")
+    assert len(calls) == 2  # new data version: rebuilt

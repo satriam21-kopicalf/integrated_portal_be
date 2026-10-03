@@ -17,7 +17,7 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | GET | `/health` | Status service + koneksi database |
 | GET | `/api/transactions` | Baris laporan ESB per item, cursor pagination. Query: `limit` (≤100), `cursor`, `search`, `dateFrom`, `dateTo`, `branch` (kode cabang), `type`, `cache=false` |
 | GET | `/api/transactions/{sales_num}` | Detail satu transaksi (`items` + `report_rows`) |
-| GET | `/api/summary` | Gross − Void/Cancelled − Other Cost − Open bill = Sales (per hari & total). Query: `dateFrom`, `dateTo`, `branch` |
+| GET | `/api/summary` | Gross − Void/Cancelled − Other Cost − Open bill = Sales (per hari & total). Query: `dateFrom`, `dateTo`, `branch`. Hari sebelum kemarin dari agregat harian (1 tahun < 1 dtk) |
 | GET | `/api/branches` | Master cabang (nama terkini) + jumlah transaksi Sales 65 hari terakhir |
 | POST | `/api/exports` | Mulai job export. Body: `{"dateFrom","dateTo","branch","type","report"}` → 202 + `id` |
 | GET | `/api/exports/{id}` | Status job: `status`, `daysDone/totalDays`, `rows`, `sheets`, `fileSize`, `downloadUrl` |
@@ -30,12 +30,17 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | GET | `/api/overview/hourly` | Hari-dalam-minggu × jam: rata-rata bills & sales per hari |
 | GET | `/api/overview/menus` | Top menu (`limit`, `sort=subtotal\|qty`), mix kategori, preferensi add-on |
 | GET | `/api/overview/deductions` | Void/Cancelled, Other Cost per metode, open bill; per hari & cabang (status `review` > P90) |
-| GET | `/api/overview/monthly` | Sales bulanan (`months`, default 13): MoM, YoY, same-store growth |
+| GET | `/api/overview/monthly` | Bulan-bulan dalam periode terpilih: rata-rata per hari, MoM, YoY, same-store growth |
 | GET | `/api/overview/payments` | Mix metode pembayaran |
 | GET | `/api/overview/basket` | Baris menu & qty per bill, food share, food attach rate |
+| WS | `/ws` | Realtime: pesan `hello`/`update` saat data baru tersinkron atau agregat diperbarui, `ping` tiap 25 dtk (lihat [docs/README.md](docs/README.md#5-realtime-websocket)) |
+| GET | `/api/realtime/version` | Versi data yang sama via HTTP (fallback bila WebSocket putus) |
 | GET | `/api/live` | Penjualan hari ini (vs kemarin di jam yang sama, per jam) + transaksi Sales terbaru yang masuk (`limit`, `branch`, `channel`); langsung dari `transactions_pos_sales`, cache 20 dtk |
 
-Tanpa `dateFrom`/`dateTo`, rentang default adalah 65 hari terakhir (Asia/Jakarta). Dokumentasi interaktif: `http://187.52.114.14:8002/docs`.
+Tanpa `dateFrom`/`dateTo`, rentang default adalah 65 hari terakhir (Asia/Jakarta). Dokumentasi interaktif: `https://api.kopicalf.co.id/docs`.
+Semua endpoint menerima parameter opsional `v` (versi data dari WebSocket) yang ikut menjadi kunci cache respons.
+
+Dokumentasi lengkap (arsitektur, aturan data, realtime, operasional): [docs/README.md](docs/README.md).
 
 ### Aturan data (identik dengan ESB ERP)
 
@@ -99,6 +104,7 @@ Lihat [.env.example](.env.example). Kredensial database sama dengan yang dipakai
 | `DB_USER` / `DB_PASSWORD` | - | Wajib |
 | `DB_POOL_MAX` | 5 | Koneksi maksimal per worker (container menjalankan 2 worker) |
 | `CORS_ORIGINS` | `*` | Hanya relevan jika browser memanggil backend langsung |
+| `WS_ALLOWED_ORIGINS` | portal, preview Vercel, localhost:3002 | Origin yang boleh membuka WebSocket `/ws` |
 | `PUBLIC_BASE_URL` | kosong | Basis URL absolut untuk link unduhan export |
 | `EXPORT_TTL_HOURS` | 24 | Lama file export disimpan |
 | `EXPORT_MAX_CONCURRENT` | 2 | Job export bersamaan (seluruh container) |

@@ -8,6 +8,8 @@ dashboard (Report > Sales Recapitulation Detail Report, Sales Type "Sales"):
   which never get a bill number);
 * one row per ordered menu, followed by its packages "(PACKAGE)" and extras
   "(EXTRA)"; package/extra categories come from the POS menu master;
+* menu lines cancelled on the bill ("Print Cancelled") are left out, like ESB
+  does (the sale's subtotal never includes them);
 * the bill-level discount is spread over the rows proportionally to each row's
   Subtotal;
 * Branch/Brand/City/Area come from the branch master (by branch code, so renamed
@@ -61,6 +63,17 @@ TYPE_CASE_SQL = (
     "WHEN h.status IN ('Void', 'Cancelled') THEN 'void' "
     "WHEN h.status = 'Finished' THEN 'other_cost' ELSE 'open' END"
 )
+
+def is_cancelled_line(menu: dict) -> bool:
+    """A menu line cancelled after ordering (status "Print Cancelled", id 19)."""
+    return str(menu.get("statusID") or "") == "19" or "cancel" in str(menu.get("statusName") or "").lower()
+
+
+def active_line_sql(alias: str) -> str:
+    """SQL twin of `not is_cancelled_line` for a salesMenus element (% escaped for psycopg params)."""
+    return (f"(COALESCE({alias}->>'statusID', '') <> '19' "
+            f"AND COALESCE({alias}->>'statusName', '') NOT ILIKE '%%cancel%%')")
+
 
 _MASTER_TTL = 600
 _master_lock = Lock()
@@ -152,6 +165,8 @@ def report_rows(header: dict, menus: dict, branches: dict, users: dict) -> list[
     """All report rows for one sale (raw_data of transactions_pos_sales)."""
     lines = []
     for menu in header.get("salesMenus") or []:
+        if is_cancelled_line(menu):
+            continue
         lines.append(("", menu, menu))
         lines.extend((" (PACKAGE)", p, menu) for p in menu.get("packages") or [])
         lines.extend((" (EXTRA)", e, menu) for e in menu.get("extras") or [])

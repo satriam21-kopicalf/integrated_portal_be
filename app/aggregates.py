@@ -20,7 +20,7 @@ from datetime import date, timedelta
 
 from app import database as db
 from app.database import SCHEMA, TABLE_TRANSACTIONS
-from app.esb_report import TYPE_CASE_SQL, TYPE_CONDITIONS
+from app.esb_report import TYPE_CASE_SQL, TYPE_CONDITIONS, active_line_sql
 from app.utils import today
 
 logger = logging.getLogger("aggregates")
@@ -61,6 +61,7 @@ WITH bill AS (
                bool_or(x->>'menuCategoryName' = 'BEVERAGE') AS has_bev,
                bool_or(x->>'menuCategoryName' = 'FOOD') AS has_food
         FROM jsonb_array_elements(COALESCE(h.raw_data->'salesMenus', '[]'::jsonb)) x
+        WHERE {active_line_sql('x')}
     ) m
     WHERE {DAY_FILTER}
 )
@@ -94,7 +95,7 @@ WITH line AS (
            {_num("m->>'qty'")} AS qty, {_num("m->>'price'")} * {_num("m->>'qty'")} AS subtotal,
            {_num("m->>'discountValue'")} AS discount
     FROM {TABLE_TRANSACTIONS} h, jsonb_array_elements(COALESCE(h.raw_data->'salesMenus', '[]'::jsonb)) m
-    WHERE {DAY_FILTER} AND {TYPE_CONDITIONS['sales']}
+    WHERE {DAY_FILTER} AND {TYPE_CONDITIONS['sales']} AND {active_line_sql('m')}
     UNION ALL
     SELECT h.sales_num, h.branch_code, {CHANNEL}, a.kind, p->>'menuID', p->>'menuName',
            COALESCE(NULLIF(split_part(mm.raw_data->>'categoryDetail', ' - ', 1), ''), {_txt("m->>'menuCategoryName'")}),
@@ -105,7 +106,7 @@ WITH line AS (
          LATERAL (VALUES ('package', m->'packages'), ('extra', m->'extras')) a(kind, items),
          jsonb_array_elements(COALESCE(a.items, '[]'::jsonb)) p
          LEFT JOIN {SCHEMA}.master_pos_menu mm ON mm.menu_id = p->>'menuID'
-    WHERE {DAY_FILTER} AND {TYPE_CONDITIONS['sales']}
+    WHERE {DAY_FILTER} AND {TYPE_CONDITIONS['sales']} AND {active_line_sql('m')}
 )
 INSERT INTO {PORTAL}.agg_menu_daily
 SELECT %(day)s::date, branch_code, channel, COALESCE(menu_id, '?'), kind, max(menu_name), max(category),

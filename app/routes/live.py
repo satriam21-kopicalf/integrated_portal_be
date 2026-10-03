@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 from app import database as db
 from app.config import get_settings
 from app.database import SCHEMA, TABLE_TRANSACTIONS
-from app.esb_report import TYPE_CONDITIONS
+from app.esb_report import TYPE_CONDITIONS, active_line_sql
 from app.utils import TTLCache
 
 router = APIRouter(prefix="/api/live", tags=["live"])
@@ -90,7 +90,8 @@ def latest(day, limit: int, cond: str, params: dict) -> list[dict]:
     menus = db.fetch(
         f"""SELECT h.sales_num,
                    (SELECT COALESCE(jsonb_agg(jsonb_build_object('name', m->>'menuName', 'qty', m->>'qty')), '[]'::jsonb)
-                    FROM jsonb_array_elements(COALESCE(h.raw_data->'salesMenus', '[]'::jsonb)) m) AS items
+                    FROM jsonb_array_elements(COALESCE(h.raw_data->'salesMenus', '[]'::jsonb)) m
+                    WHERE {active_line_sql('m')}) AS items
             FROM {TABLE_TRANSACTIONS} h WHERE h.sales_num = ANY(%(nums)s)""",
         {"nums": [h["sales_num"] for h in heads]},
     )

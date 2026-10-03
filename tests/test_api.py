@@ -1,6 +1,7 @@
 """Transactions/branches/summary API and ESB report rules (database stubbed, see conftest.py)."""
 from datetime import date, datetime
 
+from app import esb_report
 from app.esb_report import REPORT_HEADERS, report_rows
 from tests.conftest import SALES
 
@@ -114,3 +115,18 @@ def test_transaction_detail_with_slash_in_id(client, fake_db):
 
 def test_old_truncating_export_endpoint_removed(client):
     assert client.post("/api/transactions/export", json={}).status_code in (404, 405)
+
+
+def test_cancelled_menu_lines_are_left_out():
+    from tests.conftest import MASTERS, menu, sale
+    cancelled = menu("Classic Milk Tea", 2, 25000, menu_id=252)
+    cancelled.update(statusID="19", statusName="Print Cancelled", cancelNotes="Test Order")
+    h = sale("S-9", "B-9", "2026-10-02", "Finished", [menu("Es Kopi Calf Premium", 1, 20000), cancelled])
+    raw = h["raw_data"]
+    raw["subtotal"] = raw["grandTotal"] = 20000  # ESB's subtotal never includes cancelled lines
+    menus = {m["menu_id"]: ("EXTRA", "LEVEL SUGAR") for m in MASTERS["menus"]}
+    rows = esb_report.report_rows(raw, menus, {}, {})
+    assert [r[27] for r in rows] == ["Es Kopi Calf Premium"]
+    assert sum(r[34] for r in rows) == 20000
+    assert esb_report.is_cancelled_line(cancelled) and not esb_report.is_cancelled_line(raw["salesMenus"][0])
+    assert "'19'" in esb_report.active_line_sql("m") and "%%cancel%%" in esb_report.active_line_sql("m")

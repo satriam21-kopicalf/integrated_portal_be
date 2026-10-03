@@ -50,6 +50,17 @@ Tanpa `dateFrom`/`dateTo`, rentang default adalah 65 hari terakhir (Asia/Jakarta
 
 Baris laporan dibangun dari `raw_data` (payload ESB) di `app/esb_report.py`: 1 baris per menu + baris `(PACKAGE)`/`(EXTRA)`, Bill Discount dibagi proporsional Subtotal, nama/brand/city cabang dari `master_branches` + `master_branch_attributes` (berdasarkan kode cabang), Waiter dari `master_pos_users`.
 
+Baris menu yang dibatalkan di bill (status `Print Cancelled`) tidak dihitung, sama seperti ESB (subtotal transaksi memang tidak memasukkannya); berlaku untuk export, dashboard, agregat Overview dan live feed.
+
+**Master referensi dari export ESB.** API ESB tidak menyediakan nama user POS (kolom Waiter) maupun City cabang. Keduanya dapat dipelajari dari file export ESB "Sales Recapitulation Detail Report":
+
+```bash
+python -m app.reference_import "docs/ESB_Sales Recapitulation Detail Report_01 Oktober 2026.xlsx" [file lain ...]           # dry run
+python -m app.reference_import "docs/ESB_Sales Recapitulation Detail Report_01 Oktober 2026.xlsx" [file lain ...] --apply   # tulis
+```
+
+Tool ini mencocokkan baris export ESB dengan transaksi kita lewat Sales Number, lalu mengisi/memperbarui `master_pos_users` dan `master_branch_attributes` (brand, city, area). Jalankan bila ada outlet atau kasir baru.
+
 Validasi (Sep 2026): Subtotal Sales per hari = ERP ESB 30/30 hari; export Sales Recapitulation Detail 10 Sep identik dengan file ESB (46 kolom; kecuali Custom Menu Name yang tidak tersedia di API); Daily Sales Recapitulation 1–29 Sep identik (3.028 baris, 0 selisih).
 
 ### Export Excel

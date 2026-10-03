@@ -95,6 +95,8 @@ class FakeDB:
         self.queries.append((query, params))
         if self.fail:
             raise RuntimeError("database is down")
+        if "integration_portal." in query:  # aggregates: none in the fake, so summaries read raw rows
+            return []
         if "master_pos_menu" in query:
             return MASTERS["menus"]
         if "master_branch_attributes" in query:

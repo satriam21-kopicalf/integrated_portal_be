@@ -48,30 +48,68 @@ def filters(branch: Optional[str], channels: list[str]) -> tuple[str, dict]:
     return "".join(f" AND {p}" for p in parts), params
 
 
-def today_rows(day, cond: str, params: dict) -> list[dict]:
-    """Sales of one day per hour of the order time (outlet clock)."""
+def day_rows(day, cond: str, params: dict) -> list[dict]:
+    """Sales of one day per hour of the order time (outlet clock) and channel."""
     return db.fetch(
-        f"""SELECT extract(hour FROM h.sales_date_in AT TIME ZONE 'UTC')::int AS hour,
+        f"""SELECT extract(hour FROM h.sales_date_in AT TIME ZONE 'UTC')::int AS hour, h.visit_purpose AS channel,
                    count(*)::int AS bills, COALESCE(sum(h.subtotal), 0) AS subtotal,
                    COALESCE(sum(h.nett_sales), 0) AS nett,
                    max(h.synced_at) AS synced
             FROM {TABLE_TRANSACTIONS} h
             WHERE h.sales_date >= %(day)s::date AND h.sales_date < %(day)s::date + 1 AND {SALES}{cond}
-            GROUP BY 1""",
+            GROUP BY 1, 2""",
         {**params, "day": day},
     )
+
+
+def summarise_day(rows: list[dict]) -> dict:
+    """Totals, per hour and per channel from day_rows()."""
+    hours: dict[int, dict] = {}
+    channels: dict[str, dict] = {}
+    for r in rows:
+        for bucket in (hours.setdefault(r["hour"], {"hour": r["hour"], "bills": 0, "subtotal": 0.0}),
+                       channels.setdefault(r["channel"] or "Unknown", {"channel": r["channel"] or "Unknown", "bills": 0, "subtotal": 0.0})):
+            bucket["bills"] += r["bills"]
+            bucket["subtotal"] += float(r["subtotal"])
+    bills = sum(r["bills"] for r in rows)
+    subtotal = sum(float(r["subtotal"]) for r in rows)
+    return {
+        "bills": bills,
+        "subtotal": subtotal,
+        "nettSales": sum(float(r["nett"]) for r in rows),
+        "avgTicket": round(subtotal / bills, 2) if bills else 0,
+        "hours": sorted(hours.values(), key=lambda h: h["hour"]),
+        "channels": sorted(channels.values(), key=lambda c: -c["subtotal"]),
+    }
+
+
+def last_batch(day, cond: str, params: dict) -> dict:
+    """Sales that arrived with the most recent sync run (synced_at within the same hour)."""
+    row = db.fetchrow(
+        f"""WITH recent AS (
+                SELECT h.subtotal, date_trunc('hour', h.synced_at) AS batch FROM {TABLE_TRANSACTIONS} h
+                WHERE h.sales_date >= %(day)s::date - 1 AND h.sales_date < %(day)s::date + 1 AND {SALES}{cond})
+            SELECT max(batch) AS batch, count(*) FILTER (WHERE batch = (SELECT max(batch) FROM recent))::int AS bills,
+                   COALESCE(sum(subtotal) FILTER (WHERE batch = (SELECT max(batch) FROM recent)), 0) AS subtotal
+            FROM recent""",
+        {**params, "day": day},
+    ) or {}
+    return {"bills": int(row.get("bills") or 0), "subtotal": float(row.get("subtotal") or 0),
+            "syncedHour": row["batch"].isoformat() if row.get("batch") else None}
 
 
 def until_now(day, clock: str, cond: str, params: dict) -> dict:
     """Bills and sales of `day` with an order time up to `clock` (HH:MM:SS)."""
     row = db.fetchrow(
-        f"""SELECT count(*)::int AS bills, COALESCE(sum(h.subtotal), 0) AS subtotal
+        f"""SELECT count(*)::int AS bills, COALESCE(sum(h.subtotal), 0) AS subtotal,
+                   COALESCE(sum(h.nett_sales), 0) AS nett
             FROM {TABLE_TRANSACTIONS} h
             WHERE h.sales_date >= %(day)s::date AND h.sales_date < %(day)s::date + 1 AND {SALES}{cond}
               AND (h.sales_date_in AT TIME ZONE 'UTC')::time <= %(clock)s::time""",
         {**params, "day": day, "clock": clock},
     ) or {}
-    return {"bills": int(row.get("bills") or 0), "subtotal": float(row.get("subtotal") or 0)}
+    return {"bills": int(row.get("bills") or 0), "subtotal": float(row.get("subtotal") or 0),
+            "nettSales": float(row.get("nett") or 0)}
 
 
 def latest(day, limit: int, cond: str, params: dict) -> list[dict]:
@@ -124,16 +162,19 @@ def latest(day, limit: int, cond: str, params: dict) -> list[dict]:
     return out
 
 
+def pct(cur: float, prev: float):
+    return round((cur - prev) / prev * 100, 2) if prev else None
+
+
 def build(limit: int, branch: Optional[str], channels: list[str]) -> dict:
     now = now_local()
     today = now.date()
     yesterday = today - timedelta(days=1)
     cond, params = filters(branch, channels)
-    hours = today_rows(today.isoformat(), cond, params)
-    bills = sum(h["bills"] for h in hours)
-    subtotal = sum(float(h["subtotal"]) for h in hours)
-    nett = sum(float(h["nett"]) for h in hours)
-    synced = max((h["synced"] for h in hours if h["synced"]), default=None)
+    rows = day_rows(today.isoformat(), cond, params)
+    t = summarise_day(rows)
+    y = summarise_day(day_rows(yesterday.isoformat(), cond, params))
+    synced = max((r["synced"] for r in rows if r["synced"]), default=None)
     before = until_now(yesterday.isoformat(), now.strftime("%H:%M:%S"), cond, params)
     return {
         "serverTime": now.isoformat(timespec="seconds"),
@@ -141,15 +182,15 @@ def build(limit: int, branch: Optional[str], channels: list[str]) -> dict:
         "filters": {"branch": branch, "channels": channels},
         "today": {
             "date": today.isoformat(),
-            "bills": bills,
-            "subtotal": subtotal,
-            "nettSales": nett,
-            "avgTicket": round(subtotal / bills, 2) if bills else 0,
-            "hours": sorted(({"hour": h["hour"], "bills": h["bills"], "subtotal": float(h["subtotal"])} for h in hours),
-                            key=lambda h: h["hour"]),
+            **t,
             "yesterdaySameTime": before,
-            "deltaPct": round((subtotal - before["subtotal"]) / before["subtotal"] * 100, 2) if before["subtotal"] else None,
+            "deltaPct": pct(t["subtotal"], before["subtotal"]),
+            "billsDeltaPct": pct(t["bills"], before["bills"]),
+            "nettDeltaPct": pct(t["nettSales"], before["nettSales"]),
         },
+        # full previous day, for the hourly comparison and "% of yesterday"
+        "yesterday": {"date": yesterday.isoformat(), "bills": y["bills"], "subtotal": y["subtotal"], "hours": y["hours"]},
+        "lastBatch": last_batch(today.isoformat(), cond, params),
         "transactions": latest(today.isoformat(), limit, cond, params),
     }
 

@@ -212,7 +212,7 @@ def test_payments_and_basket(client):
 
 
 def test_monthly_growth_per_calendar_day(client):
-    months = client.get("/api/overview/monthly?dateTo=2026-09-02&months=2").json()["months"]
+    months = client.get("/api/overview/monthly?dateFrom=2026-08-01&dateTo=2026-09-02").json()["months"]
     aug, sep = months
     assert aug["month"] == "2026-08-01" and aug["days"] == 31 and not aug["partial"]
     assert sep["partial"] and sep["days"] == 2 and sep["subtotal"] == 2_500_000

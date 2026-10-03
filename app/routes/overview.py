@@ -562,46 +562,57 @@ def build_deductions(f: Filters) -> dict:
     }
 
 
-def build_monthly(f: Filters, months: int) -> dict:
-    """Last `months` calendar months ending with dateTo's month (dateFrom is ignored).
+def build_monthly(f: Filters) -> dict:
+    """Calendar months of the selected period (only its days count in each month).
 
-    Growth compares average sales per calendar day, so 30/31-day and partial
-    months compare fairly. Same-store = branches with sales on >= 90% of the
-    days of both months.
+    Growth compares average sales per calendar day, so partial and 30/31-day
+    months compare fairly; the previous month and the same month a year ago
+    are taken whole. Same-store = branches with sales on >= 90% of the days of
+    both the selected part of the month and the whole previous month.
     """
     fresh = freshness()
     data_from = date.fromisoformat(fresh["dataFrom"]) if fresh["dataFrom"] else f.data_from
     end = min(f.end, date.fromisoformat(fresh["dataTo"])) if fresh["dataTo"] else f.end
-    last = end.replace(day=1)
-    first = _add_months(last, -(months - 1))
+    start = max(f.start, data_from)
+    if start > end:
+        return {"months": []}
+    first, last = start.replace(day=1), end.replace(day=1)
+    month = "date_trunc('month', sales_date)::date AS month"
+
+    def index(rows: list[dict]) -> dict[date, dict[str, dict]]:
+        out: dict[date, dict[str, dict]] = {}
+        for r in rows:
+            out.setdefault(r["month"], {})[r["branch_code"]] = r
+        return out
+
+    selected = index(day_rows(f, start, end, (month, "branch_code"), "sales"))
+    # whole comparison months: previous month and the same month last year
     scan_from = max(_add_months(first, -12), data_from.replace(day=1))
-    rows = day_rows(f, scan_from, end, ("date_trunc('month', sales_date)::date AS month", "branch_code"), "sales")
-    per_month: dict[date, dict[str, dict]] = {}
-    for r in rows:
-        per_month.setdefault(r["month"], {})[r["branch_code"]] = r
+    compare = index(day_rows(f, scan_from, end, (month, "branch_code"), "sales"))
 
-    def scope(m: date) -> int:
-        lo = max(m, data_from)
-        hi = min(_add_months(m, 1) - timedelta(days=1), end)
-        return max((hi - lo).days + 1, 0)
+    def span(m: date, lo: date, hi: date) -> int:
+        a, b = max(m, lo, data_from), min(_add_months(m, 1) - timedelta(days=1), hi)
+        return max((b - a).days + 1, 0)
 
-    def avg_daily(m: date, codes: Optional[set] = None) -> Optional[float]:
-        n = scope(m)
-        if not n or m not in per_month:
+    def avg(rows: dict[str, dict], days: int, codes: Optional[set] = None) -> Optional[float]:
+        if not days or not rows:
             return None
-        return sum(_f(r["subtotal"]) for c, r in per_month[m].items() if codes is None or c in codes) / n
+        return sum(_f(r["subtotal"]) for c, r in rows.items() if codes is None or c in codes) / days
 
     out = []
     m = first
     while m <= last:
-        n = scope(m)
+        n = span(m, start, end)
         if n:
-            branches = per_month.get(m, {})
-            prev_m = _add_months(m, -1)
+            branches = selected.get(m, {})
+            prev_m, yoy_m = _add_months(m, -1), _add_months(m, -12)
+            prev_rows, prev_days = compare.get(prev_m, {}), span(prev_m, prev_m, end)
             same = {c for c, r in branches.items() if r["days"] >= 0.9 * n
-                    and c in per_month.get(prev_m, {}) and per_month[prev_m][c]["days"] >= 0.9 * scope(prev_m)}
-            cur_avg, prev_avg, yoy_avg = avg_daily(m), avg_daily(prev_m), avg_daily(_add_months(m, -12))
-            ss_cur, ss_prev = avg_daily(m, same), avg_daily(prev_m, same)
+                    and c in prev_rows and prev_rows[c]["days"] >= 0.9 * prev_days}
+            cur_avg = avg(branches, n)
+            prev_avg = avg(prev_rows, prev_days)
+            yoy_avg = avg(compare.get(yoy_m, {}), span(yoy_m, yoy_m, end))
+            ss_cur, ss_prev = avg(branches, n, same), avg(prev_rows, prev_days, same)
             out.append({
                 "month": m.isoformat(), "days": n, "partial": n < (_add_months(m, 1) - m).days,
                 "subtotal": sum(_f(r["subtotal"]) for r in branches.values()),
@@ -744,12 +755,10 @@ def get_deductions(dateFrom: Optional[str] = None, dateTo: Optional[str] = None,
 
 
 @router.get("/monthly")
-def get_monthly(dateTo: Optional[str] = None, branch: Optional[str] = None, channel: Optional[str] = None,
-                months: int = Query(13, ge=2, le=36)):
-    """Monthly sales with MoM, YoY and same-store growth (per calendar-day averages)."""
-    def build(f):
-        return build_monthly(f, months)
-    return endpoint("monthly", str(months), build, None, dateTo, branch, channel)
+def get_monthly(dateFrom: Optional[str] = None, dateTo: Optional[str] = None,
+                branch: Optional[str] = None, channel: Optional[str] = None):
+    """Months of the selected period with MoM, YoY and same-store growth (per calendar-day averages)."""
+    return endpoint("monthly", "", build_monthly, dateFrom, dateTo, branch, channel)
 
 
 @router.get("/payments")

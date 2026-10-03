@@ -10,6 +10,7 @@ Common filters:
   branch  branch_code (names change over time, codes do not)
 """
 import time
+from datetime import date, timedelta
 from typing import Any, Optional
 
 from fastapi import APIRouter, Query
@@ -19,7 +20,7 @@ from app import database as db
 from app.config import get_settings
 from app.database import HEADER_COLUMNS, ITEM_COLUMNS, TABLE_ITEMS, TABLE_TRANSACTIONS
 from app.esb_report import REPORT_HEADERS, TYPE_CASE_SQL, TYPE_CONDITIONS, load_masters, report_rows
-from app.utils import TTLCache, escape_like, jsonable, resolve_date_range, to_json_value
+from app.utils import TTLCache, escape_like, jsonable, resolve_date_range, to_json_value, today
 
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
 summary_router = APIRouter(prefix="/api/summary", tags=["summary"])
@@ -195,10 +196,12 @@ def get_transaction(sales_num: str):
 
 # ---------------------------------------------------------------- summary
 
-def summarize(date_from: str, date_to: str, branch: Optional[str]) -> dict:
-    """Gross figures split into ESB sales and the deductions ESB leaves out."""
+RAW_SUMMARY_DAYS = 2  # today and yesterday: read raw, the aggregates may lag the hourly sync
+
+
+def _raw_summary_rows(date_from: str, date_to: str, branch: Optional[str]) -> list[dict]:
     where, params = header_filters(date_from, date_to, branch, None, "all")
-    rows = db.fetch(
+    return db.fetch(
         f"""SELECT to_char(h.sales_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, {TYPE_CASE_SQL} AS kind,
                    CASE WHEN {TYPE_CONDITIONS['other_cost']} THEN COALESCE(NULLIF(h.payment_method, ''), '-') END AS method,
                    COUNT(*)::int AS n, COALESCE(SUM(h.subtotal), 0) AS subtotal,
@@ -207,6 +210,56 @@ def summarize(date_from: str, date_to: str, branch: Optional[str]) -> dict:
             GROUP BY 1, 2, 3 ORDER BY 1""",
         params,
     )
+
+
+def _agg_summary_rows(date_from: str, date_to: str, branch: Optional[str]) -> list[dict]:
+    """Same shape as _raw_summary_rows from integration_portal.agg_sales_daily (reconciled per day)."""
+    where = ["sales_date BETWEEN %(from)s AND %(to)s"]
+    params: dict = {"from": date_from, "to": date_to}
+    if branch:
+        where.append("branch_code = %(branch)s")
+        params["branch"] = branch
+    return db.fetch(
+        f"""SELECT to_char(sales_date, 'YYYY-MM-DD') AS day, tx_type AS kind,
+                   CASE WHEN tx_type = 'other_cost' THEN payment_method END AS method,
+                   sum(bills)::int AS n, sum(subtotal) AS subtotal, sum(nett_sales) AS nett, sum(grand_total) AS total
+            FROM integration_portal.agg_sales_daily WHERE {' AND '.join(where)}
+            GROUP BY 1, 2, 3""",
+        params,
+    )
+
+
+def _summary_rows(date_from: str, date_to: str, branch: Optional[str]) -> list[dict]:
+    """Days before yesterday that have aggregates come from them (a year in < 1 s instead of
+    over a minute); recent or not yet aggregated days are read from transactions_pos_sales."""
+    if not date_from or not date_to:
+        return _raw_summary_rows(date_from, date_to, branch)
+    start, end = date.fromisoformat(date_from), date.fromisoformat(date_to)
+    agg_end = min(end, today() - timedelta(days=RAW_SUMMARY_DAYS))
+    covered: set[date] = set()
+    if start <= agg_end:
+        covered = {r["sales_date"] for r in db.fetch(
+            "SELECT sales_date FROM integration_portal.agg_refresh_log WHERE sales_date BETWEEN %s AND %s",
+            (start.isoformat(), agg_end.isoformat()))}
+    rows: list[dict] = []
+    if covered:
+        rows += _agg_summary_rows(min(covered).isoformat(), max(covered).isoformat(), branch)
+    # contiguous runs of days not covered by the aggregates
+    day, run_start = start, None
+    while day <= end + timedelta(days=1):
+        missing = day <= end and day not in covered
+        if missing and run_start is None:
+            run_start = day
+        elif not missing and run_start is not None:
+            rows += _raw_summary_rows(run_start.isoformat(), (day - timedelta(days=1)).isoformat(), branch)
+            run_start = None
+        day += timedelta(days=1)
+    return sorted(rows, key=lambda r: r["day"])
+
+
+def summarize(date_from: str, date_to: str, branch: Optional[str]) -> dict:
+    """Gross figures split into ESB sales and the deductions ESB leaves out."""
+    rows = _summary_rows(date_from, date_to, branch)
 
     def bucket() -> dict:
         return {"transactions": 0, "subtotal": 0.0, "nettSales": 0.0, "total": 0.0}

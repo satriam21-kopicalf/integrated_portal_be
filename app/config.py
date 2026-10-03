@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     # Server
     port: int = 8002
     cors_origins: str = "*"  # comma separated list
+    # browsers allowed to open the dashboard WebSocket (/ws); shell-style wildcards
+    ws_allowed_origins: str = (
+        "https://portal.kopicalf.co.id,https://integrated-portal*.vercel.app,"
+        "http://localhost:3002,http://127.0.0.1:3002"
+    )
     timezone: str = "Asia/Jakarta"
 
     # Business defaults (mirrors the old Next.js API routes)

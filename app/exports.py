@@ -4,18 +4,27 @@ An export runs in a background thread: it reads the date range one day at a
 time (oldest first), builds the ESB "Sales Recapitulation Detail Report" rows
 (app/esb_report.py) and streams them into an .xlsx file (app/xlsx_stream.py)
 laid out like the ESB export; a new sheet starts whenever Excel's row limit is
-reached. A "Ringkasan" sheet lists gross sales and the deductions per day. Job state lives in a JSON file next to the export so every uvicorn
-worker in the container can report progress and serve the download.
+reached. A "Ringkasan" sheet lists gross sales and the deductions per day.
+
+Each job runs in its own process (app/export_worker.py), not in the web
+worker: building a large report is CPU-heavy, and inside a uvicorn worker it
+starved the worker's health check, so uvicorn killed the worker mid-export.
+At most EXPORT_MAX_CONCURRENT jobs run at once across all workers (file-lock
+slots); the others wait as "queued". Job state lives in a JSON file next to the
+export, so every worker can report progress and serve the download.
 """
 import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import threading
+import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from app import database as db
 from app.config import get_settings
@@ -32,10 +41,13 @@ MAX_SHEET_ROWS = 1_048_575
 # A "running" job that has not reported progress for this long was interrupted
 # (e.g. the container restarted).
 STALE_AFTER = timedelta(minutes=10)
+# a job whose process never started (no pid recorded) within this time is lost
+START_TIMEOUT = timedelta(minutes=2)
 JOB_ID_RE = re.compile(r"^[0-9a-f]{32}$")
-
-_semaphore: Optional[threading.BoundedSemaphore] = None
-_semaphore_lock = threading.Lock()
+APP_ROOT = Path(__file__).resolve().parent.parent
+QUEUE_POLL_SECONDS = 2
+QUEUE_HEARTBEAT = timedelta(seconds=30)
+DAY_CHUNK_ROWS = 2000
 
 
 def _now() -> str:
@@ -69,6 +81,19 @@ def _update(job: dict, **fields) -> None:
     _write_job(job)
 
 
+def _process_alive(pid: int) -> bool:
+    """True while the export process exists and is not a zombie (Linux /proc)."""
+    if not Path("/proc").is_dir():
+        return True  # no /proc (local Windows development): rely on STALE_AFTER
+    try:
+        status = Path(f"/proc/{pid}/status").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    except OSError:
+        return True
+    return "\nState:\tZ" not in status
+
+
 def read_job(job_id: str) -> Optional[dict]:
     if not JOB_ID_RE.match(job_id):
         return None
@@ -77,8 +102,13 @@ def read_job(job_id: str) -> Optional[dict]:
     except (FileNotFoundError, json.JSONDecodeError):
         return None
     if job["status"] in ("queued", "running"):
+        now = datetime.now(timezone.utc)
         updated = datetime.fromisoformat(job["updatedAt"])
-        if datetime.now(timezone.utc) - updated > STALE_AFTER:
+        if job.get("pid") and not _process_alive(job["pid"]):
+            job.update(status="error", error="Export terhenti (proses export berhenti). Silakan export ulang.")
+        elif not job.get("pid") and now - datetime.fromisoformat(job.get("createdAt") or job["updatedAt"]) > START_TIMEOUT:
+            job.update(status="error", error="Export tidak dapat dimulai. Silakan export ulang.")
+        elif now - updated > STALE_AFTER:
             job.update(status="error", error="Export terhenti (server restart). Silakan export ulang.")
     return job
 
@@ -86,6 +116,8 @@ def read_job(job_id: str) -> Optional[dict]:
 def cleanup_old_exports() -> None:
     cutoff = datetime.now().timestamp() - get_settings().export_ttl_hours * 3600
     for path in _export_dir().iterdir():
+        if path.name.startswith("."):  # slot lock files
+            continue
         try:
             if path.stat().st_mtime < cutoff:
                 path.unlink()
@@ -134,39 +166,79 @@ def create_job(date_from: date, date_to: date, branch: Optional[str], tx_type: s
         "finishedAt": None,
     }
     _write_job(job)
-    threading.Thread(target=_run, args=(job,), name=f"export-{job['id']}", daemon=True).start()
+    _launch(job)
     return job
 
 
-def _get_semaphore() -> threading.BoundedSemaphore:
-    global _semaphore
-    with _semaphore_lock:
-        if _semaphore is None:
-            _semaphore = threading.BoundedSemaphore(get_settings().export_max_concurrent)
-        return _semaphore
+def _launch(job: dict) -> None:
+    """Start the job in its own process (tests replace this to run inline)."""
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "app.export_worker", job["id"]],
+        cwd=str(APP_ROOT),
+        start_new_session=True,  # not killed together with the web worker
+    )
+    # reap the child when it ends so it does not linger as a zombie
+    threading.Thread(target=proc.wait, name=f"export-reaper-{job['id'][:8]}", daemon=True).start()
+
+
+def _acquire_slot(job: dict):
+    """Block until one of the EXPORT_MAX_CONCURRENT slots is free (job stays "queued").
+
+    Slots are lock files; the OS releases the lock when the process ends.
+    """
+    try:
+        import fcntl
+    except ImportError:  # Windows development: no limit
+        return None
+    slots = max(1, get_settings().export_max_concurrent)
+    last_beat = datetime.now(timezone.utc)
+    while True:
+        for i in range(slots):
+            handle = open(_export_dir() / f".slot-{i}.lock", "w")
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return handle
+            except BlockingIOError:
+                handle.close()
+        if datetime.now(timezone.utc) - last_beat > QUEUE_HEARTBEAT:
+            _update(job, status="queued")  # keeps the job from looking stale
+            last_beat = datetime.now(timezone.utc)
+        time.sleep(QUEUE_POLL_SECONDS)
+
+
+def run_job(job_id: str) -> None:
+    """Entry point of the export process (app/export_worker.py)."""
+    job = json.loads(_state_file(job_id).read_text(encoding="utf-8"))
+    _update(job, pid=os.getpid())
+    _run(job)
 
 
 def _run(job: dict) -> None:
-    with _get_semaphore():
-        try:
-            _update(job, status="running")
-            _generate(job)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Export %s failed", job["id"])
-            job_file(job["id"]).unlink(missing_ok=True)
-            _update(job, status="error", error=str(exc), finishedAt=_now())
+    slot = _acquire_slot(job)
+    try:
+        _update(job, status="running")
+        _generate(job)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Export %s failed", job["id"])
+        job_file(job["id"]).unlink(missing_ok=True)
+        _update(job, status="error", error=str(exc), finishedAt=_now())
+    finally:
+        if slot is not None:
+            slot.close()
 
 
-def _fetch_day_headers(day: date, branch: Optional[str], tx_type: str) -> list[dict]:
+def _day_headers(day: date, branch: Optional[str], tx_type: str) -> Iterator[dict]:
+    """Sales of one day in report order, read in chunks."""
     where = ["h.sales_date >= %s", "h.sales_date < %s", TYPE_CONDITIONS[tx_type]]
     params: list = [day.isoformat(), (day + timedelta(days=1)).isoformat()]
     if branch:
         where.append("h.branch_code = %s")
         params.append(branch)
-    return db.fetch(
+    return db.stream(
         f"SELECT h.sales_num, h.raw_data FROM {TABLE_TRANSACTIONS} h WHERE {' AND '.join(where)} "
         f"ORDER BY h.branch_code, h.sales_date_in, h.sales_num",
         params,
+        DAY_CHUNK_ROWS,
     )
 
 
@@ -235,10 +307,16 @@ def _generate(job: dict) -> None:
     with StreamingXlsxWriter(str(path)) as xlsx:
         for offset in range(job["totalDays"]):
             day = date_from + timedelta(days=offset)
-            headers = _fetch_day_headers(day, branch, tx_type)
+            day_headers = 0
+
+            def counted(rows):
+                nonlocal day_headers
+                for h in rows:
+                    day_headers += 1
+                    yield h
 
             batch: list[list] = []
-            for row in iter_report_rows(headers):
+            for row in iter_report_rows(counted(_day_headers(day, branch, tx_type))):
                 # data_rows counts rows already assigned to this sheet (written or batched)
                 if sheet is None or sheet.data_rows >= MAX_SHEET_ROWS - preamble_rows(sheets):
                     if sheet is not None:
@@ -255,7 +333,7 @@ def _generate(job: dict) -> None:
             if batch:
                 sheet.write_rows(batch)
 
-            headers_count += len(headers)
+            headers_count += day_headers
             _update(job, daysDone=offset + 1, currentDate=day.isoformat(),
                     rows=rows, headers=headers_count, items=rows, sheets=sheets)
 

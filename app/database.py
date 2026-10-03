@@ -4,6 +4,7 @@ Routes are plain `def` functions, so FastAPI runs them in its threadpool and
 the synchronous pool is safe to use. This also avoids psycopg's async
 limitations with the Windows ProactorEventLoop during local development.
 """
+import uuid
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional
 
@@ -95,6 +96,19 @@ def transaction(timeout_ms: Optional[int] = None) -> Iterator[Connection]:
             if timeout_ms:
                 conn.execute(f"SET LOCAL statement_timeout = {int(timeout_ms)}")
             yield conn
+
+
+def stream(query: str, params: Any = None, size: int = 2000) -> Iterator[dict]:
+    """Rows of a large result in chunks of `size` (server-side cursor), so the
+    whole result never sits in memory at once."""
+    if _pool is None:
+        open_pool()
+    with _pool.connection() as conn:
+        with conn.transaction():
+            with conn.cursor(name=f"stream_{uuid.uuid4().hex[:12]}") as cur:
+                cur.itersize = size
+                cur.execute(query, params)
+                yield from cur
 
 
 def fetch(query: str, params: Any = None) -> list[dict]:

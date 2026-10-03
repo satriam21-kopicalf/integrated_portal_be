@@ -18,7 +18,7 @@ from app.routes import branches_router, exports_router, live_router, overview_ro
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("integrated_portal_be")
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 
 class SelectiveGZipMiddleware(GZipMiddleware):

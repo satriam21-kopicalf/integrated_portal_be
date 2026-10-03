@@ -56,6 +56,7 @@ Validasi (Sep 2026): Subtotal Sales per hari = ERP ESB 30/30 hari; export Sales 
 
 - `report=detail` → **Sales Recapitulation Detail Report** (46 kolom ESB). `report=daily` → **Daily Sales Recapitulation Report** (per tanggal × cabang, 20 kolom).
 - Layout sama dengan file ESB (judul, Period, Branch, Sales Type, header di baris 11/12), tanggal sebagai tanggal Excel, sheet tambahan **Ringkasan** (Gross − pengurangan = Sales per hari).
+- Setiap export berjalan di **proses terpisah** (`app/export_worker.py`), bukan di worker API, sehingga export besar tidak memperlambat/mematikan worker; maksimal `EXPORT_MAX_CONCURRENT` export bersamaan (sisanya `queued`). Bila proses export berhenti, status langsung menjadi `error`.
 - Tanpa batas rentang: data dibaca per hari dan ditulis streaming (`app/xlsx_stream.py`); > 1.048.575 baris otomatis lanjut ke sheet `Report (2)`, dst.
 - Acuan di VPS: detail 1 hari ≈ 65 rb baris ≈ 9 dtk, 1 bulan ≈ 1,9 jt baris ≈ 5 menit; daily 1 bulan ≈ 40 dtk.
 
@@ -89,7 +90,7 @@ Lihat [.env.example](.env.example). Kredensial database sama dengan yang dipakai
 | `CORS_ORIGINS` | `*` | Hanya relevan jika browser memanggil backend langsung |
 | `PUBLIC_BASE_URL` | kosong | Basis URL absolut untuk link unduhan export |
 | `EXPORT_TTL_HOURS` | 24 | Lama file export disimpan |
-| `EXPORT_MAX_CONCURRENT` | 2 | Job export bersamaan per worker |
+| `EXPORT_MAX_CONCURRENT` | 2 | Job export bersamaan (seluruh container) |
 | `TIMEZONE` | `Asia/Jakarta` | Untuk rentang tanggal default |
 | `OVERVIEW_DATA_FROM` | `2025-08-01` | Awal riwayat lengkap untuk perbandingan Overview |
 

@@ -162,16 +162,6 @@ class FakeDB:
         return rows[0] if rows else None
 
 
-class SyncThread:
-    """Runs export jobs inline so tests can assert on the finished file."""
-
-    def __init__(self, target, args=(), **_):
-        self._target, self._args = target, args
-
-    def start(self):
-        self._target(*self._args)
-
-
 @pytest.fixture
 def fake_db(monkeypatch, tmp_path):
     fake = FakeDB()
@@ -179,7 +169,9 @@ def fake_db(monkeypatch, tmp_path):
     monkeypatch.setattr(db, "fetchrow", fake.fetchrow)
     monkeypatch.setattr(db, "open_pool", lambda: None)
     monkeypatch.setattr(db, "close_pool", lambda: None)
-    monkeypatch.setattr(exports.threading, "Thread", SyncThread)
+    monkeypatch.setattr(db, "stream", lambda query, params=None, size=0: iter(fake.fetch(query, params)))
+    # run export jobs inline (instead of a separate process) so tests can assert on the file
+    monkeypatch.setattr(exports, "_launch", lambda job: exports._run(job))
     monkeypatch.setattr(get_settings(), "export_dir", str(tmp_path / "exports"))
     monkeypatch.setattr(get_settings(), "public_base_url", "")
     esb_report._master["loaded"] = 0.0

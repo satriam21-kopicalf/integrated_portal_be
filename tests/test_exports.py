@@ -1,6 +1,7 @@
 """Excel export job tests (database stubbed, jobs run inline, see conftest.py)."""
 import io
 import json
+import os
 from datetime import datetime, timedelta, timezone
 
 import openpyxl
@@ -135,3 +136,37 @@ def test_stale_running_job_reported_as_error(client):
     state = {"id": job_id, "status": "running", "updatedAt": old, "fileName": "x.xlsx"}
     (exports._export_dir() / f"{job_id}.json").write_text(json.dumps(state), encoding="utf-8")
     assert client.get(f"/api/exports/{job_id}").json()["status"] == "error"
+
+
+def _write_state(**state):
+    job_id = state.setdefault("id", "b" * 32)
+    now = datetime.now(timezone.utc).isoformat()
+    state.setdefault("updatedAt", now)
+    state.setdefault("createdAt", now)
+    state.setdefault("fileName", "x.xlsx")
+    (exports._export_dir() / f"{job_id}.json").write_text(json.dumps(state), encoding="utf-8")
+    return job_id
+
+
+def test_dead_export_process_reported_immediately(client, monkeypatch):
+    monkeypatch.setattr(exports, "_process_alive", lambda pid: pid == 111)
+    alive = _write_state(id="c" * 32, status="running", pid=111)
+    dead = _write_state(id="d" * 32, status="running", pid=222)
+    assert client.get(f"/api/exports/{alive}").json()["status"] == "running"
+    body = client.get(f"/api/exports/{dead}").json()
+    assert body["status"] == "error" and "berhenti" in body["error"]
+
+
+def test_export_process_that_never_started(client):
+    old = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    job_id = _write_state(status="queued", createdAt=old, updatedAt=old)
+    assert client.get(f"/api/exports/{job_id}").json()["status"] == "error"
+
+
+def test_run_job_records_its_pid(client, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(exports, "_run", lambda job: seen.update(job))
+    job_id = _write_state(status="queued", dateFrom="2026-09-30", dateTo="2026-09-30")
+    exports.run_job(job_id)
+    assert seen["pid"] == os.getpid()
+    assert json.loads((exports._export_dir() / f"{job_id}.json").read_text())["pid"] == os.getpid()

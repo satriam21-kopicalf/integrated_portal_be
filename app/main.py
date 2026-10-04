@@ -15,7 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app import database as db
 from app.config import get_settings
 from app.utils import data_version
-from app.routes import (auth_router, branches_router, exports_router, live_router, overview_router, realtime_router,
+from app.routes import (auth_router, avatars_router, branches_router, exports_router, live_router, overview_router, realtime_router,
                         summary_router, transactions_router, users_router)
 from app.routes.auth import current_user
 
@@ -73,6 +73,7 @@ async def remember_data_version(request: Request, call_next):
 signed_in = [Depends(current_user)]
 app.include_router(auth_router)
 app.include_router(users_router)
+app.include_router(avatars_router, dependencies=signed_in)
 app.include_router(transactions_router, dependencies=signed_in)
 app.include_router(summary_router, dependencies=signed_in)
 app.include_router(branches_router, dependencies=signed_in)

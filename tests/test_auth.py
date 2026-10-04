@@ -249,3 +249,68 @@ def test_change_own_password(anon, store):
     assert res.status_code == 200 and anon.get("/api/auth/me").status_code == 200  # this session stays
     anon.post("/api/auth/logout")
     assert login(anon, "kasir", "Baru12345").status_code == 200
+
+
+# ---------------------------------------------------------------- profile pictures
+
+import base64  # noqa: E402
+
+from app import avatars  # noqa: E402
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+WEBP = b"RIFF\x00\x00\x00\x00WEBPVP8 " + b"\x00" * 64
+
+
+def data_url(kind, data):
+    return f"data:image/{kind};base64," + base64.b64encode(data).decode()
+
+
+@pytest.fixture
+def pictures(monkeypatch, store):
+    saved = {}
+
+    def save(user_id, content_type, data, actor_id):
+        saved[user_id] = {"content_type": content_type, "data": data, "updated_at": now()}
+        store.users[user_id]["avatar_updated_at"] = now()
+
+    def remove(user_id, actor_id):
+        saved.pop(user_id, None)
+        store.users[user_id]["avatar_updated_at"] = None
+
+    monkeypatch.setattr(avatars, "save", save)
+    monkeypatch.setattr(avatars, "remove", remove)
+    monkeypatch.setattr(avatars, "load", lambda user_id: saved.get(user_id))
+    return saved
+
+
+def test_avatar_validation():
+    assert avatars.parse_data_url(data_url("png", PNG))[0] == ("image/png", PNG)
+    assert avatars.parse_data_url(data_url("webp", WEBP))[0][0] == "image/webp"
+    assert avatars.parse_data_url(data_url("jpeg", PNG))[1]  # declared type does not match the bytes
+    assert avatars.parse_data_url("data:image/gif;base64,R0lGOD")[1]
+    assert avatars.parse_data_url(data_url("png", PNG + b"\x00" * avatars.MAX_BYTES))[1]
+
+
+def test_own_avatar(anon, store, pictures):
+    login(anon, "kasir", "Kasir1234")
+    res = anon.put("/api/auth/me/avatar", json={"image": data_url("webp", WEBP)})
+    assert res.status_code == 200
+    url = res.json()["user"]["avatarUrl"]
+    assert url.startswith(f"/api/avatars/{store.user['id']}?v=")
+    img = anon.get(url)
+    assert img.status_code == 200 and img.content == WEBP and img.headers["content-type"] == "image/webp"
+    assert "immutable" in img.headers["cache-control"]
+    assert anon.put("/api/auth/me/avatar", json={"image": "data:text/plain;base64,aGk="}).status_code == 422
+    assert anon.delete("/api/auth/me/avatar").json()["user"]["avatarUrl"] is None
+    assert anon.get(url).status_code == 404
+
+
+def test_admin_sets_other_avatar(anon, store, pictures):
+    login(anon, "kasir", "Kasir1234")
+    assert anon.put(f"/api/users/{store.admin['id']}/avatar", json={"image": data_url("png", PNG)}).status_code == 403
+    anon.post("/api/auth/logout")
+    login(anon, "superadmin", "Admin1234")
+    res = anon.put(f"/api/users/{store.user['id']}/avatar", json={"image": data_url("png", PNG)})
+    assert res.status_code == 200 and res.json()["user"]["avatarUrl"]
+    assert anon.delete(f"/api/users/{store.user['id']}/avatar").json()["user"]["avatarUrl"] is None
+    assert TestClient(app, base_url="https://testserver").get(f"/api/avatars/{store.user['id']}").status_code == 401

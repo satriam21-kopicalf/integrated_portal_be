@@ -37,9 +37,6 @@ class Settings(BaseSettings):
     # Sign-in sessions (HttpOnly cookie); "remember me" keeps the longer one
     session_hours: int = 12
     session_remember_days: int = 30
-    # TEMPORARY rollout switch (removed once the login page is live): false lets
-    # requests through as a built-in superadmin while the frontend catches up
-    auth_enabled: bool = True
     # Overview: first date of complete history (ESB roll-out reached all branches end of July 2025)
     overview_data_from: str = "2025-08-01"
 

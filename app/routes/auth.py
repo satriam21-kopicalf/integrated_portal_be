@@ -9,6 +9,7 @@ that scripts cannot read. API clients may send the same token as
     POST /api/auth/logout
     GET  /api/auth/me
     POST /api/auth/password  {"currentPassword", "newPassword"}
+    PUT  /api/auth/me/avatar {"image": "data:image/webp;base64,..."}   DELETE /api/auth/me/avatar
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -18,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app import accounts
+from app import accounts, avatars
 from app.config import get_settings
 from app.security import DUMMY_HASH, hash_password, new_token, password_problem, token_hash, verify_password
 from app.utils import TTLCache
@@ -28,8 +29,6 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 COOKIE = "portal_session"
 SESSION_CACHE_TTL = 20  # seconds; sign-out clears it at once on this worker
-ROLLOUT_USER = {"id": "00000000-0000-0000-0000-000000000000", "username": "system", "email": "system@kopicalf.co.id",
-                "full_name": "System", "role": "superadmin", "is_active": True}
 _sessions = TTLCache()
 
 
@@ -47,8 +46,6 @@ def _token(request: Request) -> Optional[str]:
 def current_user(request: Request) -> dict:
     """The signed-in user (raw row), or 401."""
     token = _token(request)
-    if not token and not get_settings().auth_enabled:  # temporary rollout switch, see config.auth_enabled
-        return ROLLOUT_USER
     if not token:
         raise HTTPException(status_code=401, detail="Silakan login terlebih dahulu")
     key = token_hash(token)
@@ -80,6 +77,10 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=128)
     method: Literal["username", "email"] = "username"
     remember: bool = False
+
+
+class AvatarUpload(BaseModel):
+    image: str = Field(min_length=1, max_length=800_000)  # data URL, <= 512 KB of image
 
 
 class PasswordChange(BaseModel):
@@ -154,6 +155,23 @@ def change_password(req: PasswordChange, request: Request, user: dict = Depends(
     # stay signed in here, sign out everywhere else
     keep = token_hash(_token(request) or "")
     accounts.revoke_other_sessions(str(user["id"]), keep)
+    forget_sessions()
+    return {"user": accounts.public_user(accounts.get_user(str(user["id"])))}
+
+
+@router.put("/me/avatar")
+def set_my_avatar(body: AvatarUpload, user: dict = Depends(current_user)):
+    parsed, problem = avatars.parse_data_url(body.image)
+    if problem:
+        return JSONResponse({"error": problem}, status_code=422)
+    avatars.save(str(user["id"]), *parsed, str(user["id"]))
+    forget_sessions()
+    return {"user": accounts.public_user(accounts.get_user(str(user["id"])))}
+
+
+@router.delete("/me/avatar")
+def delete_my_avatar(user: dict = Depends(current_user)):
+    avatars.remove(str(user["id"]), str(user["id"]))
     forget_sessions()
     return {"user": accounts.public_user(accounts.get_user(str(user["id"])))}
 

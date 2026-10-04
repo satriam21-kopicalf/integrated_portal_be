@@ -26,7 +26,7 @@ ROLES = ("superadmin", "user")
 
 USER_COLUMNS = """u.id, u.username, u.email, u.full_name, u.role, u.is_active, u.phone_number, u.job_title,
     u.department, u.notes, u.must_change_password, u.last_login_at, u.last_login_ip,
-    u.failed_login_attempts, u.locked_until, u.password_changed_at, u.created_at, u.updated_at,
+    u.failed_login_attempts, u.locked_until, u.password_changed_at, u.created_at, u.updated_at, u.avatar_updated_at,
     cb.username AS created_by_username, ub.username AS updated_by_username"""
 USER_FROM = f"""{T_USER} u
     LEFT JOIN {T_USER} cb ON cb.id = u.created_by
@@ -49,6 +49,7 @@ def public_user(row: Optional[dict]) -> Optional[dict]:
     if not row:
         return None
     locked = row.get("locked_until")
+    avatar = row.get("avatar_updated_at")
     return {
         "id": str(row["id"]),
         "username": row["username"],
@@ -62,6 +63,8 @@ def public_user(row: Optional[dict]) -> Optional[dict]:
         "department": row.get("department"),
         "notes": row.get("notes"),
         "mustChangePassword": row.get("must_change_password", False),
+        # versioned, so the browser may cache the image indefinitely
+        "avatarUrl": f"/api/avatars/{row['id']}?v={int(avatar.timestamp())}" if avatar else None,
         "lastLoginAt": _iso(row.get("last_login_at")),
         "lastLoginIp": row.get("last_login_ip"),
         "failedLoginAttempts": row.get("failed_login_attempts", 0),

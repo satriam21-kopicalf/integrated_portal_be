@@ -6,6 +6,7 @@
     PATCH  /api/users/{id}          (any subset of fields; "password" resets it)
     POST   /api/users/{id}/unlock
     DELETE /api/users/{id}
+    PUT    /api/users/{id}/avatar   {"image": data URL}   DELETE /api/users/{id}/avatar
 
 Safeguards: you cannot delete or deactivate yourself, and the last active
 superadmin can be neither removed, deactivated nor demoted.
@@ -18,8 +19,8 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app import accounts
-from app.routes.auth import forget_sessions, require_superadmin
+from app import accounts, avatars
+from app.routes.auth import AvatarUpload, forget_sessions, require_superadmin
 from app.security import EMAIL_RE, USERNAME_RE, hash_password, password_problem
 
 router = APIRouter(prefix="/api/users", tags=["users"], dependencies=[Depends(require_superadmin)])
@@ -139,6 +140,29 @@ def update_user(user_id: UUID, body: UserFields, actor: dict = Depends(require_s
 def unlock_user(user_id: UUID, actor: dict = Depends(require_superadmin)):
     user = accounts.unlock_user(str(user_id), str(actor["id"]))
     return {"user": accounts.public_user(user)} if user else _error("User tidak ditemukan", 404)
+
+
+@router.put("/{user_id}/avatar")
+def set_avatar(user_id: UUID, body: AvatarUpload, actor: dict = Depends(require_superadmin)):
+    uid = str(user_id)
+    if not accounts.get_user(uid):
+        return _error("User tidak ditemukan", 404)
+    parsed, problem = avatars.parse_data_url(body.image)
+    if problem:
+        return _error(problem, field="avatar")
+    avatars.save(uid, *parsed, str(actor["id"]))
+    forget_sessions()
+    return {"user": accounts.public_user(accounts.get_user(uid))}
+
+
+@router.delete("/{user_id}/avatar")
+def delete_avatar(user_id: UUID, actor: dict = Depends(require_superadmin)):
+    uid = str(user_id)
+    if not accounts.get_user(uid):
+        return _error("User tidak ditemukan", 404)
+    avatars.remove(uid, str(actor["id"]))
+    forget_sessions()
+    return {"user": accounts.public_user(accounts.get_user(uid))}
 
 
 @router.delete("/{user_id}")

@@ -8,6 +8,8 @@ that scripts cannot read. API clients may send the same token as
     POST /api/auth/login     {"identifier", "password", "method": "username"|"email", "remember"}
     POST /api/auth/logout
     GET  /api/auth/me
+    PATCH /api/auth/me       own profile: fullName, phoneNumber, jobTitle, department, employeeNumber,
+                             gender, birthDate, address, city, workBranchCode (not username/email/role)
     POST /api/auth/password  {"currentPassword", "newPassword"}
     PUT  /api/auth/me/avatar {"image": "data:image/webp;base64,..."}   DELETE /api/auth/me/avatar
 """
@@ -20,6 +22,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app import accounts, avatars
+from app.profile import PROFILE_FIELDS, ProfileError, clean_profile
 from app.config import get_settings
 from app.security import DUMMY_HASH, hash_password, new_token, password_problem, token_hash, verify_password
 from app.utils import TTLCache
@@ -140,6 +143,23 @@ def logout(request: Request):
 @router.get("/me")
 def me(user: dict = Depends(current_user)):
     return {"user": accounts.public_user(user)}
+
+
+@router.patch("/me")
+def update_me(body: dict, user: dict = Depends(current_user)):
+    unknown = sorted(set(body) - set(PROFILE_FIELDS))
+    if unknown:
+        return JSONResponse({"error": f"Field tidak dapat diubah sendiri: {', '.join(unknown)}", "field": unknown[0]},
+                            status_code=422)
+    try:
+        data = clean_profile(body)
+    except ProfileError as exc:
+        return JSONResponse({"error": str(exc), "field": exc.field}, status_code=422)
+    if "fullName" in data and not data["fullName"]:
+        return JSONResponse({"error": "Nama lengkap wajib diisi", "field": "fullName"}, status_code=422)
+    updated = accounts.update_profile(str(user["id"]), data)
+    forget_sessions()
+    return {"user": accounts.public_user(updated)}
 
 
 @router.post("/password")

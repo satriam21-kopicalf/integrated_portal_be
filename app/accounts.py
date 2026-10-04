@@ -11,10 +11,11 @@ The password is generated and printed once (or taken from PORTAL_NEW_PASSWORD).
 import argparse
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from app import database as db
+from app.profile import PROFILE_FIELDS, is_complete
 from app.security import generate_password, hash_password, password_problem
 
 T_USER = "integration_portal.user_account"
@@ -27,21 +28,23 @@ ROLES = ("superadmin", "user")
 USER_COLUMNS = """u.id, u.username, u.email, u.full_name, u.role, u.is_active, u.phone_number, u.job_title,
     u.department, u.notes, u.must_change_password, u.last_login_at, u.last_login_ip,
     u.failed_login_attempts, u.locked_until, u.password_changed_at, u.created_at, u.updated_at, u.avatar_updated_at,
+    u.employee_number, u.gender, u.birth_date, u.address, u.city, u.work_branch_code, u.profile_updated_at,
+    (SELECT b.branch_name FROM integration_esb.master_branches b WHERE b.branch_code = u.work_branch_code
+     ORDER BY COALESCE(b.is_deleted, false) LIMIT 1) AS work_branch_name,
     cb.username AS created_by_username, ub.username AS updated_by_username"""
 USER_FROM = f"""{T_USER} u
     LEFT JOIN {T_USER} cb ON cb.id = u.created_by
     LEFT JOIN {T_USER} ub ON ub.id = u.updated_by"""
 
-# API field name -> column (fields an admin may set)
+# API field name -> column (fields an admin may set); users edit only PROFILE_FIELDS themselves
 EDITABLE = {
-    "username": "username", "email": "email", "fullName": "full_name", "role": "role", "isActive": "is_active",
-    "phoneNumber": "phone_number", "jobTitle": "job_title", "department": "department", "notes": "notes",
-    "mustChangePassword": "must_change_password",
+    "username": "username", "email": "email", "role": "role", "isActive": "is_active", "notes": "notes",
+    "mustChangePassword": "must_change_password", **PROFILE_FIELDS,
 }
 
 
 def _iso(v: Any) -> Any:
-    return v.isoformat() if isinstance(v, datetime) else v
+    return v.isoformat() if isinstance(v, (datetime, date)) else v
 
 
 def public_user(row: Optional[dict]) -> Optional[dict]:
@@ -55,6 +58,8 @@ def public_user(row: Optional[dict]) -> Optional[dict]:
         "username": row["username"],
         "email": row["email"],
         "fullName": row["full_name"],
+        # what to show: the full name, or the username until the user completes the profile
+        "displayName": row["full_name"] or row["username"],
         "role": row["role"],
         "isActive": row["is_active"],
         "isLocked": bool(locked and locked > datetime.now(timezone.utc)),
@@ -62,6 +67,15 @@ def public_user(row: Optional[dict]) -> Optional[dict]:
         "jobTitle": row.get("job_title"),
         "department": row.get("department"),
         "notes": row.get("notes"),
+        "employeeNumber": row.get("employee_number"),
+        "gender": row.get("gender"),
+        "birthDate": _iso(row.get("birth_date")),
+        "address": row.get("address"),
+        "city": row.get("city"),
+        "workBranchCode": row.get("work_branch_code"),
+        "workBranchName": row.get("work_branch_name"),
+        "profileComplete": is_complete(row),
+        "profileUpdatedAt": _iso(row.get("profile_updated_at")),
         "mustChangePassword": row.get("must_change_password", False),
         # versioned, so the browser may cache the image indefinitely
         "avatarUrl": f"/api/avatars/{row['id']}?v={int(avatar.timestamp())}" if avatar else None,
@@ -98,7 +112,8 @@ def get_password_hash(user_id: str) -> Optional[str]:
 def list_users(search: str = "", role: str = "", status: str = "", limit: int = 20, offset: int = 0) -> tuple[list[dict], int]:
     where, params = ["TRUE"], {}
     if search:
-        where.append("(u.username ILIKE %(q)s OR u.email ILIKE %(q)s OR u.full_name ILIKE %(q)s)")
+        where.append("(u.username ILIKE %(q)s OR u.email ILIKE %(q)s OR u.full_name ILIKE %(q)s "
+                     "OR u.employee_number ILIKE %(q)s)")
         params["q"] = f"%{search.strip()}%"
     if role in ROLES:
         where.append("u.role = %(role)s")
@@ -112,7 +127,7 @@ def list_users(search: str = "", role: str = "", status: str = "", limit: int = 
     cond = " AND ".join(where)
     total = db.fetchrow(f"SELECT count(*)::int AS n FROM {T_USER} u WHERE {cond}", params)["n"]
     rows = db.fetch(
-        f"SELECT {USER_COLUMNS} FROM {USER_FROM} WHERE {cond} ORDER BY u.full_name, u.username "
+        f"SELECT {USER_COLUMNS} FROM {USER_FROM} WHERE {cond} ORDER BY COALESCE(u.full_name, u.username), u.username "
         "LIMIT %(limit)s OFFSET %(offset)s",
         {**params, "limit": limit, "offset": offset},
     )
@@ -158,6 +173,16 @@ def update_user(user_id: str, data: dict, actor_id: Optional[str], password_hash
         # a new password, deactivation or role change signs the user out everywhere
         if password_hash or data.get("isActive") is False or "role" in data:
             conn.execute(f"UPDATE {T_SESSION} SET revoked_at = now() WHERE user_id = %s AND revoked_at IS NULL", (user_id,))
+    return get_user(user_id)
+
+
+def update_profile(user_id: str, data: dict) -> Optional[dict]:
+    """The user's own changes to their profile ("My profile")."""
+    cols = {PROFILE_FIELDS[k]: v for k, v in data.items() if k in PROFILE_FIELDS}
+    if cols:
+        sets = [f"{c} = %({c})s" for c in cols] + ["profile_updated_at = now()", "updated_at = now()", "updated_by = %(id)s"]
+        with db.transaction() as conn:
+            conn.execute(f"UPDATE {T_USER} SET {', '.join(sets)} WHERE id = %(id)s", {**cols, "id": user_id})
     return get_user(user_id)
 
 
@@ -249,7 +274,7 @@ def main(argv: list[str]) -> int:
     c = sub.add_parser("create", help="create an account (password is generated and printed once)")
     c.add_argument("--username", required=True)
     c.add_argument("--email", required=True)
-    c.add_argument("--full-name", required=True)
+    c.add_argument("--full-name", default="", help="optional: the user can fill it in under My profile")
     c.add_argument("--role", choices=ROLES, default="user")
     r = sub.add_parser("reset-password", help="set a new generated password and unlock the account")
     r.add_argument("--username", required=True)
@@ -260,7 +285,7 @@ def main(argv: list[str]) -> int:
         if args.cmd == "create":
             if exists("username", args.username) or exists("email", args.email):
                 sys.exit("username or email already exists")
-            user = create_user({"username": args.username.lower(), "email": args.email.lower(), "fullName": args.full_name,
+            user = create_user({"username": args.username.lower(), "email": args.email.lower(), "fullName": args.full_name or None,
                                 "role": args.role, "isActive": True, "mustChangePassword": True},
                                hash_password(password), None)
         else:

@@ -49,7 +49,7 @@ class MemoryAccounts:
                 if (not search or search.lower() in (u["username"] + u["email"] + u["full_name"]).lower())
                 and (not role or u["role"] == role)
                 and (status != "active" or u["is_active"]) and (status != "inactive" or not u["is_active"])]
-        rows.sort(key=lambda u: u["full_name"])
+        rows.sort(key=lambda u: u["full_name"] or u["username"])
         return rows[offset:offset + limit], len(rows)
 
     def exists(self, column, value, exclude_id=None):
@@ -61,7 +61,7 @@ class MemoryAccounts:
     # writes
     def create_user(self, data, password_hash, actor_id):
         cols = {accounts.EDITABLE[k]: v for k, v in data.items() if k in accounts.EDITABLE}
-        u = self.add(cols.pop("username"), cols.pop("email"), cols.pop("full_name"), "x", **cols)
+        u = self.add(cols.pop("username"), cols.pop("email"), cols.pop("full_name", None), "x", **cols)
         u["password_hash"] = password_hash
         return u
 
@@ -114,6 +114,12 @@ class MemoryAccounts:
             if s["user_id"] == user_id and h != keep_token_hash:
                 s["revoked"] = True
 
+    def update_profile(self, user_id, data):
+        u = self.users[user_id]
+        u.update({accounts.EDITABLE[k]: v for k, v in data.items() if k in accounts.EDITABLE})
+        u["profile_updated_at"] = now()
+        return u
+
     def set_own_password(self, user_id, password_hash):
         self.users[user_id].update(password_hash=password_hash, must_change_password=False)
 
@@ -124,7 +130,7 @@ def store(monkeypatch, fake_db):
     for name in ("find_for_login", "get_user", "get_password_hash", "list_users", "exists", "count_active_superadmins",
                  "create_user", "update_user", "unlock_user", "delete_user", "record_login_failure",
                  "record_login_success", "create_session", "session_user", "revoke_session", "revoke_other_sessions",
-                 "set_own_password"):
+                 "set_own_password", "update_profile"):
         monkeypatch.setattr(accounts, name, getattr(mem, name))
     auth_module.forget_sessions()
     mem.admin = mem.add("superadmin", "admin@kopicalf.co.id", "Super Admin", "Admin1234", role="superadmin")
@@ -314,3 +320,39 @@ def test_admin_sets_other_avatar(anon, store, pictures):
     assert res.status_code == 200 and res.json()["user"]["avatarUrl"]
     assert anon.delete(f"/api/users/{store.user['id']}/avatar").json()["user"]["avatarUrl"] is None
     assert TestClient(app, base_url="https://testserver").get(f"/api/avatars/{store.user['id']}").status_code == 401
+
+
+
+# ---------------------------------------------------------------- self-service profile
+
+def test_admin_creates_login_only_and_user_completes_profile(anon, store, monkeypatch):
+    from app import profile
+    monkeypatch.setattr(profile, "branch_exists", lambda code: code == "CCI01")
+    login(anon, "superadmin", "Admin1234")
+    res = anon.post("/api/users", json={"username": "baru", "email": "baru@kopicalf.co.id", "password": "Baru12345"})
+    assert res.status_code == 201, res.text
+    created = res.json()["user"]
+    assert created["fullName"] is None and created["displayName"] == "baru" and created["profileComplete"] is False
+    anon.post("/api/auth/logout")
+
+    login(anon, "baru", "Baru12345")
+    me = "/api/auth/me"
+    # cannot change the login itself
+    assert anon.patch(me, json={"role": "superadmin"}).status_code == 422
+    assert anon.patch(me, json={"username": "other"}).json()["field"] == "username"
+    # validation
+    assert anon.patch(me, json={"gender": "x"}).json()["field"] == "gender"
+    assert anon.patch(me, json={"birthDate": "2999-01-01"}).json()["field"] == "birthDate"
+    assert anon.patch(me, json={"phoneNumber": "abc"}).json()["field"] == "phoneNumber"
+    assert anon.patch(me, json={"workBranchCode": "NOPE"}).json()["field"] == "workBranchCode"
+    assert anon.patch(me, json={"fullName": "  "}).json()["field"] == "fullName"
+
+    res = anon.patch(me, json={"fullName": " Budi  Baru ", "phoneNumber": "0812 3456 789", "jobTitle": "Barista",
+                               "department": "Operations", "employeeNumber": "KC-0012", "gender": "male",
+                               "birthDate": "1998-05-17", "address": "Jl. Supratman 1", "city": "Bandung",
+                               "workBranchCode": "CCI01"})
+    assert res.status_code == 200, res.text
+    u = res.json()["user"]
+    assert u["fullName"] == "Budi Baru" and u["displayName"] == "Budi Baru" and u["profileComplete"] is True
+    assert u["birthDate"] == "1998-05-17" and u["workBranchCode"] == "CCI01" and u["profileUpdatedAt"]
+    assert anon.get(me).json()["user"]["employeeNumber"] == "KC-0012"

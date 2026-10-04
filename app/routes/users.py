@@ -11,7 +11,6 @@
 Safeguards: you cannot delete or deactivate yourself, and the last active
 superadmin can be neither removed, deactivated nor demoted.
 """
-import re
 from typing import Literal, Optional
 from uuid import UUID
 
@@ -20,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app import accounts, avatars
+from app.profile import ProfileError, clean_profile
 from app.routes.auth import AvatarUpload, forget_sessions, require_superadmin
 from app.security import EMAIL_RE, USERNAME_RE, hash_password, password_problem
 
@@ -38,6 +38,12 @@ class UserFields(BaseModel):
     notes: Optional[str] = Field(default=None, max_length=500)
     mustChangePassword: Optional[bool] = None
     password: Optional[str] = Field(default=None, max_length=128)
+    employeeNumber: Optional[str] = Field(default=None, max_length=32)
+    gender: Optional[Literal["male", "female", ""]] = None
+    birthDate: Optional[str] = Field(default=None, max_length=10)
+    address: Optional[str] = Field(default=None, max_length=300)
+    city: Optional[str] = Field(default=None, max_length=80)
+    workBranchCode: Optional[str] = Field(default=None, max_length=32)
 
 
 def _error(message: str, status: int = 422, field: Optional[str] = None) -> JSONResponse:
@@ -48,9 +54,12 @@ def _clean(body: UserFields, creating: bool, user_id: Optional[str] = None) -> t
     """Normalised fields to store, or a validation error response."""
     data = body.model_dump(exclude_unset=True)
     data.pop("password", None)
-    for key in ("phoneNumber", "jobTitle", "department", "notes"):
-        if key in data:
-            data[key] = (data[key] or "").strip() or None
+    try:
+        data.update(clean_profile(data))
+    except ProfileError as exc:
+        return None, _error(str(exc), field=exc.field)
+    if "notes" in data:
+        data["notes"] = (data["notes"] or "").strip() or None
     if "username" in data:
         data["username"] = (data["username"] or "").strip().lower()
         if not USERNAME_RE.match(data["username"]):
@@ -63,14 +72,9 @@ def _clean(body: UserFields, creating: bool, user_id: Optional[str] = None) -> t
             return None, _error("Format email tidak valid", field="email")
         if accounts.exists("email", data["email"], user_id):
             return None, _error("Email sudah dipakai", 409, "email")
-    if "fullName" in data:
-        data["fullName"] = re.sub(r"\s+", " ", data["fullName"] or "").strip()
-        if not data["fullName"]:
-            return None, _error("Nama lengkap wajib diisi", field="fullName")
-    if "phoneNumber" in data and data["phoneNumber"] and not re.fullmatch(r"[0-9+()\-\s]{6,32}", data["phoneNumber"]):
-        return None, _error("Nomor telepon tidak valid", field="phoneNumber")
     if creating:
-        for key, label in (("username", "Username"), ("email", "Email"), ("fullName", "Nama lengkap")):
+        # the login only; the user completes the profile themself under "My profile"
+        for key, label in (("username", "Username"), ("email", "Email")):
             if not data.get(key):
                 return None, _error(f"{label} wajib diisi", field=key)
         data.setdefault("role", "user")

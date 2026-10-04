@@ -22,13 +22,14 @@ import logging
 from datetime import timedelta
 from typing import Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from app import database as db
 from app.config import get_settings
 from app.database import TABLE_TRANSACTIONS
+from app.routes.auth import current_user
 from app.utils import TTLCache, today
 
 logger = logging.getLogger("realtime")
@@ -132,7 +133,7 @@ async def websocket(ws: WebSocket):
         hub.leave(ws)
 
 
-@router.get("/api/realtime/version")
+@router.get("/api/realtime/version", dependencies=[Depends(current_user)])
 def version():
     """Same stamps over HTTP, for clients whose WebSocket is unavailable."""
     state = _cache.get("version")

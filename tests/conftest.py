@@ -12,6 +12,10 @@ from app.config import get_settings
 from app.main import app
 from app.routes import branches as branches_module
 from app.routes import transactions as tx_module
+from app.routes.auth import current_user
+
+SIGNED_IN = {"id": "00000000-0000-0000-0000-000000000001", "username": "tester", "email": "tester@kopicalf.co.id",
+             "full_name": "Test Admin", "role": "superadmin", "is_active": True}
 
 
 def menu(name, qty, price, *, detail="ORIGINAL KOPI SUSU", discount=0, vat=0, packages=(), batch="1",
@@ -184,5 +188,10 @@ def fake_db(monkeypatch, tmp_path):
 
 @pytest.fixture
 def client(fake_db):
-    with TestClient(app) as c:
-        yield c
+    """API client signed in as a superadmin (auth itself is tested in test_auth.py)."""
+    app.dependency_overrides[current_user] = lambda: SIGNED_IN
+    try:
+        with TestClient(app) as c:
+            yield c
+    finally:
+        app.dependency_overrides.pop(current_user, None)

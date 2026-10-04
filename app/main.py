@@ -6,21 +6,23 @@ Run locally: uvicorn app.main:app --reload --port 8002
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import database as db
 from app.config import get_settings
 from app.utils import data_version
-from app.routes import (branches_router, exports_router, live_router, overview_router, realtime_router, summary_router,
-                        transactions_router)
+from app.routes import (auth_router, branches_router, exports_router, live_router, overview_router, realtime_router,
+                        summary_router, transactions_router, users_router)
+from app.routes.auth import current_user
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("integrated_portal_be")
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 
 
 class SelectiveGZipMiddleware(GZipMiddleware):
@@ -52,7 +54,7 @@ app.add_middleware(SelectiveGZipMiddleware, minimum_size=1024)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origin_list,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -65,13 +67,25 @@ async def remember_data_version(request: Request, call_next):
         data_version.reset(token)
 
 
-app.include_router(transactions_router)
-app.include_router(summary_router)
-app.include_router(branches_router)
-app.include_router(exports_router)
-app.include_router(overview_router)
-app.include_router(live_router)
+# every data endpoint needs a signed-in user; /api/users additionally a superadmin.
+# Open: /health, /, /api/auth/login|logout and the /ws socket (it only carries
+# data-version stamps, no data; its HTTP twin /api/realtime/version is protected).
+signed_in = [Depends(current_user)]
+app.include_router(auth_router)
+app.include_router(users_router)
+app.include_router(transactions_router, dependencies=signed_in)
+app.include_router(summary_router, dependencies=signed_in)
+app.include_router(branches_router, dependencies=signed_in)
+app.include_router(exports_router, dependencies=signed_in)
+app.include_router(overview_router, dependencies=signed_in)
+app.include_router(live_router, dependencies=signed_in)
 app.include_router(realtime_router)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error(request: Request, exc: StarletteHTTPException):
+    # same shape as the other API errors: {"error": "..."}
+    return JSONResponse({"error": exc.detail}, status_code=exc.status_code, headers=getattr(exc, "headers", None))
 
 
 @app.exception_handler(Exception)

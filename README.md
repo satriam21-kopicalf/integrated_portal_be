@@ -38,9 +38,10 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | POST | `/api/auth/login` | Login: `{"identifier", "password", "method": "username"\|"email", "remember"}` → cookie sesi HttpOnly |
 | POST | `/api/auth/logout` | Logout (sesi dicabut) |
 | GET | `/api/auth/me` | User yang sedang login |
+| PATCH | `/api/auth/me` | *My profile*: user mengisi profilnya sendiri (`fullName`, `phoneNumber`, `jobTitle`, `department`, `employeeNumber`, `gender`, `birthDate`, `address`, `city`, `workBranchCode`) |
 | POST | `/api/auth/password` | Ganti password sendiri `{"currentPassword", "newPassword"}` |
 | PUT/DELETE | `/api/auth/me/avatar` | Foto profil sendiri `{"image": "data:image/webp;base64,..."}` |
-| GET/POST | `/api/users` | (superadmin) daftar user (`search`, `role`, `status`, `page`, `pageSize`) / buat user |
+| GET/POST | `/api/users` | (superadmin) daftar user (`search`, `role`, `status`, `page`, `pageSize`) / buat user (cukup `username`, `email`, `password`, `role`) |
 | GET/PATCH/DELETE | `/api/users/{id}` | (superadmin) detail / ubah (termasuk reset `password`) / hapus |
 | POST | `/api/users/{id}/unlock` | (superadmin) buka kunci akun |
 | PUT/DELETE | `/api/users/{id}/avatar` | (superadmin) foto profil user lain |

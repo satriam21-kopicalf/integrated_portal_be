@@ -100,7 +100,9 @@ Agregat dibangun ulang per tanggal oleh `app/aggregates.py` dan direkonsiliasi d
 
 ## 8. Login, akun & role
 
-`app/routes/auth.py`, `app/routes/users.py`, `app/routes/avatars.py`, `app/accounts.py`, `app/security.py` — migration `004_user_account.sql`, `005_user_avatar.sql`.
+`app/routes/auth.py`, `app/routes/users.py`, `app/routes/avatars.py`, `app/accounts.py`, `app/security.py` — `app/profile.py` — migration `004_user_account.sql`, `005_user_avatar.sql`, `006_user_profile.sql`.
+
+Superadmin cukup membuat **login** (username, email, password, role); user melengkapi identitasnya sendiri di *My profile* (`PATCH /api/auth/me`).
 
 **Tabel `integration_portal.user_account`**
 
@@ -109,11 +111,15 @@ Agregat dibangun ulang per tanggal oleh `app/aggregates.py` dan direkonsiliasi d
 | `id` | uuid |
 | `username` | unik (tidak peka huruf besar/kecil), 3–32 karakter `a-z 0-9 . _ -`, disimpan huruf kecil |
 | `email` | unik (tidak peka huruf besar/kecil), disimpan huruf kecil |
-| `full_name` | nama lengkap (ditampilkan di profil sidebar) |
+| `full_name` | nama lengkap (opsional sampai diisi user; selama kosong UI menampilkan username — `displayName`) |
 | `password_hash` | scrypt (`scrypt$N$r$p$salt$hash`); password tidak pernah disimpan/dikembalikan |
 | `role` | `superadmin` (akses penuh: platform & user accounts) / `user` (hanya dashboard Overview & Sales) |
 | `is_active` | user nonaktif tidak bisa login; menonaktifkan langsung mencabut semua sesinya |
-| `phone_number`, `job_title`, `department`, `notes` | profil (opsional) |
+| `phone_number`, `job_title`, `department` | profil; bersama `full_name` menentukan `profileComplete` |
+| `employee_number`, `gender` (`male`/`female`), `birth_date`, `address`, `city` | profil (opsional) |
+| `work_branch_code` | lokasi kerja = `integration_esb.master_branches.branch_code` (API juga mengembalikan `workBranchName`) |
+| `profile_updated_at` | terakhir user mengubah profilnya sendiri |
+| `notes` | catatan admin (hanya superadmin) |
 | `must_change_password` | wajib ganti password setelah login berikutnya |
 | `last_login_at`, `last_login_ip` | login terakhir |
 | `failed_login_attempts`, `locked_until` | 5 kali salah berturut-turut → terkunci 15 menit |
@@ -125,13 +131,14 @@ Agregat dibangun ulang per tanggal oleh `app/aggregates.py` dan direkonsiliasi d
 - Login dengan **username** atau **email** (`method`), pesan galat sama untuk user tidak ada / password salah, dan waktu respons sama (tidak bisa menebak akun yang terdaftar).
 - Sesi: token acak 256-bit di cookie `portal_session` (HttpOnly, Secure, SameSite=Lax, 12 jam atau 30 hari bila "keep me signed in"); database hanya menyimpan SHA-256 token. Cookie berlaku di `portal.kopicalf.co.id` karena browser memanggil API lewat proxy Next.js (same-origin).
 - Ganti password sendiri mencabut sesi di perangkat lain; reset password, ganti role atau menonaktifkan user mencabut semua sesi user tersebut. Hasil pengecekan sesi di-cache 20 detik per worker.
+- *My profile* (`PATCH /api/auth/me`) hanya menerima field profil (`fullName`, `phoneNumber`, `jobTitle`, `department`, `employeeNumber`, `gender`, `birthDate`, `address`, `city`, `workBranchCode`); field lain (username, email, role, status, notes) ditolak 422. Validasi sama dengan form superadmin (`app/profile.py`): telepon `0-9 + ( ) -`, nomor karyawan `A-Z 0-9 . / -`, tanggal lahir 1900…hari ini, lokasi kerja harus ada di master branch.
 - Pengaman: tidak bisa menghapus/menonaktifkan akun sendiri; superadmin aktif terakhir tidak bisa dihapus, dinonaktifkan atau diturunkan rolenya.
 - Foto profil: dikirim sebagai data URL yang sudah dipotong & diperkecil di browser (256×256); server memeriksa tipe (webp/jpeg/png), ukuran (≤ 512 KB) dan *file signature*.
 
 **CLI** (di VPS: `docker exec integrated-portal-be python -m app.accounts …`)
 
 ```bash
-python -m app.accounts create --username superadmin --email admin@kopicalf.co.id --full-name "Super Admin" --role superadmin
+python -m app.accounts create --username budi --email budi@kopicalf.co.id            # --full-name opsional, --role user|superadmin
 python -m app.accounts reset-password --username superadmin     # password baru + buka kunci
 ```
 

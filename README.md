@@ -35,9 +35,20 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | GET | `/api/overview/basket` | Baris menu & qty per bill, food share, food attach rate |
 | WS | `/ws` | Realtime: pesan `hello`/`update` saat data baru tersinkron atau agregat diperbarui, `ping` tiap 25 dtk (lihat [docs/README.md](docs/README.md#5-realtime-websocket)) |
 | GET | `/api/realtime/version` | Versi data yang sama via HTTP (fallback bila WebSocket putus) |
+| POST | `/api/auth/login` | Login: `{"identifier", "password", "method": "username"\|"email", "remember"}` → cookie sesi HttpOnly |
+| POST | `/api/auth/logout` | Logout (sesi dicabut) |
+| GET | `/api/auth/me` | User yang sedang login |
+| POST | `/api/auth/password` | Ganti password sendiri `{"currentPassword", "newPassword"}` |
+| PUT/DELETE | `/api/auth/me/avatar` | Foto profil sendiri `{"image": "data:image/webp;base64,..."}` |
+| GET/POST | `/api/users` | (superadmin) daftar user (`search`, `role`, `status`, `page`, `pageSize`) / buat user |
+| GET/PATCH/DELETE | `/api/users/{id}` | (superadmin) detail / ubah (termasuk reset `password`) / hapus |
+| POST | `/api/users/{id}/unlock` | (superadmin) buka kunci akun |
+| PUT/DELETE | `/api/users/{id}/avatar` | (superadmin) foto profil user lain |
+| GET | `/api/avatars/{id}` | Foto profil (URL berversi, cache 1 tahun) |
 | GET | `/api/live` | Penjualan hari ini (vs kemarin di jam yang sama, per jam) + transaksi Sales terbaru yang masuk (`limit`, `branch`, `channel`); langsung dari `transactions_pos_sales`, cache 20 dtk |
 
 Tanpa `dateFrom`/`dateTo`, rentang default adalah 65 hari terakhir (Asia/Jakarta). Dokumentasi interaktif: `https://api.kopicalf.co.id/docs`.
+**Semua endpoint data membutuhkan login** (cookie `portal_session`, atau `Authorization: Bearer <token>`); `/api/users` hanya untuk role `superadmin`. Terbuka: `/health`, `/api/auth/login|logout`, WebSocket `/ws`.
 Semua endpoint menerima parameter opsional `v` (versi data dari WebSocket) yang ikut menjadi kunci cache respons.
 
 Dokumentasi lengkap (arsitektur, aturan data, realtime, operasional): [docs/README.md](docs/README.md).
@@ -110,6 +121,7 @@ Lihat [.env.example](.env.example). Kredensial database sama dengan yang dipakai
 | `EXPORT_MAX_CONCURRENT` | 2 | Job export bersamaan (seluruh container) |
 | `TIMEZONE` | `Asia/Jakarta` | Untuk rentang tanggal default |
 | `OVERVIEW_DATA_FROM` | `2025-08-01` | Awal riwayat lengkap untuk perbandingan Overview |
+| `SESSION_HOURS` / `SESSION_REMEMBER_DAYS` | 12 / 30 | Masa berlaku sesi login (biasa / "keep me signed in") |
 
 ## Development
 

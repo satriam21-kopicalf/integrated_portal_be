@@ -42,6 +42,9 @@ Browser ── portal.kopicalf.co.id (Vercel, Next.js) ── /api/* proxy ─�
 | `agg_sales_hourly` / `agg_hourly_monthly` | per jam (dan rollup bulanan per hari-dalam-minggu × jam) |
 | `agg_menu_daily` / `agg_menu_monthly` | per menu × kind (menu/package/extra) |
 | `agg_refresh_log` | 1 baris per tanggal: waktu refresh, `synced_at` sumber, rekonsiliasi subtotal |
+| `user_account` | akun login dashboard (lihat §8) |
+| `user_session` | sesi login (hash token, kedaluwarsa, dicabut) |
+| `user_avatar` | foto profil (webp/jpeg/png, maks. 512 KB) |
 | `schema_migrations` | migration yang sudah dijalankan (`app/migrations/*.sql`, otomatis setelah deploy) |
 
 Agregat dibangun ulang per tanggal oleh `app/aggregates.py` dan direkonsiliasi dengan data mentah. Cron VPS `/etc/cron.d/integrated-portal-aggregates`: tiap jam menit :20 (hari ini + kemarin) dan 02:50 WIB (8 hari).
@@ -58,6 +61,7 @@ Agregat dibangun ulang per tanggal oleh `app/aggregates.py` dan direkonsiliasi d
 | `GET /api/live` | hari ini: total, per jam, per channel, vs kemarin di jam yang sama (sales, bills, nett), total & per jam kemarin, batch sinkron terakhir, transaksi terbaru (`limit`, `branch`, `channel`) |
 | `POST /api/exports`, `GET /api/exports/{id}`, `/download` | export Excel (proses terpisah per job, maks. `EXPORT_MAX_CONCURRENT`) |
 | `WS /ws`, `GET /api/realtime/version` | realtime (lihat §5) |
+| `/api/auth/*`, `/api/users/*`, `/api/avatars/*` | login, akun & foto profil (lihat §8) |
 
 ## 5. Realtime (WebSocket)
 
@@ -85,6 +89,7 @@ Agregat dibangun ulang per tanggal oleh `app/aggregates.py` dan direkonsiliasi d
 | `PUBLIC_BASE_URL` | kosong | basis URL absolut link unduhan export (mis. `https://api.kopicalf.co.id`) |
 | `EXPORT_MAX_CONCURRENT`, `EXPORT_TTL_HOURS` | 2, 24 | export |
 | `OVERVIEW_DATA_FROM` | `2025-08-01` | awal riwayat lengkap untuk perbandingan |
+| `SESSION_HOURS`, `SESSION_REMEMBER_DAYS` | 12, 30 | masa berlaku sesi (biasa / "keep me signed in") |
 
 ## 7. Operasional
 
@@ -92,3 +97,42 @@ Agregat dibangun ulang per tanggal oleh `app/aggregates.py` dan direkonsiliasi d
 - **Traefik**: `/docker/traefik-gexn/api-router.yml` di-mount sebagai file tunggal — edit *in-place*. Router `api-kopicalf` → `http://127.0.0.1:8002`.
 - **Log**: `docker logs integrated-portal-be`, `/var/log/integrated-portal-be-deploy.log`, `/var/log/integrated-portal-aggregates.log`.
 - **Cek realtime**: `curl https://api.kopicalf.co.id/api/realtime/version`; handshake WebSocket harus `101` untuk origin yang diizinkan.
+
+## 8. Login, akun & role
+
+`app/routes/auth.py`, `app/routes/users.py`, `app/routes/avatars.py`, `app/accounts.py`, `app/security.py` — migration `004_user_account.sql`, `005_user_avatar.sql`.
+
+**Tabel `integration_portal.user_account`**
+
+| Kolom | Keterangan |
+|---|---|
+| `id` | uuid |
+| `username` | unik (tidak peka huruf besar/kecil), 3–32 karakter `a-z 0-9 . _ -`, disimpan huruf kecil |
+| `email` | unik (tidak peka huruf besar/kecil), disimpan huruf kecil |
+| `full_name` | nama lengkap (ditampilkan di profil sidebar) |
+| `password_hash` | scrypt (`scrypt$N$r$p$salt$hash`); password tidak pernah disimpan/dikembalikan |
+| `role` | `superadmin` (akses penuh: platform & user accounts) / `user` (hanya dashboard Overview & Sales) |
+| `is_active` | user nonaktif tidak bisa login; menonaktifkan langsung mencabut semua sesinya |
+| `phone_number`, `job_title`, `department`, `notes` | profil (opsional) |
+| `must_change_password` | wajib ganti password setelah login berikutnya |
+| `last_login_at`, `last_login_ip` | login terakhir |
+| `failed_login_attempts`, `locked_until` | 5 kali salah berturut-turut → terkunci 15 menit |
+| `password_changed_at`, `avatar_updated_at` | audit; versi URL foto |
+| `created_at`, `created_by`, `updated_at`, `updated_by` | audit (by = user yang mengubah) |
+
+**Keamanan**
+
+- Login dengan **username** atau **email** (`method`), pesan galat sama untuk user tidak ada / password salah, dan waktu respons sama (tidak bisa menebak akun yang terdaftar).
+- Sesi: token acak 256-bit di cookie `portal_session` (HttpOnly, Secure, SameSite=Lax, 12 jam atau 30 hari bila "keep me signed in"); database hanya menyimpan SHA-256 token. Cookie berlaku di `portal.kopicalf.co.id` karena browser memanggil API lewat proxy Next.js (same-origin).
+- Ganti password sendiri mencabut sesi di perangkat lain; reset password, ganti role atau menonaktifkan user mencabut semua sesi user tersebut. Hasil pengecekan sesi di-cache 20 detik per worker.
+- Pengaman: tidak bisa menghapus/menonaktifkan akun sendiri; superadmin aktif terakhir tidak bisa dihapus, dinonaktifkan atau diturunkan rolenya.
+- Foto profil: dikirim sebagai data URL yang sudah dipotong & diperkecil di browser (256×256); server memeriksa tipe (webp/jpeg/png), ukuran (≤ 512 KB) dan *file signature*.
+
+**CLI** (di VPS: `docker exec integrated-portal-be python -m app.accounts …`)
+
+```bash
+python -m app.accounts create --username superadmin --email admin@kopicalf.co.id --full-name "Super Admin" --role superadmin
+python -m app.accounts reset-password --username superadmin     # password baru + buka kunci
+```
+
+Password dibuat acak dan ditampilkan sekali (atau diambil dari env `PORTAL_NEW_PASSWORD`); akun ditandai wajib ganti password saat login pertama.

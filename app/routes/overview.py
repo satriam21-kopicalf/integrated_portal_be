@@ -866,7 +866,7 @@ def build_growth(f: Filters, granularity: str, basis: str) -> dict:
                         "bills": int((cur.get(key) or {}).get("bills") or 0), "compareBills": int((cmp.get(key) or {}).get("bills") or 0) if complete else None,
                         "growthAbs": c - p if complete else None, "growthPct": _growth(c, p) if complete else None,
                         # percentage points of the total growth this row explains (they add up to the total growth %)
-                        "contributionPp": r2(ratio((c - p) * 100, cmp_total)) if complete and cmp_total else None,
+                        "contributionPp": round(ratio((c - p) * 100, cmp_total), 4) if complete and cmp_total else None,
                         "status": None if not complete else "new" if c and not p else "lost" if p and not c else
                         "growing" if c > p else "declining" if c < p else "flat"})
         return sorted(out, key=lambda x: -(x["growthAbs"] if x["growthAbs"] is not None else x["subtotal"]))

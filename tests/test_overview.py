@@ -328,8 +328,8 @@ def test_growth_vs_previous_period(client):
     assert second["compareSubtotal"] == 100_000 and second["growthPct"] == 400.0
     rows = {b["key"]: b for b in body["branches"]}
     assert rows["TGP17"]["status"] == "new" and rows["OLD01"]["status"] == "lost" and rows["CCI01"]["status"] == "flat"
-    assert rows["TGP17"]["contributionPp"] == 23.81 and rows["OLD01"]["contributionPp"] == -4.76
-    assert round(sum(b["contributionPp"] for b in body["branches"]), 2) == t["growthPct"]  # contributions add up
+    assert rows["TGP17"]["contributionPp"] == 23.8095 and rows["OLD01"]["contributionPp"] == -4.7619
+    assert abs(sum(b["contributionPp"] for b in body["branches"]) - t["growthPct"]) < 0.01  # contributions add up
     assert rows["CCI01"]["label"] == "Kopi Calf Supratman"
     assert {c["key"] for c in body["channels"]} == {"Dine In", "GoFood"}
 

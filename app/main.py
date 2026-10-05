@@ -15,7 +15,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app import database as db
 from app.config import get_settings
 from app.utils import data_version
-from app.routes import (auth_router, avatars_router, branches_router, exports_router, live_router, overview_router, realtime_router,
+from app.routes import (auth_router, avatars_router, branches_router, cost_control_router, exports_router, live_router,
+                        overview_router, realtime_router,
                         summary_router, transactions_router, users_router)
 from app.routes.auth import current_user
 
@@ -80,6 +81,7 @@ app.include_router(branches_router, dependencies=signed_in)
 app.include_router(exports_router, dependencies=signed_in)
 app.include_router(overview_router, dependencies=signed_in)
 app.include_router(live_router, dependencies=signed_in)
+app.include_router(cost_control_router, dependencies=signed_in)
 app.include_router(realtime_router)
 
 

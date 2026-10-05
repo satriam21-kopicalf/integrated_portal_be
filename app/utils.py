@@ -68,6 +68,10 @@ class TTLCache:
                 return None
             return value
 
+    def clear(self) -> None:
+        with self._lock:
+            self._data = {}
+
     def set(self, key: str, value: Any, ttl: int) -> None:
         with self._lock:
             now = time.monotonic()

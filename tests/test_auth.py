@@ -39,7 +39,8 @@ class MemoryAccounts:
         return next((u for u in self.users.values() if u[key].lower() == identifier.strip().lower()), None)
 
     def get_user(self, user_id):
-        return self.users.get(str(user_id))
+        u = self.users.get(str(user_id))
+        return dict(u) if u else None  # a snapshot, like a row read from the database
 
     def get_password_hash(self, user_id):
         return self.users[str(user_id)]["password_hash"]
@@ -63,11 +64,14 @@ class MemoryAccounts:
         cols = {accounts.EDITABLE[k]: v for k, v in data.items() if k in accounts.EDITABLE}
         u = self.add(cols.pop("username"), cols.pop("email"), cols.pop("full_name", None), "x", **cols)
         u["password_hash"] = password_hash
+        u["branch_codes"] = list(data.get("branches") or [])
         return u
 
     def update_user(self, user_id, data, actor_id, password_hash=None):
         u = self.users[user_id]
         u.update({accounts.EDITABLE[k]: v for k, v in data.items() if k in accounts.EDITABLE})
+        if "branches" in data:
+            u["branch_codes"] = list(data["branches"])
         if password_hash:
             u.update(password_hash=password_hash, failed_login_attempts=0, locked_until=None)
         if password_hash or data.get("isActive") is False or "role" in data:
@@ -134,7 +138,7 @@ def store(monkeypatch, fake_db):
         monkeypatch.setattr(accounts, name, getattr(mem, name))
     auth_module.forget_sessions()
     mem.admin = mem.add("superadmin", "admin@kopicalf.co.id", "Super Admin", "Admin1234", role="superadmin")
-    mem.user = mem.add("kasir", "kasir@kopicalf.co.id", "Kasir Satu", "Kasir1234")
+    mem.user = mem.add("kasir", "kasir@kopicalf.co.id", "Kasir Satu", "Kasir1234", branch_codes=["CCI01"])
     return mem
 
 
@@ -205,13 +209,23 @@ def test_user_role_has_no_user_management(anon, store):
 def test_user_crud(anon, store):
     login(anon, "superadmin", "Admin1234")
     body = {"username": "Budi.S", "email": "Budi@Kopicalf.co.id", "fullName": "  Budi   Santoso ", "role": "user",
-            "password": "Budi12345", "phoneNumber": "0812-3456-789", "department": "Operations"}
+            "password": "Budi12345", "phoneNumber": "0812-3456-789", "department": "Operations",
+            "branches": ["TGP17", "CCI01", "CCI01"]}
     res = anon.post("/api/users", json=body)
     assert res.status_code == 201, res.text
     created = res.json()["user"]
     assert created["username"] == "budi.s" and created["email"] == "budi@kopicalf.co.id"
     assert created["fullName"] == "Budi Santoso" and created["department"] == "Operations"
+    assert created["branches"] == ["CCI01", "TGP17"]
     uid = created["id"]
+
+    # role "user" needs at least one known branch
+    assert anon.post("/api/users", json={**body, "username": "nob", "email": "nob@kopicalf.co.id", "branches": []}).json()["field"] == "branches"
+    missing = {k: v for k, v in body.items() if k != "branches"}
+    assert anon.post("/api/users", json={**missing, "username": "nob", "email": "nob@kopicalf.co.id"}).json()["field"] == "branches"
+    assert anon.post("/api/users", json={**body, "username": "nob", "email": "nob@kopicalf.co.id", "branches": ["XXX99"]}).json()["field"] == "branches"
+    assert anon.patch(f"/api/users/{uid}", json={"branches": []}).json()["field"] == "branches"
+    assert anon.patch(f"/api/users/{uid}", json={"branches": ["TGP17"]}).json()["user"]["branches"] == ["TGP17"]
 
     assert anon.post("/api/users", json={**body, "email": "x@kopicalf.co.id"}).json()["field"] == "username"
     assert anon.post("/api/users", json={**body, "username": "other", "email": "o@kopicalf.co.id", "password": "short"}).json()["field"] == "password"
@@ -224,6 +238,7 @@ def test_user_crud(anon, store):
 
     res = anon.patch(f"/api/users/{uid}", json={"role": "superadmin", "jobTitle": "Area Manager", "password": "Baru12345"})
     assert res.status_code == 200 and res.json()["user"]["role"] == "superadmin"
+    assert res.json()["user"]["branches"] == []  # superadmins see every branch
     assert security.verify_password("Baru12345", store.users[uid]["password_hash"])
 
     assert anon.delete(f"/api/users/{uid}").json()["ok"] is True
@@ -235,7 +250,7 @@ def test_safeguards(anon, store):
     me = store.admin["id"]
     assert anon.delete(f"/api/users/{me}").status_code == 409
     assert anon.patch(f"/api/users/{me}", json={"isActive": False}).status_code == 409
-    assert anon.patch(f"/api/users/{me}", json={"role": "user"}).json()["field"] == "role"  # last superadmin
+    assert anon.patch(f"/api/users/{me}", json={"role": "user", "branches": ["CCI01"]}).json()["field"] == "role"  # last superadmin
 
 
 def test_role_change_signs_the_user_out(anon, store):
@@ -329,7 +344,7 @@ def test_admin_creates_login_only_and_user_completes_profile(anon, store, monkey
     from app import profile
     monkeypatch.setattr(profile, "branch_exists", lambda code: code == "CCI01")
     login(anon, "superadmin", "Admin1234")
-    res = anon.post("/api/users", json={"username": "baru", "email": "baru@kopicalf.co.id", "password": "Baru12345"})
+    res = anon.post("/api/users", json={"username": "baru", "email": "baru@kopicalf.co.id", "password": "Baru12345", "branches": ["CCI01"]})
     assert res.status_code == 201, res.text
     created = res.json()["user"]
     assert created["fullName"] is None and created["displayName"] == "baru" and created["profileComplete"] is False
@@ -356,3 +371,78 @@ def test_admin_creates_login_only_and_user_completes_profile(anon, store, monkey
     assert u["fullName"] == "Budi Baru" and u["displayName"] == "Budi Baru" and u["profileComplete"] is True
     assert u["birthDate"] == "1998-05-17" and u["workBranchCode"] == "CCI01" and u["profileUpdatedAt"]
     assert anon.get(me).json()["user"]["employeeNumber"] == "KC-0012"
+
+
+# ---------------------------------------------------------------- branch scope (role "user")
+
+def test_user_sees_only_assigned_branches(anon, store, fake_db):
+    login(anon, "kasir", "Kasir1234")  # assigned to CCI01 only
+    assert anon.get("/api/cost-control/meta").status_code == 403  # Cost Control: superadmin only
+    assert [b["branch_code"] for b in anon.get("/api/branches").json()] == ["CCI01"]
+
+    rows = anon.get("/api/transactions?dateFrom=2026-09-29&dateTo=2026-09-30&type=all").json()["data"]
+    assert rows and {r["Branch Code"] if "Branch Code" in r else r.get("branchCode") for r in rows} <= {"CCI01", None}
+    # asking for another branch never widens the scope
+    fake_db.queries.clear()
+    anon.get("/api/transactions?dateFrom=2026-09-29&dateTo=2026-09-30&type=all&branch=TGP17")
+    assert any(p == ["-"] for _, params in fake_db.queries for p in (params or []) if isinstance(p, list))
+    assert anon.get("/api/transactions/S-001").status_code == 404  # TGP17 transaction
+    assert anon.get("/api/transactions/S-003").status_code == 200
+
+
+def test_user_without_branches_sees_nothing(anon, store, fake_db):
+    store.user["branch_codes"] = []
+    login(anon, "kasir", "Kasir1234")
+    assert anon.get("/api/branches").json() == []
+    assert anon.get("/api/transactions?dateFrom=2026-09-29&dateTo=2026-09-30&type=all").json()["data"] == []
+
+
+def test_exports_belong_to_their_owner(anon, store, fake_db):
+    other = TestClient(app, base_url="https://testserver")
+    login(anon, "kasir", "Kasir1234")
+    job = anon.post("/api/exports", json={"dateFrom": "2026-09-30", "dateTo": "2026-09-30", "type": "all"}).json()
+    assert job["branch"] == "CCI01" and "owner" not in job
+    assert [j["id"] for j in anon.get("/api/exports").json()["jobs"]] == [job["id"]]
+    assert anon.get(f"/api/exports/{job['id']}").status_code == 200
+
+    store.add("kasir2", "kasir2@kopicalf.co.id", "Kasir Dua", "Kasir1234", branch_codes=["TGP17"])
+    login(other, "kasir2", "Kasir1234")
+    assert other.get(f"/api/exports/{job['id']}").status_code == 404
+    assert other.get(f"/api/exports/{job['id']}/download").status_code == 404
+    assert other.get("/api/exports").json()["jobs"] == []
+    login(other, "superadmin", "Admin1234")
+    assert other.get(f"/api/exports/{job['id']}").status_code == 200
+
+
+# ---------------------------------------------------------------- activity log
+
+def test_activity_is_recorded(anon, store, fake_db):
+    assert login(anon, "kasir", "salah").status_code == 401
+    login(anon, "kasir", "Kasir1234")
+    anon.get("/api/transactions/S-003")
+    anon.get("/api/transactions/S-001")  # another branch
+    job = anon.post("/api/exports", json={"dateFrom": "2026-09-30", "dateTo": "2026-09-30"}).json()
+    anon.get(f"/api/exports/{job['id']}/download")
+    anon.get("/api/users")
+    assert anon.post("/api/activity/events", json={"action": "page.view", "page": "/sales"}).status_code == 204
+    assert anon.post("/api/activity/events", json={"action": "user.delete"}).status_code == 422
+    assert anon.get("/api/activity").status_code == 403  # superadmin only
+    anon.post("/api/auth/logout")
+
+    log = [(e["action"], e["status"], e["username"]) for e in fake_db.activity]
+    assert log[:2] == [("auth.login_failed", "failed", "kasir"), ("auth.login", "ok", "kasir")]
+    assert ("transaction.view", "ok", "kasir") in log and ("transaction.view", "denied", "kasir") in log
+    assert ("export.create", "ok", "kasir") in log and ("export.done", "ok", "kasir") in log
+    assert ("export.download", "ok", "kasir") in log
+    assert ("access.denied", "denied", "kasir") in log and ("page.view", "ok", "kasir") in log
+    assert log[-1] == ("auth.logout", "ok", "kasir")
+    created = next(e for e in fake_db.activity if e["action"] == "export.create")
+    assert created["details"]["branches"] == ["CCI01"] and created["details"]["dateFrom"] == "2026-09-30"
+
+
+def test_user_changes_are_recorded(anon, store, fake_db):
+    login(anon, "superadmin", "Admin1234")
+    anon.patch(f"/api/users/{store.user['id']}", json={"branches": ["CCI01", "TGP17"], "password": "Baru12345"})
+    entry = next(e for e in fake_db.activity if e["action"] == "user.update")
+    assert entry["details"]["changes"]["branches"] == {"from": ["CCI01"], "to": ["CCI01", "TGP17"]}
+    assert entry["details"]["passwordReset"] is True and "Baru12345" not in str(entry)

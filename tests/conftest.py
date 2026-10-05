@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import database as db
-from app import esb_report, exports
+from app import activity, esb_report, exports
 from app.config import get_settings
 from app.main import app
 from app.routes import branches as branches_module
@@ -179,6 +179,11 @@ def fake_db(monkeypatch, tmp_path):
     monkeypatch.setattr(db, "stream", lambda query, params=None, size=0: iter(fake.fetch(query, params)))
     # run export jobs inline (instead of a separate process) so tests can assert on the file
     monkeypatch.setattr(exports, "_launch", lambda job: exports._run(job))
+    # activity log entries kept in memory (fake.activity)
+    fake.activity = []
+    monkeypatch.setattr(activity, "record", lambda action, **kw: fake.activity.append({
+        "action": action, "status": kw.get("status", "ok"), "username": (kw.get("user") or {}).get("username") or kw.get("username"),
+        "details": kw.get("details") or {}, "summary": kw.get("summary")}))
     monkeypatch.setattr(get_settings(), "export_dir", str(tmp_path / "exports"))
     monkeypatch.setattr(get_settings(), "public_base_url", "")
     esb_report._master["loaded"] = 0.0

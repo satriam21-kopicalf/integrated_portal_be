@@ -8,6 +8,7 @@ from app import database as db
 from app.config import get_settings
 from app.database import SCHEMA, TABLE_TRANSACTIONS
 from app.esb_report import TYPE_CONDITIONS
+from app.scope import allowed_branches
 from app.utils import TTLCache, today
 
 router = APIRouter(prefix="/api/branches", tags=["branches"])
@@ -21,9 +22,10 @@ def list_branches():
 
     Branches with sales come first (by count), then the rest of the master by name.
     """
+    allowed = allowed_branches()
     cached = _cache.get("branches")
     if cached is not None:
-        return JSONResponse(cached)
+        return JSONResponse(_only(cached, allowed))
 
     settings = get_settings()
     since = (today() - timedelta(days=settings.default_days)).isoformat()
@@ -45,4 +47,9 @@ def list_branches():
     )
     branches = [{"branch_code": r["branch_code"], "branch_name": r["branch_name"], "count": r["count"]} for r in rows]
     _cache.set("branches", branches, settings.branches_cache_ttl)
-    return JSONResponse(branches)
+    return JSONResponse(_only(branches, allowed))
+
+
+def _only(branches: list[dict], allowed) -> list[dict]:
+    """Role "user": only the branches assigned to the account."""
+    return branches if allowed is None else [b for b in branches if b["branch_code"] in allowed]

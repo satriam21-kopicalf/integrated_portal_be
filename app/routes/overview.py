@@ -24,7 +24,8 @@ from fastapi.responses import JSONResponse
 from app import database as db
 from app.config import get_settings
 from app.database import SCHEMA
-from app.utils import TTLCache, data_version, normalize_branch, parse_branches, today
+from app.scope import allowed_branches, scoped_branch
+from app.utils import TTLCache, data_version, parse_branches, today
 
 router = APIRouter(prefix="/api/overview", tags=["overview"])
 
@@ -116,7 +117,7 @@ def parse_filters(date_from: Optional[str], date_to: Optional[str], branch: Opti
     if (end - start).days + 1 > MAX_DAYS:
         raise BadRequest(f"the period is limited to {MAX_DAYS} days")
     channels = tuple(sorted({c.strip() for c in (channel or "").split(",") if c.strip()}))
-    return Filters(start, end, normalize_branch(branch), channels, data_start())
+    return Filters(start, end, scoped_branch(branch), channels, data_start())
 
 
 def data_start() -> date:
@@ -694,6 +695,14 @@ def get_meta():
         return {"channels": [{"channel": r["channel"], "bills": r["bills"]} for r in rows],
                 "defaultPeriod": {"from": (end - timedelta(days=DEFAULT_DAYS - 1)).isoformat(), "to": end.isoformat()},
                 "freshness": freshness()}
+    if allowed_branches() is not None:
+        # role "user": channel names only, not the network-wide bill counts
+        body = _cache.get("meta-scoped:" + data_version.get())
+        if body is None:
+            meta = build()
+            body = {**meta, "channels": [{"channel": c["channel"], "bills": None} for c in meta["channels"]]}
+            _cache.set("meta-scoped:" + data_version.get(), body, CACHE_TTL)
+        return JSONResponse(body)
     return respond("meta", None, "", build)
 
 

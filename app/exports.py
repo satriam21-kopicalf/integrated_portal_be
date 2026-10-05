@@ -145,11 +145,31 @@ def _file_name(date_from: date, date_to: date, branch: Optional[str], tx_type: s
     return f"{name}.xlsx"
 
 
+def list_jobs(owner: str, limit: int = 20) -> list[dict]:
+    """The owner's recent jobs (newest first), with the same staleness checks as read_job."""
+    jobs = []
+    for path in sorted(_export_dir().glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            owner_of = json.loads(path.read_text(encoding="utf-8")).get("owner")
+        except (OSError, json.JSONDecodeError):
+            continue
+        if owner_of == owner:
+            job = read_job(path.stem)
+            if job:
+                jobs.append(job)
+        if len(jobs) >= limit:
+            break
+    return jobs
+
+
 def create_job(date_from: date, date_to: date, branch: Optional[str], tx_type: str = "sales",
-               report: str = "detail") -> dict:
+               report: str = "detail", owner: Optional[dict] = None) -> dict:
     cleanup_old_exports()
     job = {
         "id": uuid.uuid4().hex,
+        "owner": str(owner["id"]) if owner else None,
+        "ownerName": owner["username"] if owner else None,
+        "ownerRole": owner["role"] if owner else None,
         "status": "queued",
         "dateFrom": date_from.isoformat(),
         "dateTo": date_to.isoformat(),
@@ -222,13 +242,30 @@ def _run(job: dict) -> None:
     try:
         _update(job, status="running")
         _generate(job)
+        _log(job, "export.done", "ok", f"Export selesai: {job.get('fileName') or 'tidak ada data'}")
     except Exception as exc:  # noqa: BLE001
         logger.exception("Export %s failed", job["id"])
         job_file(job["id"]).unlink(missing_ok=True)
         _update(job, status="error", error=str(exc), finishedAt=_now())
+        _log(job, "export.failed", "failed", f"Export gagal: {exc}"[:300])
     finally:
         if slot is not None:
             slot.close()
+
+
+def job_details(job: dict) -> dict:
+    """What the activity log keeps of an export job."""
+    keys = ("id", "report", "type", "dateFrom", "dateTo", "branch", "totalDays", "rows", "headers", "items",
+            "fileName", "fileSize", "createdAt", "finishedAt", "error")
+    out = {k: job.get(k) for k in keys}
+    out["branches"] = parse_branches(job.get("branch")) or "all"
+    return out
+
+
+def _log(job: dict, action: str, status: str, summary: str) -> None:
+    from app import activity  # local import: keeps the export process start light
+    owner = {"id": job["owner"], "username": job.get("ownerName"), "role": job.get("ownerRole")} if job.get("owner") else None
+    activity.record(action, user=owner, status=status, page="/sales", summary=summary, details=job_details(job))
 
 
 def _day_headers(day: date, branch: Optional[str], tx_type: str) -> Iterator[dict]:
@@ -270,7 +307,7 @@ def _preamble(job: dict) -> list[list]:
         ["Branch", _branch_name(job["branch"])],
         ["Sales Type", TYPE_LABELS[job["type"]]],
         *([["Date Group Mode", "Daily"]] if daily else []),
-        ["Generated Username", "Integrated Portal"],
+        ["Generated Username", job.get("ownerName") or "Integrated Portal"],  # who exported it
         ["Report File Name", job["fileName"].removesuffix(".xlsx")],
         [],
     ]

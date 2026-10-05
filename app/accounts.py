@@ -20,6 +20,7 @@ from app.security import generate_password, hash_password, password_problem
 
 T_USER = "integration_portal.user_account"
 T_SESSION = "integration_portal.user_session"
+T_USER_BRANCH = "integration_portal.user_branch"
 
 MAX_FAILED_LOGINS = 5
 LOCK_MINUTES = 15
@@ -31,6 +32,8 @@ USER_COLUMNS = """u.id, u.username, u.email, u.full_name, u.role, u.is_active, u
     u.employee_number, u.gender, u.birth_date, u.address, u.city, u.work_branch_code, u.profile_updated_at,
     (SELECT b.branch_name FROM integration_esb.master_branches b WHERE b.branch_code = u.work_branch_code
      ORDER BY COALESCE(b.is_deleted, false) LIMIT 1) AS work_branch_name,
+    (SELECT array_agg(x.branch_code ORDER BY x.branch_code) FROM integration_portal.user_branch x
+     WHERE x.user_id = u.id) AS branch_codes,
     cb.username AS created_by_username, ub.username AS updated_by_username"""
 USER_FROM = f"""{T_USER} u
     LEFT JOIN {T_USER} cb ON cb.id = u.created_by
@@ -74,6 +77,8 @@ def public_user(row: Optional[dict]) -> Optional[dict]:
         "city": row.get("city"),
         "workBranchCode": row.get("work_branch_code"),
         "workBranchName": row.get("work_branch_name"),
+        # branches a "user" may see (superadmins see every branch)
+        "branches": list(row.get("branch_codes") or []),
         "profileComplete": is_complete(row),
         "profileUpdatedAt": _iso(row.get("profile_updated_at")),
         "mustChangePassword": row.get("must_change_password", False),
@@ -134,6 +139,21 @@ def list_users(search: str = "", role: str = "", status: str = "", limit: int = 
     return rows, total
 
 
+def known_branch_codes(codes: list[str]) -> set[str]:
+    """The codes that exist in the ESB branch master."""
+    if not codes:
+        return set()
+    rows = db.fetch("SELECT DISTINCT branch_code FROM integration_esb.master_branches WHERE branch_code = ANY(%s)", (codes,))
+    return {r["branch_code"] for r in rows}
+
+
+def _set_branches(conn, user_id: str, codes: list[str], actor_id: Optional[str]) -> None:
+    conn.execute(f"DELETE FROM {T_USER_BRANCH} WHERE user_id = %s", (user_id,))
+    for code in codes:
+        conn.execute(f"INSERT INTO {T_USER_BRANCH} (user_id, branch_code, created_by) VALUES (%s, %s, %s)",
+                     (user_id, code, actor_id))
+
+
 def exists(column: str, value: str, exclude_id: Optional[str] = None) -> bool:
     assert column in ("username", "email")
     row = db.fetchrow(
@@ -158,6 +178,8 @@ def create_user(data: dict, password_hash: str, actor_id: Optional[str]) -> dict
     values = ", ".join(f"%({c})s" for c in cols)
     with db.transaction() as conn:
         row = conn.execute(f"INSERT INTO {T_USER} ({names}) VALUES ({values}) RETURNING id", cols).fetchone()
+        if data.get("branches"):
+            _set_branches(conn, str(row["id"]), data["branches"], actor_id)
     return get_user(str(row["id"]))
 
 
@@ -170,6 +192,8 @@ def update_user(user_id: str, data: dict, actor_id: Optional[str], password_hash
         sets.append("password_changed_at = now()")
     with db.transaction() as conn:
         conn.execute(f"UPDATE {T_USER} SET {', '.join(sets)} WHERE id = %(id)s", {**cols, "actor": actor_id, "id": user_id})
+        if "branches" in data:
+            _set_branches(conn, user_id, data["branches"], actor_id)
         # a new password, deactivation or role change signs the user out everywhere
         if password_hash or data.get("isActive") is False or "role" in data:
             conn.execute(f"UPDATE {T_SESSION} SET revoked_at = now() WHERE user_id = %s AND revoked_at IS NULL", (user_id,))
@@ -276,6 +300,7 @@ def main(argv: list[str]) -> int:
     c.add_argument("--email", required=True)
     c.add_argument("--full-name", default="", help="optional: the user can fill it in under My profile")
     c.add_argument("--role", choices=ROLES, default="user")
+    c.add_argument("--branches", default="", help="branch codes a 'user' may see, comma separated")
     r = sub.add_parser("reset-password", help="set a new generated password and unlock the account")
     r.add_argument("--username", required=True)
     args = parser.parse_args(argv)
@@ -285,8 +310,15 @@ def main(argv: list[str]) -> int:
         if args.cmd == "create":
             if exists("username", args.username) or exists("email", args.email):
                 sys.exit("username or email already exists")
+            branches = sorted({b.strip() for b in args.branches.split(",") if b.strip()})
+            unknown = set(branches) - known_branch_codes(branches)
+            if unknown:
+                sys.exit(f"unknown branch code(s): {', '.join(sorted(unknown))}")
+            if args.role == "user" and not branches:
+                sys.exit("a 'user' needs --branches")
             user = create_user({"username": args.username.lower(), "email": args.email.lower(), "fullName": args.full_name or None,
-                                "role": args.role, "isActive": True, "mustChangePassword": True},
+                                "role": args.role, "isActive": True, "mustChangePassword": True,
+                                "branches": branches if args.role == "user" else []},
                                hash_password(password), None)
         else:
             row = find_for_login(args.username, "username")

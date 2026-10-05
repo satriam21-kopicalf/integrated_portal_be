@@ -7,6 +7,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
+from starlette.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -15,10 +16,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app import database as db
 from app.config import get_settings
 from app.utils import data_version
+from app.routes.activity import router as activity_router
 from app.routes import (auth_router, avatars_router, branches_router, cost_control_router, exports_router, live_router,
                         overview_router, realtime_router,
                         summary_router, transactions_router, users_router)
-from app.routes.auth import current_user
+from app.routes.auth import current_user, require_superadmin, session_lookup
+from app.scope import branch_scope
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("integrated_portal_be")
@@ -60,6 +63,21 @@ app.add_middleware(
 )
 
 @app.middleware("http")
+async def scope_to_user_branches(request: Request, call_next):
+    """Role "user": every data endpoint only sees the user's branches (app/scope.py)."""
+    token = None
+    if request.url.path.startswith("/api/") and not request.url.path.startswith("/api/auth/"):
+        user = await run_in_threadpool(session_lookup, request)
+        if user and user["role"] != "superadmin":
+            token = branch_scope.set(tuple(user.get("branch_codes") or ()))
+    try:
+        return await call_next(request)
+    finally:
+        if token is not None:
+            branch_scope.reset(token)
+
+
+@app.middleware("http")
 async def remember_data_version(request: Request, call_next):
     token = data_version.set(request.query_params.get("v", "")[:80])
     try:
@@ -81,7 +99,8 @@ app.include_router(branches_router, dependencies=signed_in)
 app.include_router(exports_router, dependencies=signed_in)
 app.include_router(overview_router, dependencies=signed_in)
 app.include_router(live_router, dependencies=signed_in)
-app.include_router(cost_control_router, dependencies=signed_in)
+app.include_router(cost_control_router, dependencies=[Depends(require_superadmin)])  # superadmin only
+app.include_router(activity_router)  # superadmin reads; any signed-in user reports page views
 app.include_router(realtime_router)
 
 

@@ -20,6 +20,7 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | GET | `/api/summary` | Gross − Void/Cancelled − Other Cost − Open bill = Sales (per hari & total). Query: `dateFrom`, `dateTo`, `branch`. Hari sebelum kemarin dari agregat harian (1 tahun < 1 dtk) |
 | GET | `/api/branches` | Master cabang (nama terkini) + jumlah transaksi Sales 65 hari terakhir |
 | POST | `/api/exports` | Mulai job export. Body: `{"dateFrom","dateTo","branch","type","report"}` → 202 + `id` |
+| GET | `/api/exports` | Job export milik user yang login (terbaru dulu) — dipakai dashboard untuk melanjutkan progres di halaman mana pun |
 | GET | `/api/exports/{id}` | Status job: `status`, `daysDone/totalDays`, `rows`, `sheets`, `fileSize`, `downloadUrl` |
 | GET | `/api/exports/{id}/download` | Unduh `.xlsx` (tersedia `EXPORT_TTL_HOURS`, default 24 jam) |
 | GET | `/api/overview/meta` | Opsi filter channel, periode default, cakupan & kesegaran data |
@@ -41,17 +42,29 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | PATCH | `/api/auth/me` | *My profile*: user mengisi profilnya sendiri (`fullName`, `phoneNumber`, `jobTitle`, `department`, `employeeNumber`, `gender`, `birthDate`, `address`, `city`, `workBranchCode`) |
 | POST | `/api/auth/password` | Ganti password sendiri `{"currentPassword", "newPassword"}` |
 | PUT/DELETE | `/api/auth/me/avatar` | Foto profil sendiri `{"image": "data:image/webp;base64,..."}` |
-| GET/POST | `/api/users` | (superadmin) daftar user (`search`, `role`, `status`, `page`, `pageSize`) / buat user (cukup `username`, `email`, `password`, `role`) |
+| GET/POST | `/api/users` | (superadmin) daftar user (`search`, `role`, `status`, `page`, `pageSize`) / buat user (cukup `username`, `email`, `password`, `role`, dan `branches` untuk role user) |
 | GET/PATCH/DELETE | `/api/users/{id}` | (superadmin) detail / ubah (termasuk reset `password`) / hapus |
 | POST | `/api/users/{id}/unlock` | (superadmin) buka kunci akun |
 | PUT/DELETE | `/api/users/{id}/avatar` | (superadmin) foto profil user lain |
 | GET | `/api/avatars/{id}` | Foto profil (URL berversi, cache 1 tahun) |
 | GET | `/api/cost-control/{meta,summary,trend,items,forecast}` | Cost Control: COGS ratio (net sales & subtotal), usage ratio, selisih stok, waste, estimasi belanja 1/2/4 minggu per outlet (lihat docs) |
 | PUT | `/api/cost-control/settings` | (superadmin) ambang status & parameter forecast |
+| GET | `/api/activity`, `/api/activity/summary` | (superadmin) Activity log: `dateFrom`, `dateTo`, `user`, `category` (auth, page, filter, transaction, export, user, profile, access), `status` (ok/failed/denied), `role`, `search`, `limit`, `offset` |
+| POST | `/api/activity/events` | Dashboard melaporkan `page.view` / `filter.change` (aktivitas lain dicatat backend sendiri) |
 | GET | `/api/live` | Penjualan hari ini (vs kemarin di jam yang sama, per jam) + transaksi Sales terbaru yang masuk (`limit`, `branch`, `channel`); langsung dari `transactions_pos_sales`, cache 20 dtk |
 
 Tanpa `dateFrom`/`dateTo`, rentang default adalah 65 hari terakhir (Asia/Jakarta). Dokumentasi interaktif: `https://api.kopicalf.co.id/docs`.
-**Semua endpoint data membutuhkan login** (cookie `portal_session`, atau `Authorization: Bearer <token>`); `/api/users` hanya untuk role `superadmin`. Terbuka: `/health`, `/api/auth/login|logout`, WebSocket `/ws`.
+**Semua endpoint data membutuhkan login** (cookie `portal_session`, atau `Authorization: Bearer <token>`); `/api/users`, `/api/cost-control/*` dan `GET /api/activity*` hanya untuk role `superadmin`. Terbuka: `/health`, `/api/auth/login|logout`, WebSocket `/ws`.
+
+### Akses cabang (role user, anti-fraud)
+
+- Setiap akun role **user** punya daftar cabang (`integration_portal.user_branch`, migration 008; diatur superadmin di User Accounts, minimal 1 cabang). Superadmin melihat semua cabang.
+- Middleware `scope_to_user_branches` (`app/main.py`) mengisi `branch_scope` (`app/scope.py`) dari sesi; semua endpoint data memakai `scoped_branch()`: tanpa filter → semua cabang milik user, filter cabang lain → diabaikan, tidak ada sisa → hasil kosong (tidak pernah "semua"). Berlaku untuk Overview, `/api/transactions`, `/api/summary`, live feed, export, dan `/api/branches` (hanya cabang user). Detail transaksi cabang lain → 404 (dicatat `denied` di activity log).
+- Export dimiliki user pembuatnya (`owner`): user lain tidak bisa melihat status/mengunduh (superadmin bisa). Kolom *Generated Username* di file Excel berisi username pembuat export.
+
+### Activity log (migration 009)
+
+`integration_portal.activity_log` (disimpan 400 hari) mencatat: login/logout & login gagal (alasan), ganti password/profil sendiri, halaman dibuka & filter yang dipakai (dari dashboard), detail transaksi dibuka, **export** (diminta dengan periode/cabang/tipe/report, selesai dengan jumlah baris & ukuran file atau gagal beserta error, diunduh), perubahan akun oleh superadmin (field lama → baru, reset password tanpa nilai password), dan akses yang ditolak (halaman/API superadmin, transaksi atau file export milik orang lain). IP diambil dari `X-Forwarded-For` (proxy dashboard). Penulisan log tidak pernah menggagalkan request (`app/activity.py`).
 Semua endpoint menerima parameter opsional `v` (versi data dari WebSocket) yang ikut menjadi kunci cache respons.
 
 Dokumentasi lengkap (arsitektur, aturan data, realtime, operasional): [docs/README.md](docs/README.md).

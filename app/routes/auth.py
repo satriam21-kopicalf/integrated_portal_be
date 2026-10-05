@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app import accounts, avatars
+from app import accounts, activity, avatars
 from app.profile import PROFILE_FIELDS, ProfileError, clean_profile
 from app.config import get_settings
 from app.security import DUMMY_HASH, hash_password, new_token, password_problem, token_hash, verify_password
@@ -46,24 +46,36 @@ def _token(request: Request) -> Optional[str]:
     return token or None
 
 
-def current_user(request: Request) -> dict:
-    """The signed-in user (raw row), or 401."""
+def session_lookup(request: Request) -> Optional[dict]:
+    """The user behind the request's session (cached briefly), or None. Never raises."""
     token = _token(request)
     if not token:
-        raise HTTPException(status_code=401, detail="Silakan login terlebih dahulu")
+        return None
     key = token_hash(token)
     user = _sessions.get(key)
     if user is None:
         user = accounts.session_user(key)
-        if not user:
-            raise HTTPException(status_code=401, detail="Sesi berakhir, silakan login kembali")
-        _sessions.set(key, user, SESSION_CACHE_TTL)
+        if user:
+            _sessions.set(key, user, SESSION_CACHE_TTL)
+    return user or None
+
+
+def current_user(request: Request) -> dict:
+    """The signed-in user (raw row), or 401."""
+    if not _token(request):
+        raise HTTPException(status_code=401, detail="Silakan login terlebih dahulu")
+    user = session_lookup(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Sesi berakhir, silakan login kembali")
     request.state.user = user
     return user
 
 
-def require_superadmin(user: dict = Depends(current_user)) -> dict:
+def require_superadmin(request: Request, user: dict = Depends(current_user)) -> dict:
     if user["role"] != "superadmin":
+        activity.record("access.denied", user=user, request=request, status="denied",
+                        summary=f"Akses ditolak: {request.method} {request.url.path}",
+                        details={"method": request.method, "path": request.url.path, "query": str(request.url.query)})
         raise HTTPException(status_code=403, detail="Hanya superadmin yang dapat mengakses fitur ini")
     return user
 
@@ -102,20 +114,30 @@ def login(req: LoginRequest, request: Request):
     # same work whether or not the account exists (no account enumeration by timing)
     password_ok = verify_password(req.password, row["password_hash"] if row else DUMMY_HASH)
     wrong = {"error": "Username/email atau password salah"}
+
+    def failed(reason: str, summary: str) -> None:
+        activity.record("auth.login_failed", user=row, request=request, status="failed", summary=summary,
+                        username=None if row else req.identifier.strip()[:80],
+                        details={"reason": reason, "method": req.method, "identifier": req.identifier.strip()[:80]})
+
     if not row:
+        failed("unknown_account", "Login gagal: akun tidak ditemukan")
         return JSONResponse(wrong, status_code=401)
     if row["locked_until"] is not None and row["locked_until"] > _now():
+        failed("locked", "Login ditolak: akun sedang terkunci")
         minutes = max(1, int((row["locked_until"] - _now()).total_seconds() // 60) + 1)
         return JSONResponse({"error": f"Akun terkunci karena terlalu banyak percobaan. Coba lagi dalam {minutes} menit."},
                             status_code=423)
     if not password_ok:
         state = accounts.record_login_failure(str(row["id"]))
         left = accounts.MAX_FAILED_LOGINS - (state["failed_login_attempts"] if state else 0)
+        failed("wrong_password", "Login gagal: password salah" + (" - akun dikunci" if left <= 0 else ""))
         if left <= 0:
             return JSONResponse({"error": f"Akun terkunci selama {accounts.LOCK_MINUTES} menit karena terlalu banyak percobaan."},
                                 status_code=423)
         return JSONResponse(wrong, status_code=401)
     if not row["is_active"]:
+        failed("inactive", "Login ditolak: akun nonaktif")
         return JSONResponse({"error": "Akun dinonaktifkan. Hubungi administrator."}, status_code=403)
 
     ttl = timedelta(days=settings.session_remember_days) if req.remember else timedelta(hours=settings.session_hours)
@@ -124,6 +146,8 @@ def login(req: LoginRequest, request: Request):
     accounts.create_session(str(row["id"]), token_hash(token), ttl, ip, request.headers.get("user-agent"))
     accounts.record_login_success(str(row["id"]), ip)
     logger.info("login %s (%s) from %s", row["username"], row["role"], ip)
+    activity.record("auth.login", user=row, request=request, summary="Login",
+                    details={"method": req.method, "remember": req.remember})
     response = JSONResponse({"user": accounts.public_user(accounts.get_user(str(row["id"])))})
     _set_cookie(response, token, int(ttl.total_seconds()))
     return response
@@ -133,6 +157,9 @@ def login(req: LoginRequest, request: Request):
 def logout(request: Request):
     token = _token(request)
     if token:
+        user = session_lookup(request)
+        if user:
+            activity.record("auth.logout", user=user, request=request, summary="Logout")
         accounts.revoke_session(token_hash(token))
         _sessions._data.pop(token_hash(token), None)
     response = JSONResponse({"ok": True})
@@ -146,7 +173,7 @@ def me(user: dict = Depends(current_user)):
 
 
 @router.patch("/me")
-def update_me(body: dict, user: dict = Depends(current_user)):
+def update_me(body: dict, request: Request, user: dict = Depends(current_user)):
     unknown = sorted(set(body) - set(PROFILE_FIELDS))
     if unknown:
         return JSONResponse({"error": f"Field tidak dapat diubah sendiri: {', '.join(unknown)}", "field": unknown[0]},
@@ -158,6 +185,8 @@ def update_me(body: dict, user: dict = Depends(current_user)):
     if "fullName" in data and not data["fullName"]:
         return JSONResponse({"error": "Nama lengkap wajib diisi", "field": "fullName"}, status_code=422)
     updated = accounts.update_profile(str(user["id"]), data)
+    activity.record("profile.update", user=user, request=request, summary="Memperbarui profil sendiri",
+                    details={"fields": sorted(data)})
     forget_sessions()
     return {"user": accounts.public_user(updated)}
 
@@ -175,6 +204,7 @@ def change_password(req: PasswordChange, request: Request, user: dict = Depends(
     # stay signed in here, sign out everywhere else
     keep = token_hash(_token(request) or "")
     accounts.revoke_other_sessions(str(user["id"]), keep)
+    activity.record("auth.password_change", user=user, request=request, summary="Mengganti password sendiri")
     forget_sessions()
     return {"user": accounts.public_user(accounts.get_user(str(user["id"])))}
 

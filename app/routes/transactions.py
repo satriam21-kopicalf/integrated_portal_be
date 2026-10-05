@@ -13,14 +13,16 @@ import time
 from datetime import date, timedelta
 from typing import Any, Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
+from app import activity
 from app import database as db
 from app.config import get_settings
 from app.database import HEADER_COLUMNS, ITEM_COLUMNS, TABLE_ITEMS, TABLE_TRANSACTIONS
 from app.esb_report import REPORT_HEADERS, TYPE_CASE_SQL, TYPE_CONDITIONS, load_masters, report_rows
-from app.utils import (TTLCache, data_version, escape_like, jsonable, normalize_branch, parse_branches,
+from app.scope import in_scope, scoped_branch
+from app.utils import (TTLCache, data_version, escape_like, jsonable, parse_branches,
                        resolve_date_range, to_json_value, today)
 
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
@@ -125,7 +127,7 @@ def list_transactions(
 ):
     start = time.perf_counter()
     limit = min(limit, 100)
-    branch = normalize_branch(branch)
+    branch = scoped_branch(branch)
     tx_type = resolve_type(type)
     date_from, date_to = resolve_date_range(dateFrom, dateTo)
 
@@ -181,11 +183,22 @@ def list_transactions(
 
 
 @router.get("/{sales_num:path}")
-def get_transaction(sales_num: str):
+def get_transaction(sales_num: str, request: Request):
     header = db.fetchrow(
         f"SELECT {_h_columns()}, h.raw_data FROM {TABLE_TRANSACTIONS} h WHERE h.sales_num = %s", (sales_num,))
+    user = getattr(request.state, "user", None)
+    if header and not in_scope(header.get("branch_code")):
+        # another branch's transaction: logged, answered as if it did not exist
+        activity.record("transaction.view", user=user, request=request, status="denied", page="/sales",
+                        summary=f"Membuka transaksi cabang lain {sales_num} ({header.get('branch_code')})",
+                        details={"salesNum": sales_num, "branchCode": header.get("branch_code")})
+        header = None
     if not header:
         return JSONResponse({"error": "Transaction not found"}, status_code=404)
+    activity.record("transaction.view", user=user, request=request, page="/sales",
+                    summary=f"Membuka detail transaksi {sales_num}",
+                    details={"salesNum": sales_num, "billNum": header.get("bill_num"), "branchCode": header.get("branch_code"),
+                             "status": header.get("status")})
     items = db.fetch(f"SELECT {ITEM_COLUMNS} FROM {TABLE_ITEMS} WHERE sales_num = %s ORDER BY line_number", (sales_num,))
     rows = dashboard_rows(header, load_masters())
     body = {k: v for k, v in rows[0].items() if not k.endswith("_item") and k not in (
@@ -299,7 +312,7 @@ def summarize(date_from: str, date_to: str, branch: Optional[str]) -> dict:
 def get_summary(dateFrom: Optional[str] = None, dateTo: Optional[str] = None, branch: Optional[str] = None):
     """Gross - Void/Cancelled - Other Cost (CUPPING, WASTE, ...) - open bills = Sales (ESB report)."""
     date_from, date_to = resolve_date_range(dateFrom, dateTo)
-    branch = normalize_branch(branch)
+    branch = scoped_branch(branch)
     key = f"summary:{date_from}:{date_to}:{branch}:{data_version.get()}"
     cached = _cache.get(key)
     if cached is None:

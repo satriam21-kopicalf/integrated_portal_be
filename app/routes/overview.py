@@ -12,8 +12,12 @@ a partially onboarded history.
 Figures are ESB "Sales" (Finished + bill number) unless stated otherwise, so
 totals equal /api/summary and the ESB Sales Recapitulation report.
 Only fields that are 100% filled are used (integrated_portal/docs/overview-analytics.md).
+
+Drill-down endpoints (the dashboard's detail drawers): /hourly-compare (busy hours of two periods
+or of several branches), /breakdown (sales by branch / channel / payment / date / type, optionally
+for one payment method) and /menu-detail (one menu by day, branch and channel).
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Callable, Optional
@@ -176,12 +180,15 @@ def buckets(f: Filters, granularity: str) -> list[dict]:
 
 
 def sales_rows(f: Filters, start: date, end: date, group: tuple[str, ...] = (), select: str = "",
-               table: str = DAILY, tx_type: Optional[str] = "sales") -> list[dict]:
+               table: str = DAILY, tx_type: Optional[str] = "sales", payment_method: Optional[str] = None) -> list[dict]:
     """sum(bills), sum(subtotal) (+ sum(nett_sales)) of `table` grouped by the `group` expressions."""
     where, params = f.where(start, end)
     if tx_type:
         where += " AND tx_type = %(tx_type)s"
         params["tx_type"] = tx_type
+    if payment_method:
+        where += " AND payment_method = %(payment_method)s"
+        params["payment_method"] = payment_method
     measures = "sum(bills)::int AS bills, sum(subtotal) AS subtotal"
     if table == DAILY:
         measures += ", sum(nett_sales) AS nett"
@@ -284,10 +291,15 @@ def build_kpis(f: Filters) -> dict:
 def build_trend(f: Filters, granularity: str) -> dict:
     cur = sales_rows(f, f.start, f.end, ("sales_date",))
     prev = prev_rows(f, ("sales_date",))
-    series = {b["date"]: {"date": b["date"].isoformat(), "days": b["days"], "current": [], "previous": []}
+    by_channel = sales_rows(f, f.start, f.end, ("sales_date", "channel"))
+    series = {b["date"]: {"date": b["date"].isoformat(), "days": b["days"], "current": [], "previous": [], "channels": {}}
               for b in buckets(f, granularity)}
     for r in cur:
         series[bucket_of(r["sales_date"], granularity)]["current"].append(r)
+    for r in by_channel:  # per-channel stacks of the "By channel" chart
+        v = series[bucket_of(r["sales_date"], granularity)]["channels"].setdefault(r["channel"], {"subtotal": 0.0, "bills": 0})
+        v["subtotal"] += _f(r["subtotal"])
+        v["bills"] += int(r["bills"])
     for r in prev:  # shift the previous period onto the current timeline
         series[bucket_of(r["sales_date"] + timedelta(days=f.days), granularity)]["previous"].append(r)
     out = []
@@ -683,6 +695,175 @@ def build_basket(f: Filters, granularity: str) -> dict:
     }
 
 
+# ---------------------------------------------------------------- drill-down builders
+
+MAX_COMPARE_BRANCHES = 8
+
+
+def hours_profile(f: Filters) -> dict:
+    """Busy hours of one period: per hour (all weekdays) and per weekday x hour, averaged per day."""
+    h = build_hourly(f)
+    days = sum(h["daysPerDow"].values())
+    by_hour: dict[int, dict] = {}
+    for c in h["cells"]:
+        x = by_hour.setdefault(c["hour"], {"bills": 0, "subtotal": 0.0})
+        x["bills"] += c["bills"]
+        x["subtotal"] += c["subtotal"]
+    bills = sum(x["bills"] for x in by_hour.values())
+    subtotal = sum(x["subtotal"] for x in by_hour.values())
+    hours = [{"hour": hr, "bills": x["bills"], "subtotal": x["subtotal"],
+              "avgBills": r2(ratio(x["bills"], days) or 0.0), "avgSubtotal": r2(ratio(x["subtotal"], days) or 0.0),
+              "share": r2(ratio(x["bills"] * 100, bills) or 0.0)} for hr, x in sorted(by_hour.items())]
+    peak = max(hours, key=lambda x: x["bills"], default=None)
+    return {"from": f.start.isoformat(), "to": f.end.isoformat(), "days": days, "complete": f.start >= f.data_from,
+            "bills": bills, "subtotal": subtotal, "avgBillsPerDay": r2(ratio(bills, days) or 0.0),
+            "hours": hours, "cells": h["cells"], "daysPerDow": h["daysPerDow"], "peakHour": peak["hour"] if peak else None}
+
+
+def hourly_branch_rows(f: Filters) -> list[dict]:
+    """Bills and sales per branch x hour over the period."""
+    src, params = rollup_source(f, HOURLY_MONTHLY, HOURLY, "branch_code, hour, bills, subtotal",
+                                "branch_code, hour, bills, subtotal")
+    return db.fetch(f"SELECT branch_code, hour, sum(bills)::int AS bills, sum(subtotal) AS subtotal "
+                    f"FROM ({src}) s GROUP BY 1, 2", params)
+
+
+def build_hourly_compare(f: Filters, mode: str, compare_from: Optional[str], compare_to: Optional[str],
+                         compare_branches: Optional[str]) -> dict:
+    if mode == "branches":
+        codes = parse_branches(scoped_branch(compare_branches)) if compare_branches else []
+        codes = [c for c in codes if c != "-"]
+        if not codes:
+            # the selected branches, else the busiest branches of the period
+            selected = parse_branches(f.branch)
+            codes = selected if len(selected) >= 2 else [
+                b["branchCode"] for b in sorted(build_branches(f, "day")["branches"], key=lambda b: -b["bills"]) if b["bills"]][:5]
+        codes = codes[:MAX_COMPARE_BRANCHES]
+        fb = replace(f, branch=",".join(sorted(codes)) or "-")
+        rows = hourly_branch_rows(fb) if codes else []
+        active = {r["branch_code"]: r for r in day_rows(fb, f.start, f.end, ("branch_code",), "sales")} if codes else {}
+        names = branch_names()
+        out = []
+        for code in codes:
+            mine = [r for r in rows if r["branch_code"] == code]
+            days = int((active.get(code) or {}).get("days") or 0)
+            bills = sum(int(r["bills"]) for r in mine)
+            hours = [{"hour": r["hour"], "bills": int(r["bills"]), "subtotal": _f(r["subtotal"]),
+                      "avgBills": r2(ratio(int(r["bills"]), days) or 0.0), "avgSubtotal": r2(ratio(_f(r["subtotal"]), days) or 0.0),
+                      "share": r2(ratio(int(r["bills"]) * 100, bills) or 0.0)} for r in sorted(mine, key=lambda r: r["hour"])]
+            peak = max(hours, key=lambda x: x["bills"], default=None)
+            out.append({"branchCode": code, "branchName": names.get(code, code), "activeDays": days, "bills": bills,
+                        "subtotal": sum(x["subtotal"] for x in hours), "avgBillsPerDay": r2(ratio(bills, days) or 0.0),
+                        "hours": hours, "peakHour": peak["hour"] if peak else None})
+        return {"mode": "branches", "branches": out}
+
+    # period: the selected period against another one (default: the previous period of the same length)
+    try:
+        cs = date.fromisoformat(compare_from) if compare_from else f.prev_start
+        ce = date.fromisoformat(compare_to) if compare_to else (cs + timedelta(days=f.days - 1) if compare_from else f.prev_end)
+    except ValueError as exc:
+        raise BadRequest("compareFrom/compareTo must be YYYY-MM-DD") from exc
+    if cs > ce or (ce - cs).days + 1 > MAX_DAYS:
+        raise BadRequest("invalid comparison period")
+    return {"mode": "period", "current": hours_profile(f), "compare": hours_profile(replace(f, start=cs, end=ce))}
+
+
+BREAKDOWN = {"branch": "branch_code", "channel": "channel", "payment": "payment_method",
+             "paymentType": "payment_type", "date": "sales_date", "type": "tx_type"}
+
+
+def build_breakdown(f: Filters, by: str, payment_method: Optional[str], tx_type: Optional[str]) -> dict:
+    """Sales of the period split by one dimension (optionally for one payment method / transaction type)."""
+    col = BREAKDOWN[by]
+    tx = None if tx_type == "all" or by == "type" else (tx_type or "sales")
+    cur = sales_rows(f, f.start, f.end, (col,), tx_type=tx, payment_method=payment_method)
+    prev = {} if by == "date" else {r[col]: _f(r["subtotal"]) for r in (
+        sales_rows(f, f.prev_start, f.prev_end, (col,), tx_type=tx, payment_method=payment_method) if f.prev_complete else [])}
+    total = sum(_f(r["subtotal"]) for r in cur)
+    bills_total = sum(int(r["bills"] or 0) for r in cur)
+    names = branch_names() if by == "branch" else {}
+    rows = []
+    for r in cur:
+        key = r[col]
+        subtotal, bills, nett = _f(r["subtotal"]), int(r["bills"] or 0), _f(r.get("nett"))
+        rows.append({"key": key.isoformat() if isinstance(key, date) else key, "label": names.get(key, key) if by == "branch" else (
+                        key.isoformat() if isinstance(key, date) else key),
+                     "bills": bills, "subtotal": subtotal, "nettSales": nett, "avgTicket": r2(ratio(subtotal, bills)),
+                     "share": r2(ratio(subtotal * 100, total)), "billShare": r2(ratio(bills * 100, bills_total)),
+                     "previousSubtotal": prev.get(key), "deltaPct": delta_pct(subtotal, prev.get(key) or 0) if prev else None})
+    if by == "date":  # every day of the period, also the ones without sales
+        have = {r["key"] for r in rows}
+        day = f.start
+        while day <= f.end:
+            if day.isoformat() not in have:
+                rows.append({"key": day.isoformat(), "label": day.isoformat(), "bills": 0, "subtotal": 0.0, "nettSales": 0.0,
+                             "avgTicket": None, "share": 0.0, "billShare": 0.0, "previousSubtotal": None, "deltaPct": None})
+            day += timedelta(days=1)
+        rows.sort(key=lambda r: r["key"])
+    else:
+        rows.sort(key=lambda r: -r["subtotal"])
+    return {"by": by, "paymentMethod": payment_method, "txType": tx or "all",
+            "totals": {"bills": bills_total, "subtotal": total, "nettSales": sum(r["nettSales"] for r in rows)}, "rows": rows}
+
+
+def menu_detail_rows(f: Filters, menu_id: str, kind: str, group: str) -> list[dict]:
+    """One menu over the period grouped by `group` (sales_date | month | branch_code | channel)."""
+    dims, params = f.dims()
+    params.update(start=f.start, end=f.end, menu_id=menu_id, kind=kind)
+    cond = "".join(f" AND {d}" for d in dims) + " AND menu_id = %(menu_id)s AND kind = %(kind)s"
+    if group in ("sales_date", "month"):
+        if group == "sales_date":
+            src = f"SELECT sales_date AS g, bills, qty, subtotal, discount FROM {MENU} WHERE sales_date BETWEEN %(start)s AND %(end)s{cond}"
+        else:  # long periods: full months from the monthly rollup, edge days from the daily table
+            first, stop = full_months(f.start, f.end)
+            params.update(first=first, stop=stop)
+            src = (f"SELECT month AS g, bills, qty, subtotal, discount FROM {MENU_MONTHLY} WHERE month >= %(first)s AND month < %(stop)s{cond} "
+                   f"UNION ALL SELECT date_trunc('month', sales_date)::date, bills, qty, subtotal, discount FROM {MENU} "
+                   f"WHERE sales_date BETWEEN %(start)s AND %(end)s AND NOT (sales_date >= %(first)s AND sales_date < %(stop)s){cond}")
+        return db.fetch(f"SELECT g, sum(bills)::int AS bills, sum(qty) AS qty, sum(subtotal) AS subtotal, sum(discount) AS discount "
+                        f"FROM ({src}) s GROUP BY 1 ORDER BY 1", params)
+    src, p2 = rollup_source(f, MENU_MONTHLY, MENU, f"{group}, menu_id, kind, bills, qty, subtotal, discount",
+                            f"{group}, menu_id, kind, bills, qty, subtotal, discount")
+    p2.update(menu_id=menu_id, kind=kind)
+    return db.fetch(f"SELECT {group} AS g, sum(bills)::int AS bills, sum(qty) AS qty, sum(subtotal) AS subtotal, "
+                    f"sum(discount) AS discount FROM ({src}) s WHERE menu_id = %(menu_id)s AND kind = %(kind)s GROUP BY 1", p2)
+
+
+def build_menu_detail(f: Filters, menu_id: str, kind: str) -> dict:
+    group = "sales_date" if f.days <= 92 else "month"
+    series = menu_detail_rows(f, menu_id, kind, group)
+    branches = menu_detail_rows(f, menu_id, kind, "branch_code")
+    channels = menu_detail_rows(f, menu_id, kind, "channel")
+    menus = menu_rows(f)
+    info = next((m for m in menus if m["menu_id"] == menu_id and m["kind"] == kind), None)
+    all_menus = sum(_f(m["subtotal"]) for m in menus if m["kind"] == "menu")
+    prev = menu_detail_rows(replace(f, start=f.prev_start, end=f.prev_end), menu_id, kind, "channel") if f.prev_complete else []
+    names = branch_names()
+
+    def tot(rows):
+        return {"bills": sum(int(r["bills"] or 0) for r in rows), "qty": sum(_f(r["qty"]) for r in rows),
+                "subtotal": sum(_f(r["subtotal"]) for r in rows), "discount": sum(_f(r["discount"]) for r in rows)}
+
+    t, p = tot(branches), tot(prev)
+
+    def rows(items, label=lambda k: k):
+        return sorted(({"key": str(r["g"]), "label": label(r["g"]), "bills": int(r["bills"] or 0), "qty": _f(r["qty"]),
+                        "subtotal": _f(r["subtotal"]), "share": r2(ratio(_f(r["subtotal"]) * 100, t["subtotal"]))} for r in items),
+                      key=lambda x: -x["subtotal"])
+
+    return {
+        "menu": {"menuId": menu_id, "kind": kind, "name": (info or {}).get("menu_name") or menu_id,
+                 "category": (info or {}).get("category"), "categoryDetail": (info or {}).get("category_detail")},
+        "totals": {**t, "avgPrice": r2(ratio(t["subtotal"], t["qty"])), "shareOfMenus": r2(ratio(t["subtotal"] * 100, all_menus)),
+                   "previousQty": p["qty"] if f.prev_complete else None, "previousSubtotal": p["subtotal"] if f.prev_complete else None,
+                   "qtyDeltaPct": delta_pct(t["qty"], p["qty"]) if f.prev_complete else None},
+        "granularity": "day" if group == "sales_date" else "month",
+        "series": [{"date": r["g"].isoformat(), "bills": int(r["bills"] or 0), "qty": _f(r["qty"]), "subtotal": _f(r["subtotal"])} for r in series],
+        "branches": rows(branches, lambda k: names.get(k, k)),
+        "channels": rows(channels),
+    }
+
+
 # ---------------------------------------------------------------- routes
 
 @router.get("/meta")
@@ -749,7 +930,7 @@ def get_hourly(dateFrom: Optional[str] = None, dateTo: Optional[str] = None,
 
 @router.get("/menus")
 def get_menus(dateFrom: Optional[str] = None, dateTo: Optional[str] = None, branch: Optional[str] = None,
-              channel: Optional[str] = None, limit: int = Query(10, ge=1, le=50), sort: str = "subtotal"):
+              channel: Optional[str] = None, limit: int = Query(10, ge=1, le=2000), sort: str = "subtotal"):
     """Top menus (by subtotal or qty), category mix and add-on preferences."""
     def build(f):
         return build_menus(f, limit, sort)
@@ -784,3 +965,45 @@ def get_basket(dateFrom: Optional[str] = None, dateTo: Optional[str] = None, bra
     def build(f):
         return build_basket(f, resolve_granularity(granularity, f.days))
     return endpoint("basket", granularity or "", build, dateFrom, dateTo, branch, channel)
+
+
+def drill(name: str, extra: str, build: Callable[[Filters], dict], dateFrom, dateTo, branch, channel):
+    """endpoint() that also turns BadRequest raised while building into a 400."""
+    try:
+        f = parse_filters(dateFrom, dateTo, branch, channel)
+        return respond(name, f, extra, lambda: {"filters": f.describe(), **build(f)})
+    except BadRequest as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@router.get("/hourly-compare")
+def get_hourly_compare(dateFrom: Optional[str] = None, dateTo: Optional[str] = None, branch: Optional[str] = None,
+                       channel: Optional[str] = None, mode: str = "period", compareFrom: Optional[str] = None,
+                       compareTo: Optional[str] = None, compareBranches: Optional[str] = None):
+    """Busy hours compared: mode=period (vs compareFrom..compareTo, default the previous period) or
+    mode=branches (compareBranches, default the selected branches or the 5 busiest; max 8)."""
+    mode = "branches" if mode == "branches" else "period"
+    return drill("hourly-compare", f"{mode}:{compareFrom}:{compareTo}:{scoped_branch(compareBranches) if compareBranches else ''}",
+                 lambda f: build_hourly_compare(f, mode, compareFrom, compareTo, compareBranches), dateFrom, dateTo, branch, channel)
+
+
+@router.get("/breakdown")
+def get_breakdown(by: str = "branch", dateFrom: Optional[str] = None, dateTo: Optional[str] = None,
+                  branch: Optional[str] = None, channel: Optional[str] = None, paymentMethod: Optional[str] = None,
+                  txType: Optional[str] = None):
+    """Sales split by branch | channel | payment | paymentType | date | type (txType: sales, void, other_cost, open, all)."""
+    if by not in BREAKDOWN:
+        return JSONResponse({"error": f"by must be one of {', '.join(BREAKDOWN)}"}, status_code=400)
+    if txType not in (None, "sales", "void", "other_cost", "open", "all"):
+        return JSONResponse({"error": "invalid txType"}, status_code=400)
+    return drill("breakdown", f"{by}:{paymentMethod}:{txType}",
+                 lambda f: build_breakdown(f, by, paymentMethod, txType), dateFrom, dateTo, branch, channel)
+
+
+@router.get("/menu-detail")
+def get_menu_detail(menuId: str, kind: str = "menu", dateFrom: Optional[str] = None, dateTo: Optional[str] = None,
+                    branch: Optional[str] = None, channel: Optional[str] = None):
+    """One menu (or add-on): qty and sales per day (per month above 92 days), branch and channel, vs the previous period."""
+    if kind not in ("menu", "package", "extra"):
+        return JSONResponse({"error": "invalid kind"}, status_code=400)
+    return drill("menu-detail", f"{menuId}:{kind}", lambda f: build_menu_detail(f, menuId, kind), dateFrom, dateTo, branch, channel)

@@ -56,9 +56,10 @@ def group_key(g):
     return name, EXPRESSIONS.get(expr, lambda r, c=expr: r[c])
 
 
-def fake_sales_rows(f, start, end, group=(), select="", table=ov.DAILY, tx_type="sales"):
+def fake_sales_rows(f, start, end, group=(), select="", table=ov.DAILY, tx_type="sales", payment_method=None):
     rows = [r for r in DAILY if start <= r["sales_date"] <= end
-            and (not f.branch or r["branch_code"] == f.branch)
+            and (not f.branch or r["branch_code"] in f.branch.split(","))
+            and (not payment_method or r["payment_method"] == payment_method)
             and (not f.channels or r["channel"] in f.channels)
             and (not tx_type or r["tx_type"] == tx_type)]
     keys = [group_key(g) for g in group]
@@ -91,6 +92,33 @@ def fake_hourly_rows(f):
     return list(out.values())
 
 
+def fake_hourly_branch_rows(f):
+    out = {}
+    for r in HOURLY:
+        if f.start <= r["sales_date"] <= f.end and r["branch_code"] in f.branch.split(","):
+            o = out.setdefault((r["branch_code"], r["hour"]), {"branch_code": r["branch_code"], "hour": r["hour"], "bills": 0, "subtotal": 0})
+            o["bills"] += r["bills"]
+            o["subtotal"] += r["subtotal"]
+    return list(out.values())
+
+
+MENU_DAILY = [
+    {"sales_date": date(2026, 9, 1), "branch_code": "CCI01", "channel": "Dine In", "menu_id": "1", "kind": "menu", "bills": 8, "qty": 12, "subtotal": 1_200_000, "discount": 0},
+    {"sales_date": date(2026, 9, 2), "branch_code": "TGP17", "channel": "GoFood", "menu_id": "1", "kind": "menu", "bills": 4, "qty": 8, "subtotal": 800_000, "discount": 50_000},
+]
+
+
+def fake_menu_detail_rows(f, menu_id, kind, group):
+    out = {}
+    for r in MENU_DAILY:
+        if f.start <= r["sales_date"] <= f.end and r["menu_id"] == menu_id and r["kind"] == kind:
+            g = r["sales_date"].replace(day=1) if group == "month" else r[group]
+            o = out.setdefault(g, {"g": g, "bills": 0, "qty": 0, "subtotal": 0, "discount": 0})
+            for m in ("bills", "qty", "subtotal", "discount"):
+                o[m] += r[m]
+    return list(out.values())
+
+
 @pytest.fixture(autouse=True)
 def fake_aggregates(monkeypatch):
     ov._cache._data.clear()
@@ -99,6 +127,8 @@ def fake_aggregates(monkeypatch):
                         fake_sales_rows(f, start, end, group, tx_type=tx_type))
     monkeypatch.setattr(ov, "menu_rows", lambda f: [dict(m) for m in MENUS])
     monkeypatch.setattr(ov, "hourly_rows", fake_hourly_rows)
+    monkeypatch.setattr(ov, "hourly_branch_rows", fake_hourly_branch_rows)
+    monkeypatch.setattr(ov, "menu_detail_rows", fake_menu_detail_rows)
     monkeypatch.setattr(ov, "branch_names", lambda: {"CCI01": "Kopi Calf Supratman", "TGP17": "Kopi Calf To Go Pamulang"})
     monkeypatch.setattr(ov, "freshness", lambda: {"dataFrom": "2026-08-01", "dataTo": "2026-09-02",
                                                   "lastSyncedAt": "2026-09-02T10:05:00+00:00",
@@ -236,3 +266,52 @@ def test_helpers():
     assert ov.bucket_of(date(2026, 9, 3), "week") == date(2026, 8, 31)
     assert ov.bucket_sql("day") == "sales_date" and "week" in ov.bucket_sql("week")
     assert ov._p90([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) == pytest.approx(9.0)
+
+
+def test_trend_has_channel_values_per_bucket(client):
+    first = client.get(f"/api/overview/trend?{Q}").json()["series"][0]
+    assert first["channels"] == {"Dine In": {"subtotal": 1_000_000, "bills": 10}, "GoFood": {"subtotal": 1_000_000, "bills": 5}}
+
+
+def test_hourly_compare_periods(client):
+    body = client.get(f"/api/overview/hourly-compare?{Q}").json()
+    cur, cmp = body["current"], body["compare"]
+    assert body["mode"] == "period" and cur["bills"] == 20 and cur["days"] == 2 and cur["peakHour"] == 9
+    assert {h["hour"]: h["share"] for h in cur["hours"]} == {9: 75.0, 12: 25.0}
+    assert cmp["from"] == "2026-08-30" and cmp["to"] == "2026-08-31" and cmp["bills"] == 0
+    custom = client.get(f"/api/overview/hourly-compare?{Q}&compareFrom=2026-09-01").json()["compare"]
+    assert custom["to"] == "2026-09-02" and custom["bills"] == 20  # same length as the selected period
+    assert client.get(f"/api/overview/hourly-compare?{Q}&compareFrom=2026-09-05&compareTo=2026-09-01").status_code == 400
+
+
+def test_hourly_compare_branches(client):
+    body = client.get(f"/api/overview/hourly-compare?{Q}&mode=branches").json()
+    rows = {b["branchCode"]: b for b in body["branches"]}
+    assert set(rows) == {"CCI01", "TGP17"}  # the busiest branches of the period
+    assert rows["CCI01"]["bills"] == 15 and rows["CCI01"]["activeDays"] == 1 and rows["CCI01"]["peakHour"] == 9
+    assert rows["CCI01"]["hours"][0]["share"] == round(10 / 15 * 100, 2)
+    only = client.get(f"/api/overview/hourly-compare?{Q}&mode=branches&compareBranches=TGP17").json()["branches"]
+    assert [b["branchCode"] for b in only] == ["TGP17"] and only[0]["branchName"] == "Kopi Calf To Go Pamulang"
+
+
+def test_breakdown(client):
+    by_branch = client.get(f"/api/overview/breakdown?{Q}&by=branch").json()
+    assert [r["key"] for r in by_branch["rows"]] == ["CCI01", "TGP17"] and by_branch["totals"]["subtotal"] == 2_500_000
+    assert by_branch["rows"][0]["label"] == "Kopi Calf Supratman" and by_branch["rows"][0]["share"] == 80.0
+    gofood = client.get(f"/api/overview/breakdown?{Q}&by=channel&paymentMethod=GOFOOD_INT").json()
+    assert gofood["rows"] == [{**gofood["rows"][0], "key": "GoFood", "subtotal": 1_000_000}]
+    days = client.get(f"/api/overview/breakdown?{Q}&by=date&paymentMethod=GOFOOD_INT").json()["rows"]
+    assert [(d["key"], d["subtotal"]) for d in days] == [("2026-09-01", 1_000_000), ("2026-09-02", 0.0)]
+    types = client.get(f"/api/overview/breakdown?{Q}&by=type").json()["rows"]
+    assert {r["key"] for r in types} == {"sales", "void", "other_cost"}
+    assert client.get(f"/api/overview/breakdown?{Q}&by=nope").status_code == 400
+
+
+def test_menu_detail(client):
+    body = client.get(f"/api/overview/menu-detail?{Q}&menuId=1").json()
+    assert body["menu"]["name"] == "Es Kopi Calf Premium" and body["granularity"] == "day"
+    assert body["totals"]["qty"] == 20 and body["totals"]["avgPrice"] == 100_000 and body["totals"]["shareOfMenus"] == 80.0
+    assert [s["date"] for s in body["series"]] == ["2026-09-01", "2026-09-02"]
+    assert {b["key"]: b["share"] for b in body["branches"]} == {"CCI01": 60.0, "TGP17": 40.0}
+    assert body["branches"][0]["label"] == "Kopi Calf Supratman"
+    assert client.get(f"/api/overview/menu-detail?{Q}&menuId=1&kind=bad").status_code == 400

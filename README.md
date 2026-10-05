@@ -25,7 +25,7 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | GET | `/api/exports/{id}/download` | Unduh `.xlsx` (tersedia `EXPORT_TTL_HOURS`, default 24 jam) |
 | GET | `/api/overview/meta` | Opsi filter channel, periode default, cakupan & kesegaran data |
 | GET | `/api/overview/kpis` | Sales, Nett Sales, Bills, Avg Ticket + Δ% vs periode sebelumnya + nilai harian |
-| GET | `/api/overview/trend` | Seri Sales per `granularity` (`day`/`week`/`month`, default otomatis) + periode sebelumnya |
+| GET | `/api/overview/trend` | Seri Sales per `granularity` (`day`/`week`/`month`, default otomatis) + periode sebelumnya + nilai per channel per bucket |
 | GET | `/api/overview/channels` | Per channel: bills, sales, share, avg ticket, diskon %, growth + mix per periode |
 | GET | `/api/overview/branches` | Leaderboard cabang: sales, bills, avg ticket, growth, void rate, sparkline |
 | GET | `/api/overview/hourly` | Hari-dalam-minggu × jam: rata-rata bills & sales per hari |
@@ -34,6 +34,9 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | GET | `/api/overview/monthly` | Bulan-bulan dalam periode terpilih: rata-rata per hari, MoM, YoY, same-store growth |
 | GET | `/api/overview/payments` | Mix metode pembayaran |
 | GET | `/api/overview/basket` | Baris menu & qty per bill, food share, food attach rate |
+| GET | `/api/overview/hourly-compare` | Jam sibuk dibandingkan: `mode=period` (vs `compareFrom`/`compareTo`, default periode sebelumnya) atau `mode=branches` (`compareBranches`, default cabang terpilih / 5 tersibuk, maks. 8): per jam bills, sales, rata-rata per hari, share hari, jam puncak |
+| GET | `/api/overview/breakdown` | Penjualan per `by=branch\|channel\|payment\|paymentType\|date\|type`, opsional `paymentMethod`, `txType`; + periode sebelumnya (drill-down) |
+| GET | `/api/overview/menu-detail` | Satu menu (`menuId`, `kind`): qty/sales per hari (per bulan bila > 92 hari), per cabang & channel, vs periode sebelumnya |
 | WS | `/ws` | Realtime: pesan `hello`/`update` saat data baru tersinkron atau agregat diperbarui, `ping` tiap 25 dtk (lihat [docs/README.md](docs/README.md#5-realtime-websocket)) |
 | GET | `/api/realtime/version` | Versi data yang sama via HTTP (fallback bila WebSocket putus) |
 | POST | `/api/auth/login` | Login: `{"identifier", "password", "method": "username"\|"email", "remember"}` → cookie sesi HttpOnly |

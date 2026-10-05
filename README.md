@@ -43,6 +43,7 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | POST | `/api/auth/password` | Ganti password sendiri `{"currentPassword", "newPassword"}` |
 | PUT/DELETE | `/api/auth/me/avatar` | Foto profil sendiri `{"image": "data:image/webp;base64,..."}` |
 | GET/POST | `/api/users` | (superadmin) daftar user (`search` — nama/username/email/telepon/jabatan, `role`, `status`, `branch`, `page`, `pageSize`) / buat user (cukup `username`, `email`, `password`, `role`, dan `branches` untuk role user) |
+| GET | `/api/users/summary` | (superadmin) jumlah user: total, aktif/nonaktif/terkunci, superadmin/user, tanpa cabang, belum pernah login, login 7 hari, cabang tercakup |
 | GET/PATCH/DELETE | `/api/users/{id}` | (superadmin) detail / ubah (termasuk reset `password`) / hapus |
 | POST | `/api/users/{id}/unlock` | (superadmin) buka kunci akun |
 | PUT/DELETE | `/api/users/{id}/avatar` | (superadmin) foto profil user lain |

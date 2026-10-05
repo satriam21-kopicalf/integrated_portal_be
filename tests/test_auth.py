@@ -459,3 +459,11 @@ def test_create_with_identity_and_filter_by_branch(anon, store):
     assert created["notes"] == "Area Tangerang" and created["branches"] == ["TGP17"]
     names = {u["username"] for u in anon.get("/api/users?branch=TGP17").json()["data"]}
     assert names == {"okta.fajri", "superadmin"}  # kasir (CCI01) not listed
+
+
+def test_users_summary_is_superadmin_only(anon, store):
+    login(anon, "kasir", "Kasir1234")
+    assert anon.get("/api/users/summary").status_code == 403
+    login(anon, "superadmin", "Admin1234")
+    body = anon.get("/api/users/summary").json()
+    assert {"total", "active", "locked", "superadmins", "users", "withoutBranch", "active7d", "branchesCovered"} <= set(body)

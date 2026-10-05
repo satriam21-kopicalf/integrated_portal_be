@@ -122,6 +122,16 @@ def _target(user: dict) -> dict:
     return {"targetId": str(user["id"]), "targetUsername": user["username"], "targetRole": user["role"]}
 
 
+@router.get("/summary")
+def users_summary():
+    """Counts for the page header: totals, roles, status, users without branches, sign-in activity."""
+    c = accounts.user_counts()
+    return {"total": c.get("total", 0), "active": c.get("active", 0), "inactive": c.get("inactive", 0),
+            "locked": c.get("locked", 0), "superadmins": c.get("superadmins", 0), "users": c.get("users", 0),
+            "withoutBranch": c.get("without_branch", 0), "neverSignedIn": c.get("never_signed_in", 0),
+            "active7d": c.get("active_7d", 0), "branchesCovered": c.get("branches_covered", 0)}
+
+
 @router.post("", status_code=201)
 def create_user(body: UserFields, request: Request, actor: dict = Depends(require_superadmin)):
     data, error = _clean(body, creating=True)

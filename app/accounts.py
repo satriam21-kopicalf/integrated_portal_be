@@ -145,6 +145,25 @@ def list_users(search: str = "", role: str = "", status: str = "", limit: int = 
     return rows, total
 
 
+def user_counts() -> dict:
+    """Headline counts for the User Accounts page."""
+    return db.fetchrow(f"""
+        SELECT count(*)::int AS total,
+               count(*) FILTER (WHERE u.is_active)::int AS active,
+               count(*) FILTER (WHERE NOT u.is_active)::int AS inactive,
+               count(*) FILTER (WHERE u.locked_until > now())::int AS locked,
+               count(*) FILTER (WHERE u.role = 'superadmin')::int AS superadmins,
+               count(*) FILTER (WHERE u.role = 'user')::int AS users,
+               count(*) FILTER (WHERE u.role = 'user' AND NOT EXISTS (
+                   SELECT 1 FROM {T_USER_BRANCH} x WHERE x.user_id = u.id))::int AS without_branch,
+               count(*) FILTER (WHERE u.last_login_at IS NULL)::int AS never_signed_in,
+               count(*) FILTER (WHERE u.last_login_at > now() - interval '7 days')::int AS active_7d,
+               (SELECT count(DISTINCT x.branch_code)::int FROM {T_USER_BRANCH} x
+                JOIN {T_USER} xu ON xu.id = x.user_id AND xu.role = 'user' AND xu.is_active) AS branches_covered
+        FROM {T_USER} u
+    """) or {}
+
+
 def known_branch_codes(codes: list[str]) -> set[str]:
     """The codes that exist in the ESB branch master."""
     if not codes:

@@ -45,9 +45,10 @@ class MemoryAccounts:
     def get_password_hash(self, user_id):
         return self.users[str(user_id)]["password_hash"]
 
-    def list_users(self, search="", role="", status="", limit=20, offset=0):
+    def list_users(self, search="", role="", status="", limit=20, offset=0, branch=""):
         rows = [u for u in self.users.values()
                 if (not search or search.lower() in (u["username"] + u["email"] + u["full_name"]).lower())
+                and (not branch or u["role"] == "superadmin" or branch in (u.get("branch_codes") or []))
                 and (not role or u["role"] == role)
                 and (status != "active" or u["is_active"]) and (status != "inactive" or not u["is_active"])]
         rows.sort(key=lambda u: u["full_name"] or u["username"])
@@ -446,3 +447,15 @@ def test_user_changes_are_recorded(anon, store, fake_db):
     entry = next(e for e in fake_db.activity if e["action"] == "user.update")
     assert entry["details"]["changes"]["branches"] == {"from": ["CCI01"], "to": ["CCI01", "TGP17"]}
     assert entry["details"]["passwordReset"] is True and "Baru12345" not in str(entry)
+
+
+def test_create_with_identity_and_filter_by_branch(anon, store):
+    login(anon, "superadmin", "Admin1234")
+    body = {"username": "okta.fajri", "email": "okta@kopicalf.co.id", "password": "Okta12345", "role": "user",
+            "branches": ["TGP17"], "fullName": "Okta Fajri", "phoneNumber": "0812-3456-7890", "jobTitle": "PIC Outlet",
+            "department": "Operations", "notes": "Area Tangerang"}
+    created = anon.post("/api/users", json=body).json()["user"]
+    assert created["fullName"] == "Okta Fajri" and created["jobTitle"] == "PIC Outlet" and created["profileComplete"]
+    assert created["notes"] == "Area Tangerang" and created["branches"] == ["TGP17"]
+    names = {u["username"] for u in anon.get("/api/users?branch=TGP17").json()["data"]}
+    assert names == {"okta.fajri", "superadmin"}  # kasir (CCI01) not listed

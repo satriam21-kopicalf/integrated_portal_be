@@ -112,9 +112,9 @@ def _password(body: UserFields, required: bool) -> tuple[Optional[str], Optional
 
 
 @router.get("")
-def list_users(search: str = "", role: str = "", status: str = "",
+def list_users(search: str = "", role: str = "", status: str = "", branch: str = "",
                page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100)):
-    rows, total = accounts.list_users(search, role, status, pageSize, (page - 1) * pageSize)
+    rows, total = accounts.list_users(search, role, status, pageSize, (page - 1) * pageSize, branch)
     return {"data": [accounts.public_user(r) for r in rows], "total": total, "page": page, "pageSize": pageSize}
 
 

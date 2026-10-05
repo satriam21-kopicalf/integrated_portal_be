@@ -114,12 +114,18 @@ def get_password_hash(user_id: str) -> Optional[str]:
     return row["password_hash"] if row else None
 
 
-def list_users(search: str = "", role: str = "", status: str = "", limit: int = 20, offset: int = 0) -> tuple[list[dict], int]:
+def list_users(search: str = "", role: str = "", status: str = "", limit: int = 20, offset: int = 0,
+               branch: str = "") -> tuple[list[dict], int]:
     where, params = ["TRUE"], {}
     if search:
         where.append("(u.username ILIKE %(q)s OR u.email ILIKE %(q)s OR u.full_name ILIKE %(q)s "
-                     "OR u.employee_number ILIKE %(q)s)")
+                     "OR u.employee_number ILIKE %(q)s OR u.phone_number ILIKE %(q)s OR u.job_title ILIKE %(q)s)")
         params["q"] = f"%{search.strip()}%"
+    if branch:
+        # users assigned to the branch (superadmins see every branch, so they are listed too)
+        where.append(f"(u.role = 'superadmin' OR EXISTS (SELECT 1 FROM {T_USER_BRANCH} x "
+                     "WHERE x.user_id = u.id AND x.branch_code = %(branch)s))")
+        params["branch"] = branch.strip()
     if role in ROLES:
         where.append("u.role = %(role)s")
         params["role"] = role

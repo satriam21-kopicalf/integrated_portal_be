@@ -46,6 +46,8 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | POST | `/api/users/{id}/unlock` | (superadmin) buka kunci akun |
 | PUT/DELETE | `/api/users/{id}/avatar` | (superadmin) foto profil user lain |
 | GET | `/api/avatars/{id}` | Foto profil (URL berversi, cache 1 tahun) |
+| GET | `/api/cost-control/{meta,summary,trend,items,forecast}` | Cost Control: COGS ratio (net sales & subtotal), usage ratio, selisih stok, waste, estimasi belanja 1/2/4 minggu per outlet (lihat docs) |
+| PUT | `/api/cost-control/settings` | (superadmin) ambang status & parameter forecast |
 | GET | `/api/live` | Penjualan hari ini (vs kemarin di jam yang sama, per jam) + transaksi Sales terbaru yang masuk (`limit`, `branch`, `channel`); langsung dari `transactions_pos_sales`, cache 20 dtk |
 
 Tanpa `dateFrom`/`dateTo`, rentang default adalah 65 hari terakhir (Asia/Jakarta). Dokumentasi interaktif: `https://api.kopicalf.co.id/docs`.

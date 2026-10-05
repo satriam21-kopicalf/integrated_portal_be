@@ -7,7 +7,7 @@ app/routes/exports.py.
 
 Common filters:
   type    sales (default, = ESB report) | void | other_cost | all
-  branch  branch_code (names change over time, codes do not)
+  branch  branch_code, or several separated by commas (names change over time, codes do not)
 """
 import time
 from datetime import date, timedelta
@@ -20,7 +20,8 @@ from app import database as db
 from app.config import get_settings
 from app.database import HEADER_COLUMNS, ITEM_COLUMNS, TABLE_ITEMS, TABLE_TRANSACTIONS
 from app.esb_report import REPORT_HEADERS, TYPE_CASE_SQL, TYPE_CONDITIONS, load_masters, report_rows
-from app.utils import TTLCache, data_version, escape_like, jsonable, resolve_date_range, to_json_value, today
+from app.utils import (TTLCache, data_version, escape_like, jsonable, normalize_branch, parse_branches,
+                       resolve_date_range, to_json_value, today)
 
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
 summary_router = APIRouter(prefix="/api/summary", tags=["summary"])
@@ -47,8 +48,8 @@ def header_filters(date_from: str, date_to: str, branch: Optional[str], search: 
         where.append("h.sales_date < %s::date + 1")
         params.append(date_to)
     if branch:
-        where.append("h.branch_code = %s")
-        params.append(branch)
+        where.append("h.branch_code = ANY(%s)")
+        params.append(parse_branches(branch))
     if search:
         term = f"%{escape_like(search)}%"
         where.append("(h.sales_num ILIKE %s OR h.bill_num ILIKE %s OR h.branch_name ILIKE %s)")
@@ -124,6 +125,7 @@ def list_transactions(
 ):
     start = time.perf_counter()
     limit = min(limit, 100)
+    branch = normalize_branch(branch)
     tx_type = resolve_type(type)
     date_from, date_to = resolve_date_range(dateFrom, dateTo)
 
@@ -217,8 +219,8 @@ def _agg_summary_rows(date_from: str, date_to: str, branch: Optional[str]) -> li
     where = ["sales_date BETWEEN %(from)s AND %(to)s"]
     params: dict = {"from": date_from, "to": date_to}
     if branch:
-        where.append("branch_code = %(branch)s")
-        params["branch"] = branch
+        where.append("branch_code = ANY(%(branches)s)")
+        params["branches"] = parse_branches(branch)
     return db.fetch(
         f"""SELECT to_char(sales_date, 'YYYY-MM-DD') AS day, tx_type AS kind,
                    CASE WHEN tx_type = 'other_cost' THEN payment_method END AS method,
@@ -297,6 +299,7 @@ def summarize(date_from: str, date_to: str, branch: Optional[str]) -> dict:
 def get_summary(dateFrom: Optional[str] = None, dateTo: Optional[str] = None, branch: Optional[str] = None):
     """Gross - Void/Cancelled - Other Cost (CUPPING, WASTE, ...) - open bills = Sales (ESB report)."""
     date_from, date_to = resolve_date_range(dateFrom, dateTo)
+    branch = normalize_branch(branch)
     key = f"summary:{date_from}:{date_to}:{branch}:{data_version.get()}"
     cached = _cache.get(key)
     if cached is None:

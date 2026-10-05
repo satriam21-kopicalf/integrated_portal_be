@@ -77,7 +77,8 @@ def test_live_today_and_latest(client, live_db):
 def test_live_filters_use_header_columns(client, live_db):
     client.get("/api/live?branch=CCI01&channel=GoFood, Dine In")
     query, params = live_db.queries[0]
-    assert "h.branch_code = %(branch)s" in query and "h.visit_purpose = ANY(%(channels)s)" in query
+    assert "h.branch_code = ANY(%(branches)s)" in query and "h.visit_purpose = ANY(%(channels)s)" in query
+    assert params["branches"] == ["CCI01"]
     assert params["channels"] == ["Dine In", "GoFood"]
     assert live.TYPE_CONDITIONS["sales"] in query
     assert all("ANY(%(channels)s)" in q for q, _ in live_db.queries

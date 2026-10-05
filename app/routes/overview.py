@@ -2,7 +2,7 @@
 
 Common query parameters:
   dateFrom, dateTo  YYYY-MM-DD; default: the last 30 complete days (ending yesterday, WIB)
-  branch            branch_code
+  branch            branch_code, or several separated by commas (CCI01,CCI04)
   channel           comma separated visitPurposeName values, e.g. "Dine In,GoFood"
 
 The comparison period has the same length and ends the day before dateFrom.
@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse
 from app import database as db
 from app.config import get_settings
 from app.database import SCHEMA
-from app.utils import TTLCache, data_version, today
+from app.utils import TTLCache, data_version, normalize_branch, parse_branches, today
 
 router = APIRouter(prefix="/api/overview", tags=["overview"])
 
@@ -77,8 +77,8 @@ class Filters:
         parts: list[str] = []
         params: dict[str, Any] = {}
         if self.branch:
-            parts.append("branch_code = %(branch)s")
-            params["branch"] = self.branch
+            parts.append("branch_code = ANY(%(branches)s)")
+            params["branches"] = parse_branches(self.branch)
         if self.channels:
             parts.append("channel = ANY(%(channels)s)")
             params["channels"] = list(self.channels)
@@ -93,7 +93,7 @@ class Filters:
             "from": self.start.isoformat(), "to": self.end.isoformat(), "days": self.days,
             "previous": {"from": self.prev_start.isoformat(), "to": self.prev_end.isoformat(),
                          "complete": self.prev_complete},
-            "branch": self.branch, "channels": list(self.channels),
+            "branch": self.branch, "branches": parse_branches(self.branch), "channels": list(self.channels),
         }
 
     def key(self) -> str:
@@ -116,7 +116,7 @@ def parse_filters(date_from: Optional[str], date_to: Optional[str], branch: Opti
     if (end - start).days + 1 > MAX_DAYS:
         raise BadRequest(f"the period is limited to {MAX_DAYS} days")
     channels = tuple(sorted({c.strip() for c in (channel or "").split(",") if c.strip()}))
-    return Filters(start, end, branch or None, channels, data_start())
+    return Filters(start, end, normalize_branch(branch), channels, data_start())
 
 
 def data_start() -> date:

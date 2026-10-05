@@ -109,8 +109,8 @@ class FakeDB:
             return MASTERS["users"]
         if "WITH c AS" in query:  # /api/branches
             return [{"branch_code": "CCI01", "branch_name": "Kopi Calf Supratman Bandung", "count": 2}]
-        if "WHERE branch_code = %s" in query:
-            return [b for b in MASTERS["branches"] if b["branch_code"] == params[0]]
+        if "WHERE branch_code = ANY(%s)" in query:
+            return [b for b in MASTERS["branches"] if b["branch_code"] in params[0]]
         if "transactions_pos_sales_items" in query:
             return [{"sales_num": params[0], "line_number": 2, "menu_name": "Es Kopi Calf Premium"}]
         if "h.sales_num = %s" in query:
@@ -124,7 +124,7 @@ class FakeDB:
             for h in rows:
                 if h["sales_date"].date().isoformat() != day or (wanted != "all" and _type_of(h) != wanted):
                     continue
-                if "h.branch_code = %s" in query and h["branch_code"] != params[2]:
+                if "h.branch_code = ANY(%s)" in query and h["branch_code"] not in params[2]:
                     continue
                 raw = h["raw_data"]
                 name = next((b["branch_name"] for b in MASTERS["branches"] if b["branch_code"] == h["branch_code"]), None)
@@ -157,8 +157,9 @@ class FakeDB:
         rows = [h for h in rows if wanted == "all" or _type_of(h) == wanted]
         if "h.sales_date < %s" in query and "::date + 1" not in query:  # export: one day
             rows = [h for h in rows if h["sales_date"].date() == date.fromisoformat(params[0])]
-        if "h.branch_code = %s" in query:
-            rows = [h for h in rows if h["branch_code"] in params]
+        if "h.branch_code = ANY(%s)" in query:
+            wanted_branches = next(p for p in params if isinstance(p, list))
+            rows = [h for h in rows if h["branch_code"] in wanted_branches]
         if "LIMIT %s" in query:
             rows = rows[: params[-1]]
         return rows

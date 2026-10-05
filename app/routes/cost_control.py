@@ -12,10 +12,11 @@ Ratios are given on two bases: net sales (after discounts, default) and subtotal
 Statuses (good / warning / serious / critical) use the thresholds in cost_settings.
 
   GET /api/cost-control/meta
-  GET /api/cost-control/summary   dateFrom, dateTo, basis=net|subtotal
+  GET /api/cost-control/summary   dateFrom, dateTo, branch
   GET /api/cost-control/trend     dateFrom, dateTo, branch, grain=period|month
   GET /api/cost-control/items     dateFrom, dateTo, branch, limit
-  GET /api/cost-control/forecast  branch (items when given)
+  GET /api/cost-control/forecast  branch (items when exactly one)
+`branch` is a branch_code or several separated by commas.
   PUT /api/cost-control/settings  (superadmin) {key: {good, warning, serious}}
 """
 import json
@@ -30,7 +31,7 @@ from app import database as db
 from app.cost_control import period_bounds
 from app.database import SCHEMA
 from app.routes.auth import require_superadmin
-from app.utils import TTLCache, data_version, jsonable, today
+from app.utils import TTLCache, data_version, jsonable, normalize_branch, parse_branches, today
 
 router = APIRouter(prefix="/api/cost-control", tags=["cost-control"])
 
@@ -187,8 +188,8 @@ def period_rows(start: date, end: date, branch: Optional[str] = None) -> list[di
     where = "period_start BETWEEN %(start)s AND %(end)s"
     params: dict[str, Any] = {"start": start, "end": end}
     if branch:
-        where += " AND branch_code = %(branch)s"
-        params["branch"] = branch
+        where += " AND branch_code = ANY(%(branches)s)"
+        params["branches"] = parse_branches(branch)
     return db.fetch(f"SELECT * FROM {PERIOD} WHERE {where} ORDER BY period_start, branch_code", params)
 
 
@@ -211,15 +212,17 @@ def get_meta():
 
 
 @router.get("/summary")
-def get_summary(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Query(None)):
+def get_summary(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Query(None),
+                branch: Optional[str] = Query(None)):
     try:
         start, end = date_range(dateFrom, dateTo)
     except BadRequest as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    branch = normalize_branch(branch)
 
     def build() -> dict:
         s = settings()
-        rows = period_rows(start, end)
+        rows = period_rows(start, end, branch)
         names = branch_names()
         by_branch: dict[str, list[dict]] = {}
         for r in rows:
@@ -250,7 +253,7 @@ def get_summary(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Q
             status_counts[st] = status_counts.get(st, 0) + 1
         periods = sorted({(r["period_start"], r["period_end"]) for r in rows})
         return {
-            "filters": {"dateFrom": start.isoformat(), "dateTo": end.isoformat()},
+            "filters": {"dateFrom": start.isoformat(), "dateTo": end.isoformat(), "branch": branch},
             "periods": [{"start": a.isoformat(), "end": b.isoformat()} for a, b in periods],
             "settings": s,
             "total": metrics(total, s),
@@ -261,7 +264,7 @@ def get_summary(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Q
             "freshness": freshness(),
         }
 
-    return cached("summary", f"{start}:{end}", build)
+    return cached("summary", f"{start}:{end}:{branch}", build)
 
 
 @router.get("/trend")
@@ -272,6 +275,7 @@ def get_trend(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Que
     except BadRequest as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     grain = grain if grain in ("period", "month") else "period"
+    branch = normalize_branch(branch)
 
     def build() -> dict:
         s = settings()
@@ -300,14 +304,15 @@ def get_items(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Que
         start, end = date_range(dateFrom, dateTo)
     except BadRequest as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    branch = normalize_branch(branch)
 
     def build() -> dict:
         s = settings()
         where = "period_start BETWEEN %(start)s AND %(end)s"
         params: dict[str, Any] = {"start": start, "end": end, "limit": limit}
         if branch:
-            where += " AND branch_code = %(branch)s"
-            params["branch"] = branch
+            where += " AND branch_code = ANY(%(branches)s)"
+            params["branches"] = parse_branches(branch)
         rows = db.fetch(
             f"""SELECT product_id, max(product_code) AS product_code, max(product_name) AS product_name,
                        max(category) AS category, max(base_unit) AS base_unit,
@@ -355,9 +360,9 @@ def _trend_factor(branch: Optional[str], cap_pct: float) -> dict[str, float]:
                    sum(nett_sales) FILTER (WHERE sales_date <= %(mid)s) AS before
             FROM {PORTAL}.agg_sales_daily
             WHERE tx_type = 'sales' AND sales_date BETWEEN %(start)s AND %(end)s
-                  {"AND branch_code = %(branch)s" if branch else ""}
+                  {"AND branch_code = ANY(%(branches)s)" if branch else ""}
             GROUP BY 1""",
-        {"start": end - timedelta(days=27), "mid": end - timedelta(days=14), "end": end, "branch": branch})
+        {"start": end - timedelta(days=27), "mid": end - timedelta(days=14), "end": end, "branches": parse_branches(branch)})
     cap = cap_pct / 100
     out = {}
     for r in rows:
@@ -368,6 +373,8 @@ def _trend_factor(branch: Optional[str], cap_pct: float) -> dict[str, float]:
 
 @router.get("/forecast")
 def get_forecast(branch: Optional[str] = Query(None)):
+    branch = normalize_branch(branch)
+    single = branch is not None and "," not in branch
     """Purchase need and spend for the next 7 / 14 / 30 days, per outlet (and per item for one outlet).
 
     daily usage  = actual usage of the periods in the look-back window / days (falls back to
@@ -382,8 +389,8 @@ def get_forecast(branch: Optional[str] = Query(None)):
         safety = float(fc.get("safety_days", 2))
         end = today() - timedelta(days=1)
         first = period_bounds(end - timedelta(days=lookback - 1))[0]
-        params: dict[str, Any] = {"first": first, "end": end, "branch": branch}
-        branch_sql = "AND i.branch_code = %(branch)s" if branch else ""
+        params: dict[str, Any] = {"first": first, "end": end, "branches": parse_branches(branch)}
+        branch_sql = "AND i.branch_code = ANY(%(branches)s)" if branch else ""
         rows = db.fetch(
             f"""WITH p AS (
                     SELECT branch_code, period_start, period_end, (period_end - period_start + 1) AS days, opname_count,
@@ -437,7 +444,7 @@ def get_forecast(branch: Optional[str] = Query(None)):
             for h in HORIZONS:
                 o[f"spend{h}"] += spend[h]
             o["items"] += 1
-            if branch:
+            if single:
                 items.append({
                     "productId": r["product_id"], "productCode": r["product_code"], "productName": r["product_name"],
                     "category": r["category"], "unit": r["base_unit"], "dailyUsage": round(daily, 4),

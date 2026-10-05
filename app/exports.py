@@ -32,6 +32,7 @@ from app.database import SCHEMA, TABLE_TRANSACTIONS
 from app.esb_report import (REPORT_COLUMN_WIDTHS, REPORT_HEADERS, TYPE_CONDITIONS, TYPE_LABELS,
                             iter_report_rows)
 from app.daily_report import DAILY_COLUMN_WIDTHS, DAILY_HEADERS, daily_rows
+from app.utils import parse_branches
 from app.xlsx_stream import StreamingXlsxWriter
 
 logger = logging.getLogger(__name__)
@@ -136,8 +137,11 @@ def _file_name(date_from: date, date_to: date, branch: Optional[str], tx_type: s
     name = f"{REPORTS[report][1]}_{date_from.isoformat()}_to_{date_to.isoformat()}"
     if tx_type != "sales":
         name += f"_{tx_type}"
-    if branch:
-        name += "_" + re.sub(r"[^A-Za-z0-9]+", "_", branch).strip("_")
+    codes = parse_branches(branch)
+    if len(codes) == 1:
+        name += "_" + re.sub(r"[^A-Za-z0-9]+", "_", codes[0]).strip("_")
+    elif codes:
+        name += f"_{len(codes)}_branches"
     return f"{name}.xlsx"
 
 
@@ -232,8 +236,8 @@ def _day_headers(day: date, branch: Optional[str], tx_type: str) -> Iterator[dic
     where = ["h.sales_date >= %s", "h.sales_date < %s", TYPE_CONDITIONS[tx_type]]
     params: list = [day.isoformat(), (day + timedelta(days=1)).isoformat()]
     if branch:
-        where.append("h.branch_code = %s")
-        params.append(branch)
+        where.append("h.branch_code = ANY(%s)")
+        params.append(parse_branches(branch))
     return db.stream(
         f"SELECT h.sales_num, h.raw_data FROM {TABLE_TRANSACTIONS} h WHERE {' AND '.join(where)} "
         f"ORDER BY h.branch_code, h.sales_date_in, h.sales_num",
@@ -245,8 +249,12 @@ def _day_headers(day: date, branch: Optional[str], tx_type: str) -> Iterator[dic
 def _branch_name(code: Optional[str]) -> str:
     if not code:
         return "All"
-    row = db.fetchrow(f"SELECT branch_name FROM {SCHEMA}.master_branches WHERE branch_code = %s", (code,))
-    return row["branch_name"] if row else code
+    codes = parse_branches(code)
+    rows = db.fetch(
+        f"SELECT DISTINCT ON (branch_code) branch_code, branch_name FROM {SCHEMA}.master_branches "
+        "WHERE branch_code = ANY(%s) ORDER BY branch_code, COALESCE(is_deleted, false)", (codes,))
+    names = {r["branch_code"]: r["branch_name"] for r in rows}
+    return ", ".join(names.get(c, c) for c in codes)
 
 
 def _preamble(job: dict) -> list[list]:

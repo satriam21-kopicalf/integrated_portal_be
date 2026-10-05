@@ -65,7 +65,24 @@ def test_list_types(client):
 def test_list_branch_filter_uses_code(client, fake_db):
     client.get("/api/transactions", params={"branch": "CCI01"})
     query, params = next(q for q in fake_db.queries if "h.raw_data FROM" in q[0])
-    assert "h.branch_code = %s" in query and "CCI01" in params
+    assert "h.branch_code = ANY(%s)" in query and ["CCI01"] in params
+
+
+def test_list_several_branches(client, fake_db):
+    def nums(branch):
+        rows = client.get("/api/transactions", params={"branch": branch, "type": "all", "dateFrom": "2026-09-01"}).json()["data"]
+        return {r["sales_num"] for r in rows}
+    assert nums("TGP17") == {"S-001"}
+    assert nums("TGP17, CCI01") == {"S-000", "S-001", "S-002", "S-003"}
+    query, params = [q for q in fake_db.queries if "h.raw_data FROM" in q[0]][-1]
+    assert ["CCI01", "TGP17"] in params            # normalised: trimmed + sorted
+
+
+def test_parse_branches():
+    from app.utils import normalize_branch, parse_branches
+    assert parse_branches(" CCI04,CCI01,,CCI04 ") == ["CCI01", "CCI04"]
+    assert parse_branches(None) == [] and normalize_branch("") is None
+    assert normalize_branch("TGP17,CCI01") == "CCI01,TGP17"
 
 
 def test_cursor_pagination(client, fake_db):

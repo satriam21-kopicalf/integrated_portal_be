@@ -46,6 +46,20 @@ def jsonable(row: dict) -> dict:
     return {k: to_json_value(v) for k, v in row.items()}
 
 
+MAX_BRANCHES = 200
+
+
+def parse_branches(value: Optional[str]) -> list[str]:
+    """Branch filter "CCI04,CCI01" -> ["CCI01", "CCI04"] (trimmed, deduplicated, sorted); "" -> []."""
+    codes = sorted({c.strip() for c in (value or "").split(",") if c.strip()})
+    return codes[:MAX_BRANCHES]
+
+
+def normalize_branch(value: Optional[str]) -> Optional[str]:
+    """Canonical form of a branch filter (stable cache keys), None when empty."""
+    return ",".join(parse_branches(value)) or None
+
+
 def escape_like(term: str) -> str:
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 

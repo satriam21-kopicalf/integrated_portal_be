@@ -21,7 +21,7 @@ from app import database as db
 from app.config import get_settings
 from app.database import SCHEMA, TABLE_TRANSACTIONS
 from app.esb_report import TYPE_CONDITIONS, active_line_sql
-from app.utils import TTLCache, data_version
+from app.utils import TTLCache, data_version, normalize_branch, parse_branches
 
 router = APIRouter(prefix="/api/live", tags=["live"])
 
@@ -40,8 +40,8 @@ def filters(branch: Optional[str], channels: list[str]) -> tuple[str, dict]:
     parts: list[str] = []
     params: dict[str, Any] = {}
     if branch:
-        parts.append("h.branch_code = %(branch)s")
-        params["branch"] = branch
+        parts.append("h.branch_code = ANY(%(branches)s)")
+        params["branches"] = parse_branches(branch)
     if channels:
         parts.append("h.visit_purpose = ANY(%(channels)s)")
         params["channels"] = channels
@@ -199,6 +199,7 @@ def build(limit: int, branch: Optional[str], channels: list[str]) -> dict:
 def get_live(limit: int = Query(30, ge=1, le=100), branch: Optional[str] = None, channel: Optional[str] = None):
     """Today so far (vs yesterday at the same time) and the latest sales."""
     channels = sorted({c.strip() for c in (channel or "").split(",") if c.strip()})
+    branch = normalize_branch(branch)
     key = f"live:{limit}:{branch}:{','.join(channels)}:{data_version.get()}"
     body = _cache.get(key)
     if body is None:

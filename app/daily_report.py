@@ -10,6 +10,7 @@ from typing import Any, Optional
 from app import database as db
 from app.database import SCHEMA, TABLE_TRANSACTIONS
 from app.esb_report import TYPE_CONDITIONS, TYPE_LABELS
+from app.utils import parse_branches
 
 DAILY_HEADERS = [
     "Sales Date", "Sales Type", "Branch", "Number of Bill", "Pax Total", "Subtotal", "Discount Total",
@@ -28,8 +29,8 @@ def daily_rows(day: date, branch: Optional[str], tx_type: str) -> list[list[Any]
     where = ["h.sales_date >= %s", "h.sales_date < %s::date + 1", TYPE_CONDITIONS[tx_type]]
     params: list[Any] = [day.isoformat(), day.isoformat()]
     if branch:
-        where.append("h.branch_code = %s")
-        params.append(branch)
+        where.append("h.branch_code = ANY(%s)")
+        params.append(parse_branches(branch))
     rows = db.fetch(
         f"""SELECT COALESCE(b.branch_name, MAX(h.branch_name)) AS branch, COUNT(*) AS bills,
                    SUM({_n('paxTotal')}) AS pax, SUM({_n('subtotal')}) AS subtotal,

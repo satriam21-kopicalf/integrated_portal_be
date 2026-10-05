@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from app import exports
 from app.config import get_settings
 from app.esb_report import TYPE_CONDITIONS
-from app.utils import resolve_date_range, today
+from app.utils import normalize_branch, resolve_date_range, today
 
 router = APIRouter(prefix="/api/exports", tags=["exports"])
 
@@ -19,7 +19,7 @@ XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.s
 class ExportRequest(BaseModel):
     dateFrom: Optional[str] = None
     dateTo: Optional[str] = None
-    branch: Optional[str] = None  # branch_code
+    branch: Optional[str] = None  # branch_code, or several separated by commas
     type: Optional[str] = None  # sales (default, = ESB report) | void | other_cost | all
     report: Optional[str] = None  # detail (default) | daily
 
@@ -53,7 +53,7 @@ def create_export(req: ExportRequest):
 
     tx_type = req.type if req.type in TYPE_CONDITIONS else "sales"
     report = req.report if req.report in exports.REPORTS else "detail"
-    job = exports.create_job(date_from, date_to, req.branch or None, tx_type, report)
+    job = exports.create_job(date_from, date_to, normalize_branch(req.branch), tx_type, report)
     return JSONResponse(_public(job), status_code=202)
 
 

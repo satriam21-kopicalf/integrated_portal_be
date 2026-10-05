@@ -34,6 +34,7 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | GET | `/api/overview/monthly` | Bulan-bulan dalam periode terpilih: rata-rata per hari, MoM, YoY, same-store growth |
 | GET | `/api/overview/payments` | Mix metode pembayaran |
 | GET | `/api/overview/basket` | Baris menu & qty per bill, food share, food attach rate |
+| GET | `/api/overview/growth` | Sales growth (subtotal): `basis=previous` (default) \| `lastYear` (52 minggu) \| `sequential` (bucket vs bucket sebelumnya, per hari), `granularity`; total, per bucket, per cabang & channel dengan kontribusi (pp) |
 | GET | `/api/overview/hourly-compare` | Jam sibuk dibandingkan: `mode=period` (vs `compareFrom`/`compareTo`, default periode sebelumnya) atau `mode=branches` (`compareBranches`, default cabang terpilih / 5 tersibuk, maks. 8): per jam bills, sales, rata-rata per hari, share hari, jam puncak |
 | GET | `/api/overview/breakdown` | Penjualan per `by=branch\|channel\|payment\|paymentType\|date\|type`, opsional `paymentMethod`, `txType`; + periode sebelumnya (drill-down) |
 | GET | `/api/overview/menu-detail` | Satu menu (`menuId`, `kind`): qty/sales per hari (per bulan bila > 92 hari), per cabang & channel, vs periode sebelumnya |

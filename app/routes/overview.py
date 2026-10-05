@@ -13,6 +13,9 @@ Figures are ESB "Sales" (Finished + bill number) unless stated otherwise, so
 totals equal /api/summary and the ESB Sales Recapitulation report.
 Only fields that are 100% filled are used (integrated_portal/docs/overview-analytics.md).
 
+/growth: sales growth on subtotal against the previous period, the same days a year earlier or
+bucket over bucket (per day), with the branches and channels behind it.
+
 Drill-down endpoints (the dashboard's detail drawers): /hourly-compare (busy hours of two periods
 or of several branches), /breakdown (sales by branch / channel / payment / date / type, optionally
 for one payment method) and /menu-detail (one menu by day, branch and channel).
@@ -768,6 +771,127 @@ def build_hourly_compare(f: Filters, mode: str, compare_from: Optional[str], com
     return {"mode": "period", "current": hours_profile(f), "compare": hours_profile(replace(f, start=cs, end=ce))}
 
 
+GROWTH_BASES = ("previous", "lastYear", "sequential")
+YEAR_SHIFT = 364  # 52 weeks: the same weekdays a year earlier
+
+
+def _bucket_before(b: date, granularity: str) -> date:
+    if granularity == "week":
+        return b - timedelta(days=7)
+    if granularity == "month":
+        return _add_months(b, -1)
+    return b - timedelta(days=1)
+
+
+def _growth(cur: float, cmp: float) -> Optional[float]:
+    return delta_pct(cur, cmp) if cmp else None
+
+
+def build_growth(f: Filters, granularity: str, basis: str) -> dict:
+    """Sales growth on subtotal (gross sales) of the period, per bucket, branch and channel.
+
+    basis: previous = the previous period of the same length, aligned day by day;
+           lastYear = the same days 52 weeks earlier (same weekdays);
+           sequential = every bucket against the bucket before it, per calendar day, so partial
+           first/last weeks or months compare fairly (totals: against the previous period).
+    """
+    shift = YEAR_SHIFT if basis == "lastYear" else f.days
+    cs, ce = f.start - timedelta(days=shift), f.end - timedelta(days=shift)
+    complete = cs >= f.data_from
+    cur_rows = sales_rows(f, f.start, f.end, ("sales_date",))
+    cmp_rows = sales_rows(f, cs, ce, ("sales_date",)) if complete else []
+    marks = buckets(f, granularity)
+    series = []
+
+    if basis == "sequential":
+        # every bucket of the period (only its days inside the period) against the bucket before it,
+        # per calendar day; the first one against the whole bucket just before the period
+        cur_b = {m["date"]: {"subtotal": 0.0, "bills": 0, "days": m["days"], "from": max(m["date"], f.start)} for m in marks}
+        for r in cur_rows:
+            b = cur_b[bucket_of(r["sales_date"], granularity)]
+            b["subtotal"] += _f(r["subtotal"])
+            b["bills"] += int(r["bills"])
+        prev = None
+        if marks:
+            b0_start = max(_bucket_before(marks[0]["date"], granularity), f.data_from)
+            b0_end = marks[0]["date"] - timedelta(days=1)
+            if b0_start <= b0_end:
+                t0 = totals(sales_rows(f, b0_start, b0_end, ("sales_date",)))
+                prev = {"subtotal": t0["subtotal"], "bills": t0["bills"], "days": (b0_end - b0_start).days + 1, "from": b0_start}
+        for m in marks:
+            c = cur_b[m["date"]]
+            cur_avg = ratio(c["subtotal"], c["days"]) or 0.0
+            p_avg = ratio(prev["subtotal"], prev["days"]) if prev else None
+            series.append({
+                "date": m["date"].isoformat(), "days": c["days"], "subtotal": c["subtotal"], "bills": c["bills"],
+                "compareSubtotal": prev["subtotal"] if prev else None, "compareBills": prev["bills"] if prev else None,
+                "compareDays": prev["days"] if prev else None, "compareFrom": prev["from"].isoformat() if prev else None,
+                "avgPerDay": r2(cur_avg), "compareAvgPerDay": r2(p_avg),
+                "growthPct": _growth(cur_avg, p_avg) if p_avg else None,
+                "growthAbs": r2(cur_avg - p_avg) if p_avg is not None else None,  # per day
+            })
+            prev = c
+    else:
+        by_bucket: dict[date, dict] = {m["date"]: {"subtotal": 0.0, "bills": 0, "cs": 0.0, "cb": 0} for m in marks}
+        for r in cur_rows:
+            b = by_bucket[bucket_of(r["sales_date"], granularity)]
+            b["subtotal"] += _f(r["subtotal"])
+            b["bills"] += int(r["bills"])
+        for r in cmp_rows:  # compare days moved onto the current timeline
+            b = by_bucket.get(bucket_of(r["sales_date"] + timedelta(days=shift), granularity))
+            if b is not None:
+                b["cs"] += _f(r["subtotal"])
+                b["cb"] += int(r["bills"])
+        for m in marks:
+            b = by_bucket[m["date"]]
+            series.append({
+                "date": m["date"].isoformat(), "days": m["days"], "subtotal": b["subtotal"], "bills": b["bills"],
+                "compareSubtotal": b["cs"] if complete else None, "compareBills": b["cb"] if complete else None,
+                "compareDays": m["days"] if complete else None,
+                "compareFrom": (max(m["date"], f.start) - timedelta(days=shift)).isoformat() if complete else None,
+                "avgPerDay": r2(ratio(b["subtotal"], m["days"]) or 0.0),
+                "compareAvgPerDay": r2(ratio(b["cs"], m["days"])) if complete else None,
+                "growthPct": _growth(b["subtotal"], b["cs"]) if complete else None,
+                "growthAbs": r2(b["subtotal"] - b["cs"]) if complete else None,
+            })
+
+    def split(col: str, names: Optional[dict] = None) -> list[dict]:
+        cur = {r[col]: r for r in sales_rows(f, f.start, f.end, (col,))}
+        cmp = {r[col]: r for r in sales_rows(f, cs, ce, (col,))} if complete else {}
+        cmp_total = sum(_f(r["subtotal"]) for r in cmp.values())
+        out = []
+        for key in set(cur) | set(cmp):
+            c, p = _f((cur.get(key) or {}).get("subtotal")), _f((cmp.get(key) or {}).get("subtotal"))
+            out.append({"key": key, "label": (names or {}).get(key, key), "subtotal": c, "compareSubtotal": p if complete else None,
+                        "bills": int((cur.get(key) or {}).get("bills") or 0), "compareBills": int((cmp.get(key) or {}).get("bills") or 0) if complete else None,
+                        "growthAbs": c - p if complete else None, "growthPct": _growth(c, p) if complete else None,
+                        # percentage points of the total growth this row explains (they add up to the total growth %)
+                        "contributionPp": r2(ratio((c - p) * 100, cmp_total)) if complete and cmp_total else None,
+                        "status": None if not complete else "new" if c and not p else "lost" if p and not c else
+                        "growing" if c > p else "declining" if c < p else "flat"})
+        return sorted(out, key=lambda x: -(x["growthAbs"] if x["growthAbs"] is not None else x["subtotal"]))
+
+    cur_t, cmp_t = totals(cur_rows), totals(cmp_rows)
+    return {
+        "granularity": granularity,
+        "compare": {"basis": basis, "from": cs.isoformat(), "to": ce.isoformat(), "complete": complete},
+        "totals": {
+            "subtotal": cur_t["subtotal"], "bills": cur_t["bills"], "avgTicket": r2(cur_t["avgTicket"]),
+            "compareSubtotal": cmp_t["subtotal"] if complete else None, "compareBills": cmp_t["bills"] if complete else None,
+            "compareAvgTicket": r2(cmp_t["avgTicket"]) if complete else None,
+            "growthAbs": cur_t["subtotal"] - cmp_t["subtotal"] if complete else None,
+            "growthPct": _growth(cur_t["subtotal"], cmp_t["subtotal"]) if complete else None,
+            "billsGrowthPct": _growth(cur_t["bills"], cmp_t["bills"]) if complete else None,
+            "avgTicketGrowthPct": _growth(cur_t["avgTicket"], cmp_t["avgTicket"]) if complete else None,
+            "bucketsUp": sum(1 for s in series if (s["growthPct"] or 0) > 0),
+            "bucketsDown": sum(1 for s in series if (s["growthPct"] or 0) < 0),
+        },
+        "series": series,
+        "branches": split("branch_code", branch_names()),
+        "channels": split("channel"),
+    }
+
+
 BREAKDOWN = {"branch": "branch_code", "channel": "channel", "payment": "payment_method",
              "paymentType": "payment_type", "date": "sales_date", "type": "tx_type"}
 
@@ -965,6 +1089,19 @@ def get_basket(dateFrom: Optional[str] = None, dateTo: Optional[str] = None, bra
     def build(f):
         return build_basket(f, resolve_granularity(granularity, f.days))
     return endpoint("basket", granularity or "", build, dateFrom, dateTo, branch, channel)
+
+
+@router.get("/growth")
+def get_growth(dateFrom: Optional[str] = None, dateTo: Optional[str] = None, branch: Optional[str] = None,
+               channel: Optional[str] = None, granularity: Optional[str] = None, basis: str = "previous"):
+    """Sales growth on subtotal (gross sales): totals, per day/week/month, per branch and channel.
+    basis = previous (default) | lastYear (52 weeks back) | sequential (each bucket vs the one before, per day)."""
+    if basis not in GROWTH_BASES:
+        return JSONResponse({"error": f"basis must be one of {', '.join(GROWTH_BASES)}"}, status_code=400)
+
+    def build(f):
+        return build_growth(f, resolve_granularity(granularity, f.days), basis)
+    return endpoint("growth", f"{granularity or ''}:{basis}", build, dateFrom, dateTo, branch, channel)
 
 
 def drill(name: str, extra: str, build: Callable[[Filters], dict], dateFrom, dateTo, branch, channel):

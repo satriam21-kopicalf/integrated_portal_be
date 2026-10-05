@@ -315,3 +315,37 @@ def test_menu_detail(client):
     assert {b["key"]: b["share"] for b in body["branches"]} == {"CCI01": 60.0, "TGP17": 40.0}
     assert body["branches"][0]["label"] == "Kopi Calf Supratman"
     assert client.get(f"/api/overview/menu-detail?{Q}&menuId=1&kind=bad").status_code == 400
+
+
+def test_growth_vs_previous_period(client):
+    body = client.get(f"/api/overview/growth?{Q}").json()
+    t = body["totals"]
+    assert body["compare"] == {"basis": "previous", "from": "2026-08-30", "to": "2026-08-31", "complete": True}
+    assert t["subtotal"] == 2_500_000 and t["compareSubtotal"] == 2_100_000 and t["growthAbs"] == 400_000
+    assert t["growthPct"] == 19.05 and t["bucketsUp"] == 1 and t["bucketsDown"] == 0
+    first, second = body["series"]
+    assert first["growthPct"] == 0.0 and first["compareFrom"] == "2026-08-30"
+    assert second["compareSubtotal"] == 100_000 and second["growthPct"] == 400.0
+    rows = {b["key"]: b for b in body["branches"]}
+    assert rows["TGP17"]["status"] == "new" and rows["OLD01"]["status"] == "lost" and rows["CCI01"]["status"] == "flat"
+    assert rows["TGP17"]["contributionPp"] == 23.81 and rows["OLD01"]["contributionPp"] == -4.76
+    assert round(sum(b["contributionPp"] for b in body["branches"]), 2) == t["growthPct"]  # contributions add up
+    assert rows["CCI01"]["label"] == "Kopi Calf Supratman"
+    assert {c["key"] for c in body["channels"]} == {"Dine In", "GoFood"}
+
+
+def test_growth_last_year_needs_complete_history(client):
+    body = client.get(f"/api/overview/growth?{Q}&basis=lastYear").json()
+    assert body["compare"]["from"] == "2025-09-02" and body["compare"]["complete"] is False
+    assert body["totals"]["growthPct"] is None and body["series"][0]["growthPct"] is None
+    assert client.get(f"/api/overview/growth?{Q}&basis=nope").status_code == 400
+
+
+def test_growth_sequential_per_day(client):
+    days = client.get(f"/api/overview/growth?{Q}&basis=sequential").json()["series"]
+    assert days[0]["compareFrom"] == "2026-08-31" and days[0]["growthPct"] == 1900.0  # vs the day before the period
+    assert days[1]["growthPct"] == -75.0
+    week = client.get(f"/api/overview/growth?{Q}&basis=sequential&granularity=week").json()["series"]
+    # the period's part of the week (2 days) per day vs the whole week before (7 days) per day
+    assert week[0]["days"] == 2 and week[0]["compareDays"] == 7 and week[0]["compareFrom"] == "2026-08-24"
+    assert week[0]["avgPerDay"] == 1_250_000 and week[0]["growthPct"] == delta(1_250_000, 2_000_000 / 7)

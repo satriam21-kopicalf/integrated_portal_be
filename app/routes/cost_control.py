@@ -511,7 +511,12 @@ def put_settings(body: dict = Body(...), user: dict = Depends(require_superadmin
 def get_issues(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Query(None),
                branch: Optional[str] = Query(None)):
     """Data to fix in ESB: implausible lines of unposted opnames (left out of actual COGS), unposted
-    opname documents per outlet, and locations with stock usage but no POS sales."""
+    opname documents per outlet, locations with stock usage but no POS sales, and two checks on the
+    ESB inventory valuation itself (kept in the figures, flagged so the period is read with care):
+      hppAnomalies  an outlet's HPP of an item > 3x the network median HPP of that item in the period
+                    (impact > Rp 5 M), e.g. a mis-entered purchase price
+      usageSpikes   an item's theoretical usage per Rp of network net sales in a month > 3x its median
+                    month (value > Rp 50 M), e.g. a wrong recipe (BOM) quantity"""
     try:
         start, end = date_range(dateFrom, dateTo)
     except BadRequest as exc:
@@ -547,6 +552,35 @@ def get_issues(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Qu
               AND d.status_name NOT IN {POSTED_STATUSES!r} AND d.status_name NOT IN {IGNORED_STATUSES!r}
               AND c.period_start BETWEEN %(start)s AND %(end)s{cond}
             ORDER BY d.doc_date, c.branch_code""", params)
+        hpp = db.fetch(f"""
+            WITH x AS (
+                SELECT branch_code, period_start, product_id, product_name, base_unit, theoretical_qty, theoretical_value,
+                       theoretical_value / theoretical_qty AS hpp
+                FROM {ITEM} WHERE period_start BETWEEN %(start)s AND %(end)s AND theoretical_qty > 0 AND theoretical_value > 0
+            ), m AS (
+                SELECT period_start, product_id, percentile_cont(0.5) WITHIN GROUP (ORDER BY hpp) AS med FROM x GROUP BY 1, 2
+            )
+            SELECT x.*, m.med, (x.hpp - m.med) * x.theoretical_qty AS impact
+            FROM x JOIN m USING (period_start, product_id)
+            WHERE x.hpp > 3 * m.med AND (x.hpp - m.med) * x.theoretical_qty > 5000000{cond.replace("c.branch_code", "x.branch_code")}
+            ORDER BY impact DESC LIMIT 200""", params)
+        spikes = db.fetch(f"""
+            WITH mon AS (
+                SELECT date_trunc('month', period_start)::date AS m, product_id, max(product_name) AS product_name,
+                       max(base_unit) AS base_unit, sum(theoretical_qty) AS qty, sum(theoretical_value) AS value
+                FROM {ITEM} GROUP BY 1, 2
+            ), net AS (
+                SELECT date_trunc('month', period_start)::date AS m, sum(net_sales) AS net FROM {PERIOD} WHERE net_sales > 0 GROUP BY 1
+            ), r AS (
+                SELECT mon.*, mon.qty / net.net AS per_rp FROM mon JOIN net USING (m) WHERE mon.qty > 0
+            ), med AS (
+                SELECT product_id, percentile_cont(0.5) WITHIN GROUP (ORDER BY per_rp) AS med, count(*) AS months FROM r GROUP BY 1
+            )
+            SELECT r.m, r.product_id, r.product_name, r.base_unit, r.qty, r.value, r.per_rp / med.med AS factor
+            FROM r JOIN med USING (product_id)
+            WHERE med.months >= 3 AND r.per_rp > 3 * med.med AND r.value > 50000000
+              AND r.m BETWEEN date_trunc('month', %(start)s::date) AND %(end)s
+            ORDER BY r.value DESC LIMIT 50""", params)
         names = branch_names()
         rows = period_rows(start, end, branch)
         sales: dict[str, float] = {}
@@ -569,6 +603,16 @@ def get_issues(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Qu
                 "docNum": r["doc_num"], "docDate": r["doc_date"].isoformat(), "status": r["status_name"],
                 "lines": int(r["line_count"] or 0),
             } for r in pending],
+            "hppAnomalies": [{
+                "branchCode": r["branch_code"], "branchName": names.get(r["branch_code"], r["branch_code"]),
+                "periodStart": r["period_start"].isoformat(), "productId": r["product_id"], "productName": r["product_name"],
+                "unit": r["base_unit"], "qty": _f(r["theoretical_qty"]), "hpp": round(_f(r["hpp"]), 2),
+                "medianHpp": round(_f(r["med"]), 2), "impact": _f(r["impact"]),
+            } for r in hpp],
+            "usageSpikes": [{
+                "month": r["m"].isoformat(), "productId": r["product_id"], "productName": r["product_name"], "unit": r["base_unit"],
+                "qty": _f(r["qty"]), "value": _f(r["value"]), "factor": round(_f(r["factor"]), 1),
+            } for r in spikes],
             "withoutSales": sorted(({"branchCode": c, "branchName": names.get(c, c), "actualCogs": v}
                                     for c, v in costs.items() if sales.get(c, 0) <= 0 and v), key=lambda x: -x["actualCogs"]),
         }

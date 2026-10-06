@@ -10,6 +10,10 @@ Ratios are given on two bases: net sales (after discounts, default) and subtotal
   variance          stock opname: physical - system (negative = loss); posted in ESB or pending (Draft/New)
   usage ratio       actual / theoretical usage (100% = used exactly what the recipes say)
 Statuses (good / warning / serious / critical) use the thresholds in cost_settings.
+Network totals, medians and status counts only include locations with POS sales in the period
+(bulk-order and other stock locations without sales are listed apart in `withoutSales`).
+Implausible lines of unposted opnames are left out of actual COGS (app/cost_control.py) and listed by
+  GET /api/cost-control/issues    dateFrom, dateTo, branch
 
   GET /api/cost-control/meta
   GET /api/cost-control/summary   dateFrom, dateTo, branch
@@ -28,7 +32,7 @@ from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import JSONResponse
 
 from app import database as db
-from app.cost_control import period_bounds
+from app.cost_control import IGNORED_STATUSES, POSTED_STATUSES, SUSPECT_FLOOR, SUSPECT_SHARE, period_bounds
 from app.database import SCHEMA
 from app.routes.auth import require_superadmin
 from app.utils import TTLCache, data_version, jsonable, normalize_branch, parse_branches, today
@@ -133,7 +137,7 @@ def branch_names() -> dict[str, str]:
 
 SUM_COLS = ("bills", "subtotal", "net_sales", "other_cost_subtotal", "purchase_value", "transfer_in_value",
             "transfer_out_value", "theoretical_cogs", "other_usage", "manufacturing_net", "posted_variance",
-            "pending_variance", "actual_cogs")
+            "pending_variance", "actual_cogs", "excluded_pending_variance", "excluded_pending_lines")
 
 
 def metrics(r: dict, s: dict) -> dict:
@@ -155,6 +159,9 @@ def metrics(r: dict, s: dict) -> dict:
         "opnameCount": int(r.get("opname_count") or 0), "pendingOpnameCount": int(r.get("pending_opname_count") or 0),
         "lastOpnameDate": r["last_opname_date"].isoformat() if r.get("last_opname_date") else None,
         "hasOpname": has_opname,
+        # implausible lines of unposted opnames, left out of actual COGS (see /issues)
+        "excludedPendingVariance": _f(r.get("excluded_pending_variance")),
+        "excludedPendingLines": int(_f(r.get("excluded_pending_lines"))),
         "theoreticalPctNet": pct(theo, net), "actualPctNet": pct(act, net),
         "theoreticalPctSubtotal": pct(theo, sub), "actualPctSubtotal": pct(act, sub),
         "wastePctNet": pct(other, net), "wastePctSubtotal": pct(other, sub),
@@ -235,9 +242,13 @@ def get_summary(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Q
             m = metrics(agg, s)
             outlets.append({"branchCode": code, "branchName": names.get(code, code), "periods": len(rs), **m})
         outlets.sort(key=lambda o: -o["netSales"])
-        total = _sum_rows(rows)
-        total["begin_value"] = sum(b for b, _ in edges.values())
-        total["end_value"] = sum(e for _, e in edges.values())
+        # network figures only over locations that sold through the POS (no bulk-order stock without sales)
+        selling = {o["branchCode"] for o in outlets if o["netSales"] > 0}
+        total = _sum_rows([r for r in rows if r["branch_code"] in selling])
+        total["begin_value"] = sum(b for c, (b, _) in edges.items() if c in selling)
+        total["end_value"] = sum(e for c, (_, e) in edges.items() if c in selling)
+        without_sales = [{"branchCode": o["branchCode"], "branchName": o["branchName"], "actualCogs": o["actualCogs"],
+                          "theoreticalCogs": o["theoreticalCogs"]} for o in outlets if o["branchCode"] not in selling]
         active = [o for o in outlets if o["netSales"] > 0]
 
         def median(key: str) -> Optional[float]:
@@ -261,6 +272,7 @@ def get_summary(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Q
                                                 "theoreticalPctSubtotal", "usageRatio", "wastePctNet")},
             "statusCounts": status_counts,
             "outlets": outlets,
+            "withoutSales": without_sales,
             "freshness": freshness(),
         }
 
@@ -286,7 +298,7 @@ def get_trend(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Que
             buckets.setdefault(key, []).append(r)
         series = []
         for key in sorted(buckets):
-            rs = buckets[key]
+            rs = [r for r in buckets[key] if _f(r["net_sales"]) > 0]  # locations with POS sales only
             agg = _sum_rows(rs)
             agg["begin_value"] = agg["end_value"] = 0
             m = metrics(agg, s)
@@ -493,3 +505,72 @@ def put_settings(body: dict = Body(...), user: dict = Depends(require_superadmin
                 (key, json.dumps(value), user["username"]))
     _cache.clear()
     return JSONResponse({"settings": settings()})
+
+
+@router.get("/issues")
+def get_issues(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Query(None),
+               branch: Optional[str] = Query(None)):
+    """Data to fix in ESB: implausible lines of unposted opnames (left out of actual COGS), unposted
+    opname documents per outlet, and locations with stock usage but no POS sales."""
+    try:
+        start, end = date_range(dateFrom, dateTo)
+    except BadRequest as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    branch = normalize_branch(branch)
+
+    def build() -> dict:
+        params: dict[str, Any] = {"start": start, "end": end, "floor": SUSPECT_FLOOR, "share": SUSPECT_SHARE}
+        cond = ""
+        if branch:
+            cond = " AND c.branch_code = ANY(%(branches)s)"
+            params["branches"] = parse_branches(branch)
+        lines = db.fetch(f"""
+            SELECT c.branch_code, d.doc_num, d.doc_date, d.status_name, l.product_id,
+                   COALESCE(l.raw_data->>'productName', l.product_id) AS product_name, l.qty AS physical_qty,
+                   COALESCE(NULLIF(l.raw_data->>'stockQty', '')::numeric, 0) AS system_qty, COALESCE(l.price, 0) AS hpp,
+                   (l.qty - COALESCE(NULLIF(l.raw_data->>'stockQty', '')::numeric, 0)) * COALESCE(l.price, 0) AS variance,
+                   c.theoretical_cogs
+            FROM {SCHEMA}.erp_documents d
+            JOIN {SCHEMA}.erp_document_lines l ON l.module = d.module AND l.doc_num = d.doc_num
+            JOIN {PERIOD} c ON c.location_id = d.location_id AND d.doc_date BETWEEN c.period_start AND c.period_end
+            WHERE d.module = 'stock_opname' AND d.deleted_at IS NULL
+              AND d.status_name NOT IN {POSTED_STATUSES!r} AND d.status_name NOT IN {IGNORED_STATUSES!r}
+              AND c.period_start BETWEEN %(start)s AND %(end)s{cond}
+              AND abs((l.qty - COALESCE(NULLIF(l.raw_data->>'stockQty', '')::numeric, 0)) * COALESCE(l.price, 0))
+                  > GREATEST(%(floor)s, %(share)s * COALESCE(c.theoretical_cogs, 0))
+            ORDER BY abs((l.qty - COALESCE(NULLIF(l.raw_data->>'stockQty', '')::numeric, 0)) * COALESCE(l.price, 0)) DESC""", params)
+        pending = db.fetch(f"""
+            SELECT c.branch_code, d.doc_num, d.doc_date, d.status_name, d.line_count
+            FROM {SCHEMA}.erp_documents d
+            JOIN {PERIOD} c ON c.location_id = d.location_id AND d.doc_date BETWEEN c.period_start AND c.period_end
+            WHERE d.module = 'stock_opname' AND d.deleted_at IS NULL
+              AND d.status_name NOT IN {POSTED_STATUSES!r} AND d.status_name NOT IN {IGNORED_STATUSES!r}
+              AND c.period_start BETWEEN %(start)s AND %(end)s{cond}
+            ORDER BY d.doc_date, c.branch_code""", params)
+        names = branch_names()
+        rows = period_rows(start, end, branch)
+        sales: dict[str, float] = {}
+        costs: dict[str, float] = {}
+        for r in rows:
+            sales[r["branch_code"]] = sales.get(r["branch_code"], 0.0) + _f(r["net_sales"])
+            costs[r["branch_code"]] = costs.get(r["branch_code"], 0.0) + _f(r["actual_cogs"])
+        return {
+            "filters": {"dateFrom": start.isoformat(), "dateTo": end.isoformat(), "branch": branch},
+            "rule": {"floor": SUSPECT_FLOOR, "share": SUSPECT_SHARE},
+            "suspectLines": [{
+                "branchCode": r["branch_code"], "branchName": names.get(r["branch_code"], r["branch_code"]),
+                "docNum": r["doc_num"], "docDate": r["doc_date"].isoformat(), "status": r["status_name"],
+                "productId": r["product_id"], "productName": r["product_name"], "physicalQty": _f(r["physical_qty"]),
+                "systemQty": _f(r["system_qty"]), "hpp": _f(r["hpp"]), "variance": _f(r["variance"]),
+                "periodTheoreticalCogs": _f(r["theoretical_cogs"]),
+            } for r in lines],
+            "pendingOpnames": [{
+                "branchCode": r["branch_code"], "branchName": names.get(r["branch_code"], r["branch_code"]),
+                "docNum": r["doc_num"], "docDate": r["doc_date"].isoformat(), "status": r["status_name"],
+                "lines": int(r["line_count"] or 0),
+            } for r in pending],
+            "withoutSales": sorted(({"branchCode": c, "branchName": names.get(c, c), "actualCogs": v}
+                                    for c, v in costs.items() if sales.get(c, 0) <= 0 and v), key=lambda x: -x["actualCogs"]),
+        }
+
+    return cached("issues", f"{start}:{end}:{branch}", build)

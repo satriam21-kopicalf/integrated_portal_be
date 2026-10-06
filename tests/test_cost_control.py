@@ -72,3 +72,30 @@ def test_settings_reject_unordered_bands(client):
 def test_settings_reject_unknown_keys(client):
     r = client.put("/api/cost-control/settings", json={"colour": "red"})
     assert r.status_code == 422
+
+
+def test_summary_network_only_counts_locations_with_sales(client, monkeypatch):
+    rows = [
+        {**row(net_sales=1_000_000, subtotal=1_100_000, theoretical_cogs=300_000, actual_cogs=320_000, bills=50, opname_count=1),
+         "branch_code": "CCI01", "period_start": date(2026, 9, 1), "period_end": date(2026, 9, 7), "location_id": "1"},
+        # bulk-order stock location: usage but no POS sales
+        {**row(theoretical_cogs=500_000, actual_cogs=500_000),
+         "branch_code": "BULK1", "period_start": date(2026, 9, 1), "period_end": date(2026, 9, 7), "location_id": "9"},
+        # an implausible draft-opname line was left out for this outlet
+        {**row(net_sales=2_000_000, subtotal=2_000_000, theoretical_cogs=700_000, actual_cogs=720_000,
+               excluded_pending_variance=-1_866_000_000, excluded_pending_lines=1, opname_count=1),
+         "branch_code": "TGP14", "period_start": date(2026, 9, 1), "period_end": date(2026, 9, 7), "location_id": "5"},
+    ]
+    monkeypatch.setattr(cc, "period_rows", lambda start, end, branch=None: rows)
+    monkeypatch.setattr(cc, "branch_names", lambda: {"BULK1": "BULK ORDER JABODETABEK"})
+    monkeypatch.setattr(cc, "settings", lambda: SETTINGS)
+    monkeypatch.setattr(cc, "freshness", lambda: {"refreshedAt": "x"})
+    cc._cache._data.clear()
+    body = client.get("/api/cost-control/summary?dateFrom=2026-09-01&dateTo=2026-09-07").json()
+    t = body["total"]
+    assert t["actualCogs"] == 1_040_000 and t["netSales"] == 3_000_000  # BULK1 not in the network total
+    assert t["actualPctNet"] == round(1_040_000 / 3_000_000 * 100, 2)
+    assert t["excludedPendingVariance"] == -1_866_000_000 and t["excludedPendingLines"] == 1
+    assert body["withoutSales"] == [{"branchCode": "BULK1", "branchName": "BULK ORDER JABODETABEK",
+                                     "actualCogs": 500_000, "theoreticalCogs": 500_000}]
+    assert "BULK1" not in body["statusCounts"]

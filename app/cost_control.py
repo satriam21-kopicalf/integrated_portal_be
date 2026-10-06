@@ -19,6 +19,11 @@ Sign convention of the aggregates: costs and usage are positive; variance is neg
 for a loss (physical stock below system stock).
 
   actual COGS = theoretical + other usage + manufacturing net - posted variance - pending variance
+
+A pending (Draft/New) opname line whose variance is above max(SUSPECT_FLOOR, SUSPECT_SHARE x the
+outlet's theoretical COGS of the period) is implausible (e.g. a system stock of 29 tonnes of
+espresso) and left out of the pending variance; it is kept as excluded_pending_variance and listed
+by /api/cost-control/issues. Posted opnames are never excluded.
 """
 import argparse
 import logging
@@ -34,6 +39,8 @@ logger = logging.getLogger("cost_control")
 PORTAL = "integration_portal"
 TIMEOUT_MS = 600_000
 POSTED_STATUSES = ("Authorized", "Finished", "Closed")
+SUSPECT_FLOOR = 50_000_000   # Rp
+SUSPECT_SHARE = 0.5          # of the outlet's theoretical COGS in the period
 IGNORED_STATUSES = ("Rejected", "Cancelled", "Void")
 
 
@@ -104,13 +111,21 @@ val AS (
     WHERE v.period_start = %(ps)s
     GROUP BY v.location_id
 ),
+opn_lines AS (
+    SELECT o.*, (o.physical_qty - o.system_qty) * o.hpp AS variance,
+           o.pending AND abs((o.physical_qty - o.system_qty) * o.hpp)
+               > GREATEST(%(floor)s, %(share)s * COALESCE(val.theoretical_cogs, 0)) AS suspect
+    FROM ({OPNAME_LINES}) o LEFT JOIN val ON val.location_id = o.location_id
+),
 opn AS (
     SELECT location_id,
            count(DISTINCT doc_num)::int AS opname_count,
            count(DISTINCT doc_num) FILTER (WHERE pending)::int AS pending_opname_count,
            max(doc_date) AS last_opname_date,
-           COALESCE(sum((physical_qty - system_qty) * hpp) FILTER (WHERE pending), 0) AS pending_variance
-    FROM ({OPNAME_LINES}) o
+           COALESCE(sum(variance) FILTER (WHERE pending AND NOT suspect), 0) AS pending_variance,
+           COALESCE(sum(variance) FILTER (WHERE suspect), 0) AS excluded_pending_variance,
+           count(*) FILTER (WHERE suspect)::int AS excluded_pending_lines
+    FROM opn_lines
     GROUP BY location_id
 ),
 sales AS (
@@ -127,13 +142,14 @@ INSERT INTO {PORTAL}.agg_cost_period (
     branch_code, period_start, period_end, location_id, bills, subtotal, net_sales, other_cost_subtotal,
     begin_value, purchase_value, transfer_in_value, transfer_out_value, theoretical_cogs, other_usage,
     manufacturing_net, posted_variance, pending_variance, end_value, actual_cogs,
-    opname_count, pending_opname_count, last_opname_date, refreshed_at)
+    opname_count, pending_opname_count, last_opname_date, excluded_pending_variance, excluded_pending_lines, refreshed_at)
 SELECT loc.branch_code, %(ps)s, COALESCE(runs.period_end, %(pe)s), loc.location_id,
        COALESCE(s.bills, 0), COALESCE(s.subtotal, 0), COALESCE(s.net_sales, 0), COALESCE(s.other_cost_subtotal, 0),
        val.begin_value, val.purchase_value, val.transfer_in_value, val.transfer_out_value, val.theoretical_cogs,
        val.other_usage, val.manufacturing_net, val.posted_variance, COALESCE(opn.pending_variance, 0), val.end_value,
        val.theoretical_cogs + val.other_usage + val.manufacturing_net - val.posted_variance - COALESCE(opn.pending_variance, 0),
-       COALESCE(opn.opname_count, 0), COALESCE(opn.pending_opname_count, 0), opn.last_opname_date, now()
+       COALESCE(opn.opname_count, 0), COALESCE(opn.pending_opname_count, 0), opn.last_opname_date,
+       COALESCE(opn.excluded_pending_variance, 0), COALESCE(opn.excluded_pending_lines, 0), now()
 FROM val
 JOIN loc ON loc.location_id = val.location_id
 LEFT JOIN runs ON runs.location_id = val.location_id
@@ -144,12 +160,17 @@ ON CONFLICT (branch_code, period_start) DO NOTHING
 
 SQL_ITEMS = f"""
 WITH loc AS ({LOCATIONS}),
+theo AS (
+    SELECT location_id, -sum(COALESCE(sales_hpp, 0) + COALESCE(sales_return_hpp, 0)) AS theoretical_cogs
+    FROM {SCHEMA}.inventory_valuation WHERE period_start = %(ps)s GROUP BY 1
+),
 pending AS (
-    SELECT location_id, product_id,
-           sum(physical_qty - system_qty) AS qty,
-           sum((physical_qty - system_qty) * hpp) AS value
-    FROM ({OPNAME_LINES}) o
-    WHERE pending
+    SELECT o.location_id, o.product_id,
+           sum(o.physical_qty - o.system_qty) AS qty,
+           sum((o.physical_qty - o.system_qty) * o.hpp) AS value
+    FROM ({OPNAME_LINES}) o LEFT JOIN theo ON theo.location_id = o.location_id
+    WHERE o.pending
+      AND abs((o.physical_qty - o.system_qty) * o.hpp) <= GREATEST(%(floor)s, %(share)s * COALESCE(theo.theoretical_cogs, 0))
     GROUP BY 1, 2
 ),
 base_unit AS (
@@ -200,7 +221,8 @@ ON CONFLICT (branch_code, period_start, product_id) DO NOTHING
 
 def refresh_period(ps: date, pe: date) -> dict:
     t0 = time.monotonic()
-    params = {"ps": ps.isoformat(), "pe": min(pe, today() - timedelta(days=1)).isoformat()}
+    params = {"ps": ps.isoformat(), "pe": min(pe, today() - timedelta(days=1)).isoformat(),
+              "floor": SUSPECT_FLOOR, "share": SUSPECT_SHARE}
     with db.transaction(timeout_ms=TIMEOUT_MS) as conn:
         for sql in SQL_DELETE:
             conn.execute(sql, params)

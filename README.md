@@ -71,7 +71,7 @@ Semua endpoint `/api/overview/*` menerima `compareFrom` & `compareTo` (opsional)
 
 ### Activity log (migration 009)
 
-`integration_portal.activity_log` (disimpan 400 hari) mencatat: login/logout & login gagal (alasan), ganti password/profil sendiri, halaman dibuka & filter yang dipakai (dari dashboard), detail transaksi dibuka, **export** (diminta dengan periode/cabang/tipe/report, selesai dengan jumlah baris & ukuran file atau gagal beserta error, diunduh), perubahan akun oleh superadmin (field lama → baru, reset password tanpa nilai password), dan akses yang ditolak (halaman/API superadmin, transaksi atau file export milik orang lain). IP diambil dari `X-Forwarded-For` (proxy dashboard). Penulisan log tidak pernah menggagalkan request (`app/activity.py`).
+`integration_portal.activity_log` (disimpan `ACTIVITY_RETENTION_DAYS`, default 90 hari, dibersihkan tiap hari 03:30 WIB) mencatat: login/logout & login gagal (alasan), ganti password/profil sendiri, halaman dibuka & filter yang dipakai (dari dashboard), detail transaksi dibuka, **export** (diminta dengan periode/cabang/tipe/report, selesai dengan jumlah baris & ukuran file atau gagal beserta error, diunduh), perubahan akun oleh superadmin (field lama → baru, reset password tanpa nilai password), dan akses yang ditolak (halaman/API superadmin, transaksi atau file export milik orang lain). IP diambil dari `X-Forwarded-For` (proxy dashboard). Penulisan log tidak pernah menggagalkan request (`app/activity.py`).
 Semua endpoint menerima parameter opsional `v` (versi data dari WebSocket) yang ikut menjadi kunci cache respons.
 
 Dokumentasi lengkap (arsitektur, aturan data, realtime, operasional): [docs/README.md](docs/README.md).
@@ -151,6 +151,8 @@ Lihat [.env.example](.env.example). Kredensial database sama dengan yang dipakai
 | `PUBLIC_BASE_URL` | kosong | Basis URL absolut untuk link unduhan export |
 | `EXPORT_TTL_HOURS` | 24 | Lama file export disimpan |
 | `EXPORT_MAX_CONCURRENT` | 2 | Job export bersamaan (seluruh container) |
+| `ACTIVITY_RETENTION_DAYS` | 90 | Activity log lebih lama dari ini dihapus tiap hari 03:30 WIB (`app/maintenance.py`; 0 = simpan selamanya) |
+| `GSHEET_RETENTION_DAYS` | 30 | Google Sheet hasil export lebih lama dari ini dipindah ke Trash Drive (bisa dipulihkan 30 hari; 0 = simpan) |
 | `GOOGLE_APPS_SCRIPT_URL` / `_KEY` | kosong | Web app Apps Script + kunci acak server (cara paling mudah) |
 | `GOOGLE_DRIVE_FOLDER_ID` | kosong | Folder Drive tujuan export Google Sheets (kosong = opsi nonaktif) |
 | `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` / `_REFRESH_TOKEN` | kosong | Akun Google pemilik file (dari `scripts/google_oauth_setup.py`) |

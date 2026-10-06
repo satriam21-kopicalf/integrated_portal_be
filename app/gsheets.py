@@ -170,6 +170,35 @@ def _apps_script_call(body: dict, timeout: int) -> dict:
     return out
 
 
+def cleanup(days: int) -> int:
+    """Move Google Sheets exports older than `days` to the Drive trash; returns how many."""
+    s = get_settings()
+    if s.google_apps_script_url and s.google_apps_script_key:
+        return int(_apps_script_call({"action": "cleanup", "days": days}, timeout=360).get("trashed", 0))
+    from datetime import datetime, timedelta, timezone
+
+    session = _session()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    query = (f"'{s.google_drive_folder_id}' in parents and trashed = false and mimeType = '{SHEET_MIME}' "
+             f"and createdTime < '{cutoff}'")
+    trashed, token = 0, None
+    while True:
+        r = session.get(f"{DRIVE}/files", timeout=60, params={
+            "q": query, "fields": "nextPageToken,files(id)", "pageSize": 1000, "pageToken": token,
+            "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"})
+        if not r.ok:
+            _fail(r, "daftar file")
+        body = r.json()
+        for f in body.get("files", []):
+            u = session.patch(f"{DRIVE}/files/{f['id']}", params={"supportsAllDrives": "true"}, json={"trashed": True}, timeout=60)
+            if not u.ok:
+                _fail(u, "hapus file")
+            trashed += 1
+        token = body.get("nextPageToken")
+        if not token:
+            return trashed
+
+
 def pair() -> dict:
     """Register this server's key with the Apps Script (first contact wins; idempotent)."""
     return _apps_script_call({"action": "pair"}, timeout=120)

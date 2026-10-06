@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     # e.g. https://portal-api.kopicalf.co.id -> absolute download links that bypass the
     # Vercel proxy. Empty = relative /api/exports/{id}/download (served via the proxy).
     public_base_url: str = ""
+    # Daily housekeeping (app/maintenance.py); 0 = keep forever
+    activity_retention_days: int = 90
+    gsheet_retention_days: int = 30
     # Export to Google Sheets (app/gsheets.py); empty = option disabled
     google_apps_script_url: str = ""
     google_apps_script_key: str = ""

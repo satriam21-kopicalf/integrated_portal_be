@@ -12,6 +12,9 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # after the nightly 7-day ESB resync (02:15 WIB): last 8 days, 02:50 WIB
 50 19 * * * root bash /opt/integrated-portal-be/repo/scripts/aggregates.sh --recent 8 >> /var/log/integrated-portal-aggregates.log 2>&1
 
+# housekeeping, 03:30 WIB: activity log > ACTIVITY_RETENTION_DAYS (90), Google Sheets exports > GSHEET_RETENTION_DAYS (30)
+30 20 * * * root docker exec integrated-portal-be python -m app.maintenance >> /var/log/integrated-portal-maintenance.log 2>&1
+
 # Cost Control (COGS / usage / forecast) after the ESB inventory valuation sync (04:15 WIB, ~10 min):
 # periods overlapping the last 10 days at 05:10 WIB; last 40 days on Sunday 06:00 WIB (after the weekly valuation resync)
 10 22 * * * root bash /opt/integrated-portal-be/repo/scripts/cost_control.sh --recent-days 10 >> /var/log/integrated-portal-cost-control.log 2>&1

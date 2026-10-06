@@ -1,11 +1,11 @@
 """Activity log: who did what in the dashboard (integration_portal.activity_log, migration 009).
 
 `record()` never raises: a failing log write is logged and the request carries on.
-Only superadmins can read the log (app/routes/activity.py).
+Only superadmins can read the log (app/routes/activity.py). Entries older than
+ACTIVITY_RETENTION_DAYS (default 90) are deleted daily by app/maintenance.py.
 """
 import json
 import logging
-import random
 from datetime import date, timedelta
 from typing import Any, Optional
 
@@ -17,7 +17,6 @@ logger = logging.getLogger("activity")
 
 T = "integration_portal.activity_log"
 CATEGORIES = ("auth", "page", "filter", "transaction", "export", "user", "profile", "access")
-RETENTION_DAYS = 400
 MAX_DETAILS = 8000  # characters of JSON per entry
 
 
@@ -52,8 +51,6 @@ def record(action: str, *, user: Optional[dict] = None, request: Optional[Reques
                  (user or {}).get("role"), category, action, status, (page or "")[:200] or None,
                  (summary or "")[:500] or None, _details(details), client_ip(request),
                  (request.headers.get("user-agent", "")[:300] or None) if request else None))
-            if random.random() < 0.002:
-                conn.execute(f"DELETE FROM {T} WHERE created_at < now() - %s::interval", (f"{RETENTION_DAYS} days",))
     except Exception:  # noqa: BLE001 - the log must never break the request
         logger.exception("activity log write failed (%s)", action)
 

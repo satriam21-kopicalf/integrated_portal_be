@@ -9,7 +9,8 @@
  * Run "authorize" once (grant access), Deploy > Web app (Execute as: Me, Who has access:
  * Anyone). The portal server registers its secret key on first contact; only the key's
  * SHA-256 is kept (Project Settings > Script properties: PORTAL_KEY_SHA256). To pair with a
- * new key, delete that property.
+ * new key, delete that property. The portal's daily housekeeping sends action "cleanup":
+ * sheets in the folder older than N days go to the Drive trash (restorable for 30 days).
  */
 var FOLDER_NAME = 'Kopi Calf Portal Exports';
 var XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -49,6 +50,22 @@ function doPost(e) {
     }
 
     if (!stored || stored !== given) return json_({ ok: false, error: 'unauthorized' });
+
+    if (req.action === 'cleanup') {
+      var days = Number(req.days);
+      if (!(days >= 1)) return json_({ ok: false, error: 'days must be at least 1' });
+      var cutoff = new Date(Date.now() - days * 86400000);
+      var files = folder_().getFilesByType(MimeType.GOOGLE_SHEETS);
+      var trashed = 0;
+      while (files.hasNext()) {
+        var file = files.next();
+        if (file.getDateCreated() < cutoff) {
+          file.setTrashed(true);
+          trashed++;
+        }
+      }
+      return json_({ ok: true, trashed: trashed });
+    }
 
     var blob = Utilities.newBlob(Utilities.base64Decode(req.data), XLSX, req.name + '.xlsx');
     var file = Drive.Files.create({ name: req.name, mimeType: MimeType.GOOGLE_SHEETS, parents: [folder_().getId()] }, blob);

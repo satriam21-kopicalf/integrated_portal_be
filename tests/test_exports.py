@@ -270,3 +270,44 @@ def test_google_sheets_via_apps_script(client, monkeypatch):
     assert "bukan JSON" in _start(client, dateFrom="2026-09-30", dateTo="2026-09-30", format="gsheet")["error"]
     monkeypatch.setattr(gsheets, "APPS_SCRIPT_MAX_BYTES", 10)
     assert "melebihi batas Google Apps Script" in _start(client, dateFrom="2026-09-30", dateTo="2026-09-30", format="gsheet")["error"]
+
+
+def test_maintenance_purges_activity_and_old_sheets(monkeypatch):
+    import requests
+
+    from app import database as db
+    from app import maintenance
+
+    s = get_settings()
+    monkeypatch.setattr(s, "google_apps_script_url", "https://script.google.com/macros/s/x/exec")
+    monkeypatch.setattr(s, "google_apps_script_key", "k" * 43)
+    sql, sent = [], []
+
+    class Conn:
+        def execute(self, q, p=None):
+            sql.append((q, p))
+            return type("R", (), {"rowcount": 7})()
+
+    class Tx:
+        def __enter__(self):
+            return Conn()
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(db, "transaction", lambda timeout_ms=None: Tx())
+    monkeypatch.setattr(requests, "post", lambda url, json=None, timeout=None: sent.append(json) or _Resp({"ok": True, "trashed": 3}))
+    assert maintenance.purge_activity() == 7 and sql[0][1] == ("90 days",) and "activity_log" in sql[0][0]
+    assert maintenance.purge_sheets() == 3 and sent[0]["action"] == "cleanup" and sent[0]["days"] == 30
+    assert maintenance.main() == 0
+
+    monkeypatch.setattr(s, "activity_retention_days", 0)
+    monkeypatch.setattr(s, "gsheet_retention_days", 0)
+    sql.clear(); sent.clear()
+    assert maintenance.purge_activity() == 0 and maintenance.purge_sheets() == 0 and not sql and not sent
+
+    # a failing clean-up is reported, the other still runs
+    monkeypatch.setattr(s, "activity_retention_days", 90)
+    monkeypatch.setattr(s, "gsheet_retention_days", 30)
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp({"ok": False, "error": "unauthorized"}))
+    assert maintenance.main() == 1 and sql

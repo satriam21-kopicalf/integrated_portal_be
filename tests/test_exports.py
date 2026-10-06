@@ -225,3 +225,48 @@ def test_google_sheets_upload_failure(client, monkeypatch):
     monkeypatch.setattr(gsheets, "upload_as_sheet", fail)
     job = _start(client, dateFrom="2026-09-30", dateTo="2026-09-30", format="gsheet")
     assert job["status"] == "error" and "HTTP 403" in job["error"] and job["sheetUrl"] is None
+
+
+class _Resp:
+    def __init__(self, body, status=200):
+        self.body, self.status_code, self.text = body, status, str(body)
+
+    def json(self):
+        if isinstance(self.body, dict):
+            return self.body
+        raise ValueError("not json")
+
+
+def test_google_sheets_via_apps_script(client, monkeypatch):
+    import base64
+
+    import requests
+
+    s = get_settings()
+    monkeypatch.setattr(s, "google_apps_script_url", "https://script.google.com/macros/s/x/exec")
+    monkeypatch.setattr(s, "google_apps_script_key", "k" * 43)
+    calls = []
+
+    def post(url, json=None, timeout=None):
+        calls.append(json)
+        if json["action"] == "pair":
+            return _Resp({"ok": True, "folderUrl": "https://drive.google.com/drive/folders/f1"})
+        assert openpyxl.load_workbook(io.BytesIO(base64.b64decode(json["data"]))).sheetnames == ["Report", "Ringkasan"]
+        return _Resp({"ok": True, "id": "s1", "url": "https://docs.google.com/spreadsheets/d/s1/edit", "sharedWith": json["shareWith"]})
+
+    monkeypatch.setattr(requests, "post", post)
+    assert gsheets.enabled() and gsheets.pair()["ok"]
+    assert client.get("/api/exports").json()["googleSheets"] is True
+    job = _start(client, dateFrom="2026-09-29", dateTo="2026-09-30", format="gsheet")
+    assert job["status"] == "done" and job["sheetUrl"] == "https://docs.google.com/spreadsheets/d/s1/edit"
+    upload = calls[-1]
+    assert upload["key"] == "k" * 43 and upload["name"] == "Sales_Recapitulation_Detail_2026-09-29_to_2026-09-30"
+    assert upload["shareWith"] == "tester@kopicalf.co.id" and upload["role"] == "writer"
+
+    # refused by the script / not a JSON answer / file too large -> clear error on the job
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp({"ok": False, "error": "unauthorized"}))
+    assert "menolak: unauthorized" in _start(client, dateFrom="2026-09-30", dateTo="2026-09-30", format="gsheet")["error"]
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp("<html>", 404))
+    assert "bukan JSON" in _start(client, dateFrom="2026-09-30", dateTo="2026-09-30", format="gsheet")["error"]
+    monkeypatch.setattr(gsheets, "APPS_SCRIPT_MAX_BYTES", 10)
+    assert "melebihi batas Google Apps Script" in _start(client, dateFrom="2026-09-30", dateTo="2026-09-30", format="gsheet")["error"]

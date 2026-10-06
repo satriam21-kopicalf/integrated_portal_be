@@ -114,7 +114,8 @@ Validasi (Sep 2026): Subtotal Sales per hari = ERP ESB 30/30 hari; export Sales 
 
 - File `.xlsx` yang sama di-upload ke Google Drive dan dikonversi menjadi Google Sheet (`app/gsheets.py`), disimpan di folder `GOOGLE_DRIVE_FOLDER_ID` dan dibagikan ke email user yang melakukan export (`GOOGLE_SHARE_ROLE`, default `writer`). File `.xlsx` tetap bisa diunduh.
 - Batas Google Sheets 10 juta sel: detail 46 kolom ≈ 217 rb baris (± 3 hari seluruh outlet). Export yang melewati batas berhenti lebih awal dengan pesan error; gunakan Excel atau perkecil periode/cabang.
-- Opsi hanya muncul di dashboard bila kredensial terpasang (salah satu):
+- Opsi aktif di dashboard bila kredensial terpasang (salah satu):
+  - **Apps Script (paling mudah, tanpa Google Cloud project)**: di akun Google pemilik file buka script.google.com → New project → paste `scripts/google_apps_script.gs` → Services (+) → *Drive API* → Add → jalankan fungsi `authorize` sekali → Deploy → *Web app* (Execute as: Me, Who has access: Anyone). Di server: `GOOGLE_APPS_SCRIPT_URL` = URL web app, `GOOGLE_APPS_SCRIPT_KEY` = kunci acak (`python -c "import secrets; print(secrets.token_urlsafe(32))"`), recreate container, lalu pasangkan: `docker exec integrated-portal-be python -c "from app import gsheets; print(gsheets.pair())"` (script hanya menerima kunci pertama; hapus Script property `PORTAL_KEY_SHA256` untuk memasangkan ulang). Batas Apps Script: file ≤ 36 MB, 6 menit per export.
   - **Akun Google (Gmail biasa)**: Google Cloud project → aktifkan *Google Drive API* → OAuth consent screen *External*, status **In production** (mode *Testing* membuat token kedaluwarsa 7 hari) → Credentials → OAuth client *Desktop app* → unduh JSON → jalankan di komputer sendiri `python scripts/google_oauth_setup.py client_secret.json` → salin 4 baris yang dicetak ke `.env` server.
   - **Service account**: `GOOGLE_SERVICE_ACCOUNT_JSON_B64` (key JSON di-base64) + folder di **Shared Drive** (Google Workspace) dengan service account sebagai anggota; service account tidak punya kuota Drive sendiri.
 
@@ -150,6 +151,7 @@ Lihat [.env.example](.env.example). Kredensial database sama dengan yang dipakai
 | `PUBLIC_BASE_URL` | kosong | Basis URL absolut untuk link unduhan export |
 | `EXPORT_TTL_HOURS` | 24 | Lama file export disimpan |
 | `EXPORT_MAX_CONCURRENT` | 2 | Job export bersamaan (seluruh container) |
+| `GOOGLE_APPS_SCRIPT_URL` / `_KEY` | kosong | Web app Apps Script + kunci acak server (cara paling mudah) |
 | `GOOGLE_DRIVE_FOLDER_ID` | kosong | Folder Drive tujuan export Google Sheets (kosong = opsi nonaktif) |
 | `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` / `_REFRESH_TOKEN` | kosong | Akun Google pemilik file (dari `scripts/google_oauth_setup.py`) |
 | `GOOGLE_SERVICE_ACCOUNT_JSON_B64` | kosong | Alternatif: service account + Shared Drive |

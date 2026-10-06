@@ -5,6 +5,11 @@ conversion to a Google Sheet (Drive keeps the sheets, dates and number formats),
 GOOGLE_DRIVE_FOLDER_ID and shared with the exporting user's email.
 
 Credentials live in the server .env only, one of:
+  - an Apps Script web app in the Google account that owns the files (simplest, no Google
+    Cloud project): GOOGLE_APPS_SCRIPT_URL + GOOGLE_APPS_SCRIPT_KEY (random, made on the
+    server). The script (scripts/google_apps_script.gs) keeps the files in its own folder and
+    accepts only the key it was paired with (pair() on first contact). Apps Script takes
+    requests up to ~50 MB and 6 minutes, so the .xlsx may be at most APPS_SCRIPT_MAX_BYTES.
   - OAuth of a Google account (works with a personal Gmail): GOOGLE_OAUTH_CLIENT_ID,
     GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_OAUTH_REFRESH_TOKEN and GOOGLE_DRIVE_FOLDER_ID, all
     printed by scripts/google_oauth_setup.py (scope drive.file: the portal only sees the
@@ -32,6 +37,8 @@ DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 CHUNK = 8 * 1024 * 1024  # resumable upload chunk, a multiple of 256 KiB
 RETRIES = 5
+# base64 adds a third: ~48 MB request, under the Apps Script web app limit
+APPS_SCRIPT_MAX_BYTES = 36 * 1024 * 1024
 
 
 class SheetsError(Exception):
@@ -40,6 +47,8 @@ class SheetsError(Exception):
 
 def enabled() -> bool:
     s = get_settings()
+    if s.google_apps_script_url and s.google_apps_script_key:
+        return True
     oauth = s.google_oauth_client_id and s.google_oauth_client_secret and s.google_oauth_refresh_token
     return bool(s.google_drive_folder_id and (oauth or s.google_service_account_json_b64))
 
@@ -78,6 +87,8 @@ def upload_as_sheet(path: str, title: str, share_with: Optional[str],
     import requests
 
     s = get_settings()
+    if s.google_apps_script_url and s.google_apps_script_key:
+        return _apps_script_upload(path, title, share_with, progress)
     session = _session()
     size = os.path.getsize(path)
     params = {"uploadType": "resumable", "supportsAllDrives": "true", "fields": "id,webViewLink"}
@@ -136,3 +147,43 @@ def _share(session, file_id: str, email: str) -> Optional[str]:
             return email
     logger.warning("Google Sheet %s not shared with %s: HTTP %s %s", file_id, email, r.status_code, r.text[:200])
     return None
+
+
+def _apps_script_call(body: dict, timeout: int) -> dict:
+    """POST to the Apps Script web app (it answers through a redirect to the result)."""
+    import requests
+
+    s = get_settings()
+    try:
+        r = requests.post(s.google_apps_script_url, json={**body, "key": s.google_apps_script_key}, timeout=timeout)
+    except requests.RequestException as exc:
+        raise SheetsError(f"Google Apps Script tidak dapat dihubungi: {exc}") from exc
+    try:
+        out = r.json()
+    except ValueError:
+        logger.error("Apps Script answered HTTP %s, not JSON: %s", r.status_code, r.text[:200])
+        raise SheetsError(f"Google Apps Script menjawab HTTP {r.status_code} (bukan JSON): periksa deployment web app "
+                          "(Execute as: Me, Who has access: Anyone)") from None
+    if not out.get("ok"):
+        logger.error("Apps Script refused: %s", out.get("error"))
+        raise SheetsError(f"Google Apps Script menolak: {out.get('error')}")
+    return out
+
+
+def pair() -> dict:
+    """Register this server's key with the Apps Script (first contact wins; idempotent)."""
+    return _apps_script_call({"action": "pair"}, timeout=120)
+
+
+def _apps_script_upload(path: str, title: str, share_with: Optional[str], progress: Callable[[float], None]) -> dict:
+    size = os.path.getsize(path)
+    if size > APPS_SCRIPT_MAX_BYTES:
+        raise SheetsError(f"File export {size / 1048576:.0f} MB melebihi batas Google Apps Script "
+                          f"({APPS_SCRIPT_MAX_BYTES // 1048576} MB). Perkecil periode atau cabang, atau export ke Excel.")
+    with open(path, "rb") as f:
+        data = base64.b64encode(f.read()).decode()
+    progress(0.1)
+    # the conversion runs inside the call (Apps Script stops at 6 minutes)
+    out = _apps_script_call({"action": "upload", "name": title, "data": data, "shareWith": share_with,
+                             "role": get_settings().google_share_role}, timeout=420)
+    return {"id": out["id"], "url": out["url"], "sharedWith": out.get("sharedWith")}

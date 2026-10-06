@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     # Vercel proxy. Empty = relative /api/exports/{id}/download (served via the proxy).
     public_base_url: str = ""
     # Export to Google Sheets (app/gsheets.py); empty = option disabled
+    google_apps_script_url: str = ""
+    google_apps_script_key: str = ""
     google_drive_folder_id: str = ""
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""

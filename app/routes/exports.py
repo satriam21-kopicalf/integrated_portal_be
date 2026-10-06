@@ -1,4 +1,4 @@
-"""Excel export job endpoints (see app/exports.py).
+"""Excel / Google Sheets export job endpoints (see app/exports.py).
 
 Jobs run in their own process on the server, independent of the browser; the dashboard
 keeps polling them from any page (GET /api/exports lists the signed-in user's jobs).
@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from app import activity, exports
+from app import activity, exports, gsheets
 from app.config import get_settings
 from app.esb_report import TYPE_CONDITIONS
 from app.routes.auth import current_user
@@ -29,6 +29,7 @@ class ExportRequest(BaseModel):
     branch: Optional[str] = None  # branch_code, or several separated by commas
     type: Optional[str] = None  # sales (default, = ESB report) | void | other_cost | all
     report: Optional[str] = None  # detail (default) | daily
+    format: Optional[str] = None  # xlsx (default) | gsheet (Google Sheets, when configured)
 
 
 def _public(job: dict) -> dict:
@@ -50,8 +51,9 @@ def _may_read(user: dict, job: dict) -> bool:
 
 @router.get("")
 def my_exports(user: dict = Depends(current_user)):
-    """The signed-in user's recent export jobs (newest first)."""
-    return JSONResponse({"jobs": [_public(j) for j in exports.list_jobs(str(user["id"]))]})
+    """The signed-in user's recent export jobs (newest first) and the formats available."""
+    return JSONResponse({"jobs": [_public(j) for j in exports.list_jobs(str(user["id"]))],
+                         "googleSheets": gsheets.enabled()})
 
 
 @router.post("", status_code=202)
@@ -70,9 +72,13 @@ def create_export(req: ExportRequest, request: Request, user: dict = Depends(cur
 
     tx_type = req.type if req.type in TYPE_CONDITIONS else "sales"
     report = req.report if req.report in exports.REPORTS else "detail"
-    job = exports.create_job(date_from, date_to, scoped_branch(req.branch), tx_type, report, user)
+    fmt = req.format if req.format in exports.FORMATS else "xlsx"
+    if fmt == "gsheet" and not gsheets.enabled():
+        return _error("Export ke Google Sheets belum dikonfigurasi di server", 422)
+    job = exports.create_job(date_from, date_to, scoped_branch(req.branch), tx_type, report, user, fmt)
     activity.record("export.create", user=user, request=request, page="/sales",
-                    summary=f"Export {exports.REPORTS[report][0]} {date_from:%d-%m-%Y} s/d {date_to:%d-%m-%Y}",
+                    summary=f"Export {exports.REPORTS[report][0]} {date_from:%d-%m-%Y} s/d {date_to:%d-%m-%Y}"
+                    + (" ke Google Sheets" if fmt == "gsheet" else ""),
                     details={**exports.job_details(job), "requestedBranch": req.branch})
     return JSONResponse(_public(job), status_code=202)
 

@@ -1,10 +1,12 @@
-"""Excel export jobs.
+"""Excel / Google Sheets export jobs.
 
 An export runs in a background thread: it reads the date range one day at a
 time (oldest first), builds the ESB "Sales Recapitulation Detail Report" rows
 (app/esb_report.py) and streams them into an .xlsx file (app/xlsx_stream.py)
 laid out like the ESB export; a new sheet starts whenever Excel's row limit is
 reached. A "Ringkasan" sheet lists gross sales and the deductions per day.
+Format "gsheet" then uploads that file to Google Drive as a Google Sheet
+(app/gsheets.py) and shares it with the exporting user.
 
 Each job runs in its own process (app/export_worker.py), not in the web
 worker: building a large report is CPU-heavy, and inside a uvicorn worker it
@@ -27,6 +29,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from app import database as db
+from app import gsheets
 from app.config import get_settings
 from app.database import SCHEMA, TABLE_TRANSACTIONS
 from app.esb_report import (REPORT_COLUMN_WIDTHS, REPORT_HEADERS, TYPE_CONDITIONS, TYPE_LABELS,
@@ -162,8 +165,11 @@ def list_jobs(owner: str, limit: int = 20) -> list[dict]:
     return jobs
 
 
+FORMATS = ("xlsx", "gsheet")
+
+
 def create_job(date_from: date, date_to: date, branch: Optional[str], tx_type: str = "sales",
-               report: str = "detail", owner: Optional[dict] = None) -> dict:
+               report: str = "detail", owner: Optional[dict] = None, fmt: str = "xlsx") -> dict:
     cleanup_old_exports()
     job = {
         "id": uuid.uuid4().hex,
@@ -176,6 +182,12 @@ def create_job(date_from: date, date_to: date, branch: Optional[str], tx_type: s
         "branch": branch,
         "type": tx_type,
         "report": report,
+        "format": fmt,
+        "ownerEmail": owner.get("email") if owner else None,
+        "phase": None,  # "upload" while a Google Sheet is uploaded
+        "uploadPct": None,
+        "sheetUrl": None,
+        "sheetSharedWith": None,
         "totalDays": (date_to - date_from).days + 1,
         "daysDone": 0,
         "currentDate": None,
@@ -242,7 +254,10 @@ def _run(job: dict) -> None:
     try:
         _update(job, status="running")
         _generate(job)
-        _log(job, "export.done", "ok", f"Export selesai: {job.get('fileName') or 'tidak ada data'}")
+        if job.get("format") == "gsheet" and job.get("fileName"):
+            _to_google_sheet(job)
+        _log(job, "export.done", "ok", f"Export selesai: {job.get('fileName') or 'tidak ada data'}"
+             + (" (Google Sheets)" if job.get("sheetUrl") else ""))
     except Exception as exc:  # noqa: BLE001
         logger.exception("Export %s failed", job["id"])
         job_file(job["id"]).unlink(missing_ok=True)
@@ -255,8 +270,8 @@ def _run(job: dict) -> None:
 
 def job_details(job: dict) -> dict:
     """What the activity log keeps of an export job."""
-    keys = ("id", "report", "type", "dateFrom", "dateTo", "branch", "totalDays", "rows", "headers", "items",
-            "fileName", "fileSize", "createdAt", "finishedAt", "error")
+    keys = ("id", "report", "type", "format", "dateFrom", "dateTo", "branch", "totalDays", "rows", "headers", "items",
+            "fileName", "fileSize", "sheetUrl", "sheetSharedWith", "createdAt", "finishedAt", "error")
     out = {k: job.get(k) for k in keys}
     out["branches"] = parse_branches(job.get("branch")) or "all"
     return out
@@ -331,6 +346,33 @@ def _summary_rows(job: dict) -> list[list]:
     return rows
 
 
+def _too_big_for_sheets(job: dict, rows: int, columns: int) -> Optional[str]:
+    """Why the data cannot fit in one Google Sheet (the export then stops early), or None."""
+    if job.get("format") == "gsheet" and rows * columns > gsheets.MAX_CELLS:
+        return (f"Data terlalu besar untuk Google Sheets: lebih dari {rows:,} baris x {columns} kolom "
+                f"(batas Google Sheets {gsheets.MAX_CELLS:,} sel). Perkecil periode atau cabang, atau export ke Excel.")
+    return None
+
+
+def _to_google_sheet(job: dict) -> None:
+    """Upload the finished .xlsx as a Google Sheet; a heartbeat keeps the job from looking stale."""
+    stop = threading.Event()
+
+    def beat():
+        while not stop.wait(60):
+            _write_job(job)
+
+    threading.Thread(target=beat, name=f"export-upload-{job['id'][:8]}", daemon=True).start()
+    try:
+        _update(job, status="running", phase="upload", uploadPct=0)
+        sheet = gsheets.upload_as_sheet(str(job_file(job["id"])), job["fileName"].removesuffix(".xlsx"),
+                                        job.get("ownerEmail"), lambda pct: _update(job, uploadPct=round(pct * 100)))
+    finally:
+        stop.set()
+    _update(job, status="done", phase=None, uploadPct=100, sheetUrl=sheet["url"], sheetSharedWith=sheet["sharedWith"],
+            finishedAt=_now())
+
+
 def _generate(job: dict) -> None:
     if job.get("report") == "daily":
         _generate_daily(job)
@@ -343,6 +385,7 @@ def _generate(job: dict) -> None:
     sheet = None
     sheets = 0
     rows = headers_count = 0
+    too_big = None
     preamble = _preamble(job)
 
     def preamble_rows(sheet_number: int) -> int:
@@ -379,19 +422,26 @@ def _generate(job: dict) -> None:
                 sheet.write_rows(batch)
 
             headers_count += day_headers
+            too_big = _too_big_for_sheets(job, rows, len(REPORT_HEADERS))
+            if too_big:
+                break  # raised once the writer has closed the file
             _update(job, daysDone=offset + 1, currentDate=day.isoformat(),
                     rows=rows, headers=headers_count, items=rows, sheets=sheets)
 
-        if rows:
+        if rows and not too_big:
             xlsx.add_static_sheet("Ringkasan", _summary_rows(job), widths=[22, 18, 18, 22, 14, 20, 18, 18],
                                   bold_rows=(0, 4))
 
+    if too_big:
+        raise gsheets.SheetsError(too_big)
     if rows == 0:
         path.unlink(missing_ok=True)
         _update(job, status="done", fileName=None, finishedAt=_now())
         return
 
-    _update(job, status="done", fileSize=path.stat().st_size, finishedAt=_now())
+    # a Google Sheet job stays "running" until the upload is done
+    _update(job, status="running" if job.get("format") == "gsheet" else "done", fileSize=path.stat().st_size,
+            finishedAt=None if job.get("format") == "gsheet" else _now())
     logger.info("Export %s done: %s rows, %s sheet(s), %s bytes", job["id"], rows, sheets, job["fileSize"])
 
 
@@ -418,5 +468,6 @@ def _generate_daily(job: dict) -> None:
         path.unlink(missing_ok=True)
         _update(job, status="done", fileName=None, finishedAt=_now())
         return
-    _update(job, status="done", fileSize=path.stat().st_size, finishedAt=_now())
+    _update(job, status="running" if job.get("format") == "gsheet" else "done", fileSize=path.stat().st_size,
+            finishedAt=None if job.get("format") == "gsheet" else _now())
     logger.info("Daily export %s done: %s rows", job["id"], rows)

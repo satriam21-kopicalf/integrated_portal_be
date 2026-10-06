@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     # e.g. https://portal-api.kopicalf.co.id -> absolute download links that bypass the
     # Vercel proxy. Empty = relative /api/exports/{id}/download (served via the proxy).
     public_base_url: str = ""
+    # Export to Google Sheets (app/gsheets.py); empty = option disabled
+    google_drive_folder_id: str = ""
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: str = ""
+    google_oauth_refresh_token: str = ""
+    google_service_account_json_b64: str = ""
+    google_share_role: str = "writer"  # access of the exporting user: writer | reader
 
     @property
     def cors_origin_list(self) -> list[str]:

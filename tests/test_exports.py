@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import openpyxl
 
-from app import exports
+from app import exports, gsheets
 from app.config import get_settings
 from app.esb_report import REPORT_HEADERS
 
@@ -170,3 +170,58 @@ def test_run_job_records_its_pid(client, monkeypatch):
     exports.run_job(job_id)
     assert seen["pid"] == os.getpid()
     assert json.loads((exports._export_dir() / f"{job_id}.json").read_text())["pid"] == os.getpid()
+
+
+def _google_configured(monkeypatch, uploads):
+    s = get_settings()
+    for key, value in (("google_drive_folder_id", "folder1"), ("google_oauth_client_id", "cid"),
+                       ("google_oauth_client_secret", "secret"), ("google_oauth_refresh_token", "refresh")):
+        monkeypatch.setattr(s, key, value)
+
+    def upload(path, title, share_with, progress=lambda pct: None):
+        assert os.path.exists(path) and openpyxl.load_workbook(path).sheetnames == ["Report", "Ringkasan"]
+        progress(0.5)
+        uploads.append((title, share_with))
+        return {"id": "sheet1", "url": "https://docs.google.com/spreadsheets/d/sheet1/edit", "sharedWith": share_with}
+
+    monkeypatch.setattr(gsheets, "upload_as_sheet", upload)
+
+
+def test_google_sheets_export_disabled_without_credentials(client):
+    assert client.get("/api/exports").json()["googleSheets"] is False
+    res = client.post("/api/exports", json={"dateFrom": "2026-09-30", "dateTo": "2026-09-30", "format": "gsheet"})
+    assert res.status_code == 422 and "Google Sheets" in res.json()["error"]
+
+
+def test_google_sheets_export(client, monkeypatch, fake_db):
+    uploads = []
+    _google_configured(monkeypatch, uploads)
+    assert client.get("/api/exports").json()["googleSheets"] is True
+    job = _start(client, dateFrom="2026-09-29", dateTo="2026-09-30", format="gsheet")
+    assert job["status"] == "done" and job["format"] == "gsheet" and job["phase"] is None
+    assert job["sheetUrl"] == "https://docs.google.com/spreadsheets/d/sheet1/edit"
+    assert job["sheetSharedWith"] == "tester@kopicalf.co.id" and "ownerEmail" not in job
+    assert uploads == [("Sales_Recapitulation_Detail_2026-09-29_to_2026-09-30", "tester@kopicalf.co.id")]
+    assert job["downloadUrl"]  # the .xlsx stays downloadable as well
+    done = next(a for a in fake_db.activity if a["action"] == "export.done")
+    assert done["details"]["sheetUrl"] == job["sheetUrl"] and "Google Sheets" in done["summary"]
+
+
+def test_google_sheets_export_too_large(client, monkeypatch):
+    uploads = []
+    _google_configured(monkeypatch, uploads)
+    monkeypatch.setattr(gsheets, "MAX_CELLS", 46 * 3)  # 3 rows of 46 columns
+    job = _start(client, dateFrom="2026-09-29", dateTo="2026-09-30", format="gsheet")
+    assert job["status"] == "error" and "terlalu besar untuk Google Sheets" in job["error"]
+    assert uploads == [] and not exports.job_file(job["id"]).exists()
+
+
+def test_google_sheets_upload_failure(client, monkeypatch):
+    _google_configured(monkeypatch, [])
+
+    def fail(*args, **kwargs):
+        raise gsheets.SheetsError("Google Drive menolak upload (HTTP 403): quota")
+
+    monkeypatch.setattr(gsheets, "upload_as_sheet", fail)
+    job = _start(client, dateFrom="2026-09-30", dateTo="2026-09-30", format="gsheet")
+    assert job["status"] == "error" and "HTTP 403" in job["error"] and job["sheetUrl"] is None

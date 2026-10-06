@@ -6,3 +6,5 @@ pydantic==2.13.4
 pydantic-settings==2.15.0
 python-dotenv==1.2.3
 tzdata==2026.3
+google-auth==2.40.3
+requests==2.32.5

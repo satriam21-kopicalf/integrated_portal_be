@@ -19,9 +19,9 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | GET | `/api/transactions/{sales_num}` | Detail satu transaksi (`items` + `report_rows`) |
 | GET | `/api/summary` | Gross − Void/Cancelled − Other Cost − Open bill = Sales (per hari & total). Query: `dateFrom`, `dateTo`, `branch`. Hari sebelum kemarin dari agregat harian (1 tahun < 1 dtk) |
 | GET | `/api/branches` | Master cabang (nama terkini) + jumlah transaksi Sales 65 hari terakhir |
-| POST | `/api/exports` | Mulai job export. Body: `{"dateFrom","dateTo","branch","type","report"}` → 202 + `id` |
-| GET | `/api/exports` | Job export milik user yang login (terbaru dulu) — dipakai dashboard untuk melanjutkan progres di halaman mana pun |
-| GET | `/api/exports/{id}` | Status job: `status`, `daysDone/totalDays`, `rows`, `sheets`, `fileSize`, `downloadUrl` |
+| POST | `/api/exports` | Mulai job export. Body: `{"dateFrom","dateTo","branch","type","report","format"}` (`format`: `xlsx` default / `gsheet`) → 202 + `id` |
+| GET | `/api/exports` | Job export milik user yang login (terbaru dulu) — dipakai dashboard untuk melanjutkan progres di halaman mana pun — plus `googleSheets` (opsi Google Sheets aktif) |
+| GET | `/api/exports/{id}` | Status job: `status`, `daysDone/totalDays`, `rows`, `sheets`, `fileSize`, `downloadUrl`; Google Sheets: `phase` (`upload`), `uploadPct`, `sheetUrl`, `sheetSharedWith` |
 | GET | `/api/exports/{id}/download` | Unduh `.xlsx` (tersedia `EXPORT_TTL_HOURS`, default 24 jam) |
 | GET | `/api/overview/meta` | Opsi filter channel, periode default, cakupan & kesegaran data |
 | GET | `/api/overview/kpis` | Sales, Nett Sales, Bills, Avg Ticket + Δ% vs periode sebelumnya + nilai harian |
@@ -110,6 +110,14 @@ Validasi (Sep 2026): Subtotal Sales per hari = ERP ESB 30/30 hari; export Sales 
 - Tanpa batas rentang: data dibaca per hari dan ditulis streaming (`app/xlsx_stream.py`); > 1.048.575 baris otomatis lanjut ke sheet `Report (2)`, dst.
 - Acuan di VPS: detail 1 hari ≈ 65 rb baris ≈ 9 dtk, 1 bulan ≈ 1,9 jt baris ≈ 5 menit; daily 1 bulan ≈ 40 dtk.
 
+### Export Google Sheets (`format=gsheet`)
+
+- File `.xlsx` yang sama di-upload ke Google Drive dan dikonversi menjadi Google Sheet (`app/gsheets.py`), disimpan di folder `GOOGLE_DRIVE_FOLDER_ID` dan dibagikan ke email user yang melakukan export (`GOOGLE_SHARE_ROLE`, default `writer`). File `.xlsx` tetap bisa diunduh.
+- Batas Google Sheets 10 juta sel: detail 46 kolom ≈ 217 rb baris (± 3 hari seluruh outlet). Export yang melewati batas berhenti lebih awal dengan pesan error; gunakan Excel atau perkecil periode/cabang.
+- Opsi hanya muncul di dashboard bila kredensial terpasang (salah satu):
+  - **Akun Google (Gmail biasa)**: Google Cloud project → aktifkan *Google Drive API* → OAuth consent screen *External*, status **In production** (mode *Testing* membuat token kedaluwarsa 7 hari) → Credentials → OAuth client *Desktop app* → unduh JSON → jalankan di komputer sendiri `python scripts/google_oauth_setup.py client_secret.json` → salin 4 baris yang dicetak ke `.env` server.
+  - **Service account**: `GOOGLE_SERVICE_ACCOUNT_JSON_B64` (key JSON di-base64) + folder di **Shared Drive** (Google Workspace) dengan service account sebagai anggota; service account tidak punya kuota Drive sendiri.
+
 ### Overview (schema `integration_portal`)
 
 Endpoint `/api/overview/*` menerima `dateFrom`, `dateTo` (default 30 hari lengkap s/d kemarin), `branch` (kode) dan `channel` (dipisah koma). Periode pembanding = jumlah hari yang sama tepat sebelum `dateFrom`; bila menjangkau sebelum `OVERVIEW_DATA_FROM` (2025-08-01, roll-out ESB baru lengkap di seluruh cabang akhir Juli 2025) pembanding dikosongkan (`deltaPct: null`). Angka = ESB "Sales", sehingga total sama dengan `/api/summary` dan laporan ESB. Respons di-cache 5 menit.
@@ -142,6 +150,10 @@ Lihat [.env.example](.env.example). Kredensial database sama dengan yang dipakai
 | `PUBLIC_BASE_URL` | kosong | Basis URL absolut untuk link unduhan export |
 | `EXPORT_TTL_HOURS` | 24 | Lama file export disimpan |
 | `EXPORT_MAX_CONCURRENT` | 2 | Job export bersamaan (seluruh container) |
+| `GOOGLE_DRIVE_FOLDER_ID` | kosong | Folder Drive tujuan export Google Sheets (kosong = opsi nonaktif) |
+| `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` / `_REFRESH_TOKEN` | kosong | Akun Google pemilik file (dari `scripts/google_oauth_setup.py`) |
+| `GOOGLE_SERVICE_ACCOUNT_JSON_B64` | kosong | Alternatif: service account + Shared Drive |
+| `GOOGLE_SHARE_ROLE` | `writer` | Akses user pembuat export ke sheet (`writer`/`reader`) |
 | `TIMEZONE` | `Asia/Jakarta` | Untuk rentang tanggal default |
 | `OVERVIEW_DATA_FROM` | `2025-08-01` | Awal riwayat lengkap untuk perbandingan Overview |
 | `SESSION_HOURS` / `SESSION_REMEMBER_DAYS` | 12 / 30 | Masa berlaku sesi login (biasa / "keep me signed in") |

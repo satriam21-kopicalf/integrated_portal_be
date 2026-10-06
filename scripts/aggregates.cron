@@ -6,6 +6,9 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # after the hourly ESB sync (:05, ~3 min): today + yesterday
 20 * * * * root bash /opt/integrated-portal-be/repo/scripts/aggregates.sh --recent 2 >> /var/log/integrated-portal-aggregates.log 2>&1
 
+# after the 15-minute "today" ESB syncs (:20, :35, :50 during 06:00-24:00 WIB): today only, ~5 s
+25,40,55 0-16,23 * * * root bash /opt/integrated-portal-be/repo/scripts/aggregates.sh --recent 1 >> /var/log/integrated-portal-aggregates.log 2>&1
+
 # after the nightly 7-day ESB resync (02:15 WIB): last 8 days, 02:50 WIB
 50 19 * * * root bash /opt/integrated-portal-be/repo/scripts/aggregates.sh --recent 8 >> /var/log/integrated-portal-aggregates.log 2>&1
 

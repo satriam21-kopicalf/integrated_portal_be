@@ -8,7 +8,7 @@ pushes an "update" message when one changes, so each page re-fetches what it
 shows (with its own filters) through the normal REST endpoints:
 
     salesSyncedAt          newest synced_at of today's/yesterday's POS sales
-                           (the ESB engine syncs hourly at :05, 7 days nightly)
+                           (the ESB engine syncs every 15 min 06:00-24:00 WIB, hourly at night, 7 days nightly)
     aggregatesRefreshedAt  newest refresh of the Overview aggregates (:20, 02:50)
 
 Messages (JSON): {"type": "hello" | "update", "version", "salesSyncedAt",

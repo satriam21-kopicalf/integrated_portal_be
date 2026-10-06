@@ -5,7 +5,10 @@ Common query parameters:
   branch            branch_code, or several separated by commas (CCI01,CCI04)
   channel           comma separated visitPurposeName values, e.g. "Dine In,GoFood"
 
-The comparison period has the same length and ends the day before dateFrom.
+The comparison period has the same length and ends the day before dateFrom, unless
+compareFrom (and optionally compareTo, default: same length) chooses another one, e.g.
+1-10 Sep vs 1-10 Aug; every comparison (KPIs, trend, channels, branches, basket, growth,
+busy hours, menus, breakdowns) then uses it.
 Comparisons that reach before OVERVIEW_DATA_FROM (ESB roll-out finished at the
 end of July 2025) are left empty, so growth figures are never computed against
 a partially onboarded history.
@@ -20,12 +23,13 @@ Drill-down endpoints (the dashboard's detail drawers): /hourly-compare (busy hou
 or of several branches), /breakdown (sales by branch / channel / payment / date / type, optionally
 for one payment method) and /menu-detail (one menu by day, branch and channel).
 """
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Callable, Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 
 from app import database as db
@@ -34,7 +38,16 @@ from app.database import SCHEMA
 from app.scope import allowed_branches, scoped_branch
 from app.utils import TTLCache, data_version, parse_branches, today
 
-router = APIRouter(prefix="/api/overview", tags=["overview"])
+# the comparison period of the request (compareFrom / compareTo), read by parse_filters
+_compare: ContextVar[tuple[Optional[str], Optional[str]]] = ContextVar("overview_compare", default=(None, None))
+
+
+async def compare_params(compareFrom: Optional[str] = None, compareTo: Optional[str] = None) -> None:
+    """Optional comparison period for every Overview endpoint (async: set in the request's context)."""
+    _compare.set((compareFrom, compareTo))
+
+
+router = APIRouter(prefix="/api/overview", tags=["overview"], dependencies=[Depends(compare_params)])
 
 PORTAL = "integration_portal"
 DAILY = f"{PORTAL}.agg_sales_daily"
@@ -64,6 +77,9 @@ class Filters:
     branch: Optional[str] = None
     channels: tuple[str, ...] = ()
     data_from: date = date.min
+    # chosen comparison period (None = the period of the same length just before)
+    cmp_start: Optional[date] = None
+    cmp_end: Optional[date] = None
 
     @property
     def days(self) -> int:
@@ -71,11 +87,16 @@ class Filters:
 
     @property
     def prev_start(self) -> date:
-        return self.start - timedelta(days=self.days)
+        return self.cmp_start or self.start - timedelta(days=self.days)
 
     @property
     def prev_end(self) -> date:
-        return self.start - timedelta(days=1)
+        return self.cmp_end or self.start - timedelta(days=1)
+
+    @property
+    def shift(self) -> int:
+        """Days that move a comparison date onto the current timeline."""
+        return (self.start - self.prev_start).days
 
     @property
     def prev_complete(self) -> bool:
@@ -100,12 +121,13 @@ class Filters:
         return {
             "from": self.start.isoformat(), "to": self.end.isoformat(), "days": self.days,
             "previous": {"from": self.prev_start.isoformat(), "to": self.prev_end.isoformat(),
-                         "complete": self.prev_complete},
+                         "complete": self.prev_complete, "custom": self.cmp_start is not None,
+                         "days": (self.prev_end - self.prev_start).days + 1},
             "branch": self.branch, "branches": parse_branches(self.branch), "channels": list(self.channels),
         }
 
     def key(self) -> str:
-        return f"{self.start}:{self.end}:{self.branch}:{','.join(self.channels)}"
+        return f"{self.start}:{self.end}:{self.branch}:{','.join(self.channels)}:{self.cmp_start}:{self.cmp_end}"
 
 
 def _parse_date(value: str, name: str) -> date:
@@ -124,7 +146,16 @@ def parse_filters(date_from: Optional[str], date_to: Optional[str], branch: Opti
     if (end - start).days + 1 > MAX_DAYS:
         raise BadRequest(f"the period is limited to {MAX_DAYS} days")
     channels = tuple(sorted({c.strip() for c in (channel or "").split(",") if c.strip()}))
-    return Filters(start, end, scoped_branch(branch), channels, data_start())
+    cmp_from, cmp_to = _compare.get()
+    cs = ce = None
+    if cmp_from:
+        cs = _parse_date(cmp_from, "compareFrom")
+        ce = _parse_date(cmp_to, "compareTo") if cmp_to else cs + (end - start)
+        if cs > ce:
+            raise BadRequest("compareFrom must not be after compareTo")
+        if (ce - cs).days + 1 > MAX_DAYS:
+            raise BadRequest(f"the comparison period is limited to {MAX_DAYS} days")
+    return Filters(start, end, scoped_branch(branch), channels, data_start(), cs, ce)
 
 
 def data_start() -> date:
@@ -303,8 +334,10 @@ def build_trend(f: Filters, granularity: str) -> dict:
         v = series[bucket_of(r["sales_date"], granularity)]["channels"].setdefault(r["channel"], {"subtotal": 0.0, "bills": 0})
         v["subtotal"] += _f(r["subtotal"])
         v["bills"] += int(r["bills"])
-    for r in prev:  # shift the previous period onto the current timeline
-        series[bucket_of(r["sales_date"] + timedelta(days=f.days), granularity)]["previous"].append(r)
+    for r in prev:  # shift the comparison period onto the current timeline (days beyond the period are left out)
+        s = series.get(bucket_of(r["sales_date"] + timedelta(days=f.shift), granularity))
+        if s is not None:
+            s["previous"].append(r)
     out = []
     for s in series.values():
         c, p = totals(s.pop("current")), totals(s.pop("previous"))
@@ -526,6 +559,88 @@ def _p90(values: list[float]) -> Optional[float]:
     return s[lo] + (s[hi] - s[lo]) * (k - lo)
 
 
+ONLINE_CHANNELS = ("GrabFood", "ShopeeFood", "GoFood", "Esb Order")
+OFFLINE_CHANNELS = ("Dine In", "Takeaway")
+CHANNEL_GROUP_LABELS = {"offline": "Offline (Dine In, Takeaway)", "online": "Online (GrabFood, ShopeeFood, GoFood, Online Order)",
+                        "other": "Other"}
+
+
+def channel_group(channel: str) -> str:
+    return "online" if channel in ONLINE_CHANNELS else "offline" if channel in OFFLINE_CHANNELS else "other"
+
+
+def _deduction_bucket() -> dict:
+    return {"bills": 0, "subtotal": 0.0, "salesBills": 0, "salesSubtotal": 0.0, "voidBills": 0, "voidSubtotal": 0.0,
+            "otherCostBills": 0, "otherCostSubtotal": 0.0, "openBills": 0, "openSubtotal": 0.0}
+
+
+def _add_deduction(b: dict, tx_type: str, bills: int, subtotal: float) -> None:
+    b["bills"] += bills
+    b["subtotal"] += subtotal
+    key = {"sales": "sales", "void": "void", "other_cost": "otherCost", "open": "open"}[tx_type]
+    b[f"{key}Bills"] += bills
+    b[f"{key}Subtotal"] += subtotal
+
+
+def _deduction_rates(b: dict) -> dict:
+    return {**b, "voidRate": r2(ratio(b["voidBills"] * 100, b["bills"]) or 0.0),
+            "otherCostRate": r2(ratio(b["otherCostBills"] * 100, b["bills"]) or 0.0),
+            "voidValueRate": r2(ratio(b["voidSubtotal"] * 100, b["salesSubtotal"] + b["voidSubtotal"]) or 0.0)}
+
+
+def deductions_by_channel(f: Filters) -> dict:
+    """Void / other cost / open bills split offline (Dine In, Takeaway) vs online (delivery apps, online order):
+    per group and channel (with the comparison period), per day and per branch."""
+    cur = sales_rows(f, f.start, f.end, ("channel", "tx_type"), tx_type=None)
+    prev = sales_rows(f, f.prev_start, f.prev_end, ("channel", "tx_type"), tx_type=None) if f.prev_complete else []
+    daily = sales_rows(f, f.start, f.end, ("sales_date", "channel", "tx_type"), tx_type=None)
+    per_branch = sales_rows(f, f.start, f.end, ("branch_code", "channel", "tx_type"), tx_type=None)
+    names = branch_names()
+
+    def collect(rows, key_fn):
+        out: dict = {}
+        for r in rows:
+            b = out.setdefault(key_fn(r), _deduction_bucket())
+            _add_deduction(b, r["tx_type"], int(r["bills"]), _f(r["subtotal"]))
+        return out
+
+    groups, prev_groups = collect(cur, lambda r: channel_group(r["channel"])), collect(prev, lambda r: channel_group(r["channel"]))
+    channels, prev_channels = collect(cur, lambda r: r["channel"]), collect(prev, lambda r: r["channel"])
+    total_void = sum(g["voidBills"] for g in groups.values())
+
+    def with_prev(b: dict, p: Optional[dict]) -> dict:
+        out = _deduction_rates(b)
+        pr = _deduction_rates(p) if p else None
+        out["previousVoidRate"] = pr["voidRate"] if pr else None
+        out["previousVoidBills"] = p["voidBills"] if p else None
+        out["voidShare"] = r2(ratio(b["voidBills"] * 100, total_void) or 0.0)
+        return out
+
+    by_day: dict = {}
+    for r in daily:
+        d = by_day.setdefault(r["sales_date"], {"offline": _deduction_bucket(), "online": _deduction_bucket(), "other": _deduction_bucket()})
+        _add_deduction(d[channel_group(r["channel"])], r["tx_type"], int(r["bills"]), _f(r["subtotal"]))
+    by_branch: dict = {}
+    for r in per_branch:
+        d = by_branch.setdefault(r["branch_code"], {"offline": _deduction_bucket(), "online": _deduction_bucket(), "other": _deduction_bucket()})
+        _add_deduction(d[channel_group(r["channel"])], r["tx_type"], int(r["bills"]), _f(r["subtotal"]))
+
+    order = ("offline", "online", "other")
+    return {
+        "groups": [{"group": g, "label": CHANNEL_GROUP_LABELS[g], **with_prev(groups[g], prev_groups.get(g) if f.prev_complete else None)}
+                   for g in order if g in groups],
+        "channels": sorted(({"channel": c, "group": channel_group(c), **with_prev(b, prev_channels.get(c) if f.prev_complete else None)}
+                            for c, b in channels.items()), key=lambda c: (order.index(c["group"]), -c["voidBills"])),
+        "dailyGroups": [{"date": d.isoformat(), **{g: _deduction_rates(v[g]) for g in ("offline", "online")}}
+                        for d, v in sorted(by_day.items())],
+        "branchGroups": sorted(({"branchCode": code, "branchName": names.get(code, code),
+                                 **{g: _deduction_rates(v[g]) for g in ("offline", "online")}}
+                                for code, v in by_branch.items()
+                                if v["offline"]["voidBills"] or v["online"]["voidBills"] or v["offline"]["otherCostBills"] or v["online"]["otherCostBills"]),
+                               key=lambda b: -(b["offline"]["voidBills"] + b["online"]["voidBills"])),
+    }
+
+
 def build_deductions(f: Filters) -> dict:
     per_day = sales_rows(f, f.start, f.end, ("sales_date", "tx_type"), tx_type=None)
     per_branch = sales_rows(f, f.start, f.end, ("branch_code", "tx_type"), tx_type=None)
@@ -571,6 +686,7 @@ def build_deductions(f: Filters) -> dict:
                                       "subtotal": _f(r["subtotal"])} for r in methods), key=lambda m: -m["subtotal"]),
         "branches": sorted((b for b in branches.values() if b["voidBills"] or b["otherCostBills"]),
                            key=lambda b: (-b["voidRate"], -b["voidBills"])),
+        **deductions_by_channel(f),
         "daily": [{"date": d.isoformat(), "bills": v["gross"]["bills"], "voidBills": v["void"]["bills"],
                    "voidSubtotal": v["void"]["subtotal"], "otherCostSubtotal": v["other_cost"]["subtotal"],
                    "voidRate": r2(ratio(v["void"]["bills"] * 100, v["gross"]["bills"]) or 0.0)}
@@ -795,8 +911,11 @@ def build_growth(f: Filters, granularity: str, basis: str) -> dict:
            sequential = every bucket against the bucket before it, per calendar day, so partial
            first/last weeks or months compare fairly (totals: against the previous period).
     """
-    shift = YEAR_SHIFT if basis == "lastYear" else f.days
-    cs, ce = f.start - timedelta(days=shift), f.end - timedelta(days=shift)
+    if basis == "lastYear":
+        shift = YEAR_SHIFT
+        cs, ce = f.start - timedelta(days=shift), f.end - timedelta(days=shift)
+    else:  # previous (and sequential totals): the comparison period of the filters
+        shift, cs, ce = f.shift, f.prev_start, f.prev_end
     complete = cs >= f.data_from
     cur_rows = sales_rows(f, f.start, f.end, ("sales_date",))
     cmp_rows = sales_rows(f, cs, ce, ("sales_date",)) if complete else []

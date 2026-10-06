@@ -30,7 +30,7 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | GET | `/api/overview/branches` | Leaderboard cabang: sales, bills, avg ticket, growth, void rate, sparkline |
 | GET | `/api/overview/hourly` | Hari-dalam-minggu × jam: rata-rata bills & sales per hari |
 | GET | `/api/overview/menus` | Top menu (`limit`, `sort=subtotal\|qty`), mix kategori, preferensi add-on |
-| GET | `/api/overview/deductions` | Void/Cancelled, Other Cost per metode, open bill; per hari & cabang (status `review` > P90) |
+| GET | `/api/overview/deductions` | Void/Cancelled, Other Cost per metode, open bill; per hari & cabang (status `review` > P90) | Termasuk `groups` (offline vs online), `channels`, `dailyGroups`, `branchGroups`.
 | GET | `/api/overview/monthly` | Bulan-bulan dalam periode terpilih: rata-rata per hari, MoM, YoY, same-store growth |
 | GET | `/api/overview/payments` | Mix metode pembayaran |
 | GET | `/api/overview/basket` | Baris menu & qty per bill, food share, food attach rate |
@@ -59,6 +59,8 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | GET | `/api/live` | Penjualan hari ini (vs kemarin di jam yang sama, per jam) + transaksi Sales terbaru yang masuk (`limit`, `branch`, `channel`); langsung dari `transactions_pos_sales`, cache 20 dtk |
 
 Tanpa `dateFrom`/`dateTo`, rentang default adalah 65 hari terakhir (Asia/Jakarta). Dokumentasi interaktif: `https://api.kopicalf.co.id/docs`.
+Semua endpoint `/api/overview/*` menerima `compareFrom` & `compareTo` (opsional): periode pembanding pilihan (default: periode sepanjang sama tepat sebelumnya).
+
 **Semua endpoint data membutuhkan login** (cookie `portal_session`, atau `Authorization: Bearer <token>`); `/api/users`, `/api/cost-control/*` dan `GET /api/activity*` hanya untuk role `superadmin`. Terbuka: `/health`, `/api/auth/login|logout`, WebSocket `/ws`.
 
 ### Akses cabang (role user, anti-fraud)

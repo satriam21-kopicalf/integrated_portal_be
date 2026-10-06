@@ -151,7 +151,7 @@ def test_filters_default_and_validation(client):
 def test_kpis_vs_previous_period(client):
     body = client.get(f"/api/overview/kpis?{Q}").json()
     k = body["kpis"]
-    assert body["filters"]["previous"] == {"from": "2026-08-30", "to": "2026-08-31", "complete": True}
+    assert body["filters"]["previous"] == {"from": "2026-08-30", "to": "2026-08-31", "complete": True, "custom": False, "days": 2}
     assert k["sales"] == {"value": 2_500_000, "previous": 2_100_000, "deltaPct": 19.05}
     assert k["nettSales"]["value"] == 2_300_000
     assert k["bills"]["value"] == 20 and k["avgTicket"]["value"] == 125_000
@@ -349,3 +349,35 @@ def test_growth_sequential_per_day(client):
     # the period's part of the week (2 days) per day vs the whole week before (7 days) per day
     assert week[0]["days"] == 2 and week[0]["compareDays"] == 7 and week[0]["compareFrom"] == "2026-08-24"
     assert week[0]["avgPerDay"] == 1_250_000 and week[0]["growthPct"] == delta(1_250_000, 2_000_000 / 7)
+
+
+def test_custom_comparison_period(client):
+    q = f"{Q}&compareFrom=2026-08-30&compareTo=2026-08-30"
+    body = client.get(f"/api/overview/kpis?{q}").json()
+    assert body["filters"]["previous"] == {"from": "2026-08-30", "to": "2026-08-30", "complete": True, "custom": True, "days": 1}
+    assert body["kpis"]["sales"]["previous"] == 2_000_000 and body["kpis"]["sales"]["deltaPct"] == 25.0
+    first, second = client.get(f"/api/overview/trend?{q}").json()["series"]
+    assert first["previous"]["subtotal"] == 2_000_000 and second["previous"]["subtotal"] == 0  # 30 Aug lines up with 1 Sep
+    # compareTo defaults to the same length as the period
+    assert client.get(f"/api/overview/kpis?{Q}&compareFrom=2026-08-30").json()["filters"]["previous"]["to"] == "2026-08-31"
+    growth = client.get(f"/api/overview/growth?{q}").json()
+    assert growth["compare"]["from"] == "2026-08-30" and growth["totals"]["growthPct"] == 25.0
+    assert client.get(f"/api/overview/kpis?{Q}&compareFrom=2026-08-31&compareTo=2026-08-30").status_code == 400
+    assert client.get(f"/api/overview/kpis?{Q}&compareFrom=bad").status_code == 400
+    # a different comparison period is a different cache entry
+    assert client.get(f"/api/overview/kpis?{Q}").json()["kpis"]["sales"]["previous"] == 2_100_000
+
+
+def test_deductions_offline_online(client):
+    body = client.get(f"/api/overview/deductions?{Q}").json()
+    groups = {g["group"]: g for g in body["groups"]}
+    off, on = groups["offline"], groups["online"]
+    assert off["bills"] == 18 and off["voidBills"] == 2 and off["voidRate"] == round(2 / 18 * 100, 2)
+    assert off["otherCostBills"] == 1 and off["otherCostSubtotal"] == 50_000 and off["voidShare"] == 100.0
+    assert off["previousVoidRate"] == 0.0 and off["voidValueRate"] == round(100_000 / 1_600_000 * 100, 2)
+    assert on["bills"] == 5 and on["voidBills"] == 0 and on["salesSubtotal"] == 1_000_000
+    assert {c["channel"]: c["group"] for c in body["channels"]} == {"Dine In": "offline", "GoFood": "online"}
+    day2 = next(d for d in body["dailyGroups"] if d["date"] == "2026-09-02")
+    assert day2["offline"]["voidBills"] == 2 and day2["online"]["bills"] == 0
+    cci = next(b for b in body["branchGroups"] if b["branchCode"] == "CCI01")
+    assert cci["offline"]["voidBills"] == 2 and cci["online"]["voidBills"] == 0

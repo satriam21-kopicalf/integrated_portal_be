@@ -127,14 +127,22 @@ def test_issues_report_quantity_errors_and_stock_spikes(monkeypatch):
     monkeypatch.setattr(db, "fetch", fetch)
     monkeypatch.setattr(cc, "branch_names", lambda: {"CCI01": "Kopi Calf Supratman Bandung"})
     monkeypatch.setattr(cc, "period_rows", lambda *a, **k: [])
+    monkeypatch.setattr(cc, "freshness", lambda: {"refreshedAt": "t1"})
     cc._cache.clear()
+    cc._qty_cache.clear()
     body = json.loads(cc.get_issues(dateFrom="2026-07-01", dateTo="2026-09-30", branch="CCI01").body)
     q = body["quantityErrors"][0]
     assert q["branchCode"] == "CCI01" and q["baseQty"] == 25_163_000 and q["factor"] == 1248 and q["unit"] == "KG@1000GR"
     s = body["stockSpikes"][0]
     assert s["open"] is True and s["factor"] == 500 and s["branchCode"] == "CCI01"
-    # the branch filter becomes a location filter; bulk-order locations are excluded; usual qty learnt from history
+    # bulk-order locations are excluded; usual qty learnt from the whole history, computed once and filtered per request
     qty_sql, qty_params = next((s, p) for s, p in queries if "l.q /" in s)
-    assert qty_params["locs"] == ["9"] and "NOT ILIKE 'BULK%%'" in qty_sql and qty_params["since"] == cc.QTY_HISTORY_FROM
+    assert "NOT ILIKE 'BULK%%'" in qty_sql and qty_params["since"] == cc.QTY_HISTORY_FROM
     assert qty_params["factor"] == cc.QTY_ERROR_FACTOR == 200
+    n = len(queries)
+    other = json.loads(cc.get_issues(dateFrom="2026-07-01", dateTo="2026-09-30", branch="TGP14").body)
+    assert other["quantityErrors"] == [] and other["stockSpikes"] == []      # other outlet: filtered out
+    assert not any("l.q /" in s for s, _ in queries[n:])                    # served from the cache
+    early = json.loads(cc.get_issues(dateFrom="2026-08-01", dateTo="2026-08-31", branch=None).body)
+    assert early["quantityErrors"] == [] and early["stockSpikes"] == []      # outside the date range
     assert cc._uom_factor("PACK@500PCS") == 500 and cc._uom_factor("GR") == 1

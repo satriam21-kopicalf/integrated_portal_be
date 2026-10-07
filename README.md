@@ -25,7 +25,8 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | GET | `/api/exports/{id}/download` | Unduh `.xlsx` (tersedia `EXPORT_TTL_HOURS`, default 24 jam) |
 | GET | `/api/overview/meta` | Opsi filter channel, periode default, cakupan & kesegaran data |
 | GET | `/api/overview/kpis` | Sales, Nett Sales, Bills, Avg Ticket + Δ% vs periode sebelumnya + nilai harian |
-| GET | `/api/overview/trend` | Seri Sales per `granularity` (`day`/`week`/`month`, default otomatis) + periode sebelumnya + nilai per channel per bucket |
+| GET | `/api/overview/trend` | Seri Sales per `granularity` (`hour`/`day`/`week`/`month`; default otomatis, `hour` untuk rentang 1 hari = day vs day) + periode pembanding + nilai per channel per bucket |
+| GET | `/api/overview/health` | Kesehatan perusahaan (tidak terfilter): KPI coffee chain 28 hari terakhir vs minggu yang sama tahun lalu (pertumbuhan, SSSG, traffic, avg ticket, outlet lemah, diskon, void, porsi online, food attach, konsentrasi menu & jam puncak) + skor + tren bulanan sejak Agu 2025 (`app/health.py`) |
 | GET | `/api/overview/channels` | Per channel: bills, sales, share, avg ticket, diskon %, growth + mix per periode |
 | GET | `/api/overview/branches` | Leaderboard cabang: sales, bills, avg ticket, growth, void rate, sparkline |
 | GET | `/api/overview/hourly` | Hari-dalam-minggu × jam: rata-rata bills & sales per hari |
@@ -56,6 +57,7 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | PUT | `/api/cost-control/settings` | (superadmin) ambang status & parameter forecast |
 | GET | `/api/activity`, `/api/activity/summary` | (superadmin) Activity log: `dateFrom`, `dateTo`, `user`, `category` (auth, page, filter, transaction, export, user, profile, access), `status` (ok/failed/denied), `role`, `search`, `limit`, `offset` |
 | POST | `/api/activity/events` | Dashboard melaporkan `page.view` / `filter.change` (aktivitas lain dicatat backend sendiri) |
+| DELETE | `/api/activity` | (superadmin) Reset log sekarang: `{"confirm": "RESET", "before": "YYYY-MM-DD" \| null}` (null = semua); reset tercatat sebagai entri `system.logs_reset` |
 | GET | `/api/live` | Penjualan hari ini (vs kemarin di jam yang sama, per jam) + transaksi Sales terbaru yang masuk (`limit`, `branch`, `channel`); langsung dari `transactions_pos_sales`, cache 20 dtk |
 
 Tanpa `dateFrom`/`dateTo`, rentang default adalah 65 hari terakhir (Asia/Jakarta). Dokumentasi interaktif: `https://api.kopicalf.co.id/docs`.

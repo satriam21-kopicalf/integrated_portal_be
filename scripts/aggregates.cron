@@ -18,4 +18,6 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Cost Control (COGS / usage / forecast) after the ESB inventory valuation sync (04:15 WIB, ~10 min):
 # periods overlapping the last 10 days at 05:10 WIB; last 40 days on Sunday 06:00 WIB (after the weekly valuation resync)
 10 22 * * * root bash /opt/integrated-portal-be/repo/scripts/cost_control.sh --recent-days 10 >> /var/log/integrated-portal-cost-control.log 2>&1
+# and after the daytime valuation syncs (13:15 / 18:15 WIB, ~5 min): 13:30 and 18:30 WIB
+30 6,11 * * * root bash /opt/integrated-portal-be/repo/scripts/cost_control.sh --recent-days 10 >> /var/log/integrated-portal-cost-control.log 2>&1
 0 23 * * 6 root bash /opt/integrated-portal-be/repo/scripts/cost_control.sh --recent-days 40 >> /var/log/integrated-portal-cost-control.log 2>&1

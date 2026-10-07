@@ -46,8 +46,10 @@ logger = logging.getLogger(__name__)
 # Excel allows 1,048,576 rows per sheet, including the header row.
 MAX_SHEET_ROWS = 1_048_575
 # Google Sheets: 10 million cells per spreadsheet = 217k rows of the 46-column detail report.
-# A part closes at the end of the day it passes PART_TARGET_ROWS (~3 days of all outlets,
-# ~28 MB, within the Apps Script request limit); PART_MAX_ROWS cuts inside a day if ever needed.
+# A part closes at the end of the day it passes PART_TARGET_ROWS (~2-3 days of all outlets,
+# ~28 MB max, within the Apps Script request limit), or earlier when the next day - judged by the
+# last one - would not fit under PART_MAX_ROWS; PART_MAX_ROWS cuts inside a day only if one day
+# alone is that big.
 PART_TARGET_ROWS = 150_000
 PART_MAX_ROWS = 200_000
 # A "running" job that has not reported progress for this long was interrupted
@@ -401,7 +403,7 @@ def _generate_sheet_parts(job: dict) -> None:
     folder = f"{base} ({datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7))):%Y-%m-%d %H.%M})"
     parts: list[dict] = []
     cur: Optional[dict] = None
-    rows = headers_count = 0
+    rows = headers_count = last_day_rows = 0
     short = lambda d: d.strftime("%d %b %Y")  # noqa: E731
 
     def open_part(day: date) -> dict:
@@ -435,10 +437,12 @@ def _generate_sheet_parts(job: dict) -> None:
     try:
         for offset in range(job["totalDays"]):
             day = date_from + timedelta(days=offset)
-            if cur is not None and cur["rows"] >= PART_TARGET_ROWS:
+            # cut at the day: target reached, or the next day (about as big as the last) would not fit
+            if cur is not None and (cur["rows"] >= PART_TARGET_ROWS or cur["rows"] + last_day_rows > PART_MAX_ROWS):
                 close_part(cur, last=False)
                 cur = None
             day_headers = 0
+            rows_before = rows
 
             def counted(headers):
                 nonlocal day_headers
@@ -460,6 +464,7 @@ def _generate_sheet_parts(job: dict) -> None:
                     cur["sheet"].write_rows(cur["batch"])
                     cur["batch"] = []
             headers_count += day_headers
+            last_day_rows = rows - rows_before
             _update(job, daysDone=offset + 1, currentDate=day.isoformat(), rows=rows, headers=headers_count, items=rows)
         if cur is not None:
             close_part(cur, last=True)

@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     google_oauth_refresh_token: str = ""
     google_service_account_json_b64: str = ""
     google_share_role: str = "writer"  # access of the exporting user: writer | reader
+    google_share_link: str = "view"  # anyone with the link: view | edit | none (no request for access)
 
     @property
     def cors_origin_list(self) -> list[str]:

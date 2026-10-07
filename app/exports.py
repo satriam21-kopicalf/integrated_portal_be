@@ -5,8 +5,11 @@ time (oldest first), builds the ESB "Sales Recapitulation Detail Report" rows
 (app/esb_report.py) and streams them into an .xlsx file (app/xlsx_stream.py)
 laid out like the ESB export; a new sheet starts whenever Excel's row limit is
 reached. A "Ringkasan" sheet lists gross sales and the deductions per day.
-Format "gsheet" then uploads that file to Google Drive as a Google Sheet
-(app/gsheets.py) and shares it with the exporting user.
+Format "gsheet" uploads the file to Google Drive as a Google Sheet (app/gsheets.py),
+shared with the exporting user and with anyone who has the link. A Google Sheet holds at
+most 10 million cells, so a detail report is written in parts of about three days of
+all outlets (PART_TARGET_ROWS, cut at a day where possible), each uploaded as soon as it
+is complete; several parts go into one Drive folder named after the export.
 
 Each job runs in its own process (app/export_worker.py), not in the web
 worker: building a large report is CPU-heavy, and inside a uvicorn worker it
@@ -42,6 +45,11 @@ logger = logging.getLogger(__name__)
 
 # Excel allows 1,048,576 rows per sheet, including the header row.
 MAX_SHEET_ROWS = 1_048_575
+# Google Sheets: 10 million cells per spreadsheet = 217k rows of the 46-column detail report.
+# A part closes at the end of the day it passes PART_TARGET_ROWS (~3 days of all outlets,
+# ~28 MB, within the Apps Script request limit); PART_MAX_ROWS cuts inside a day if ever needed.
+PART_TARGET_ROWS = 150_000
+PART_MAX_ROWS = 200_000
 # A "running" job that has not reported progress for this long was interrupted
 # (e.g. the container restarted).
 STALE_AFTER = timedelta(minutes=10)
@@ -253,15 +261,20 @@ def _run(job: dict) -> None:
     slot = _acquire_slot(job)
     try:
         _update(job, status="running")
-        _generate(job)
-        if job.get("format") == "gsheet" and job.get("fileName"):
-            _to_google_sheet(job)
+        if job.get("format") == "gsheet" and job.get("report") != "daily":
+            _generate_sheet_parts(job)
+        else:
+            _generate(job)
+            if job.get("format") == "gsheet" and job.get("fileName"):
+                _to_google_sheet(job)
         _log(job, "export.done", "ok", f"Export selesai: {job.get('fileName') or 'tidak ada data'}"
              + (" (Google Sheets)" if job.get("sheetUrl") else ""))
     except Exception as exc:  # noqa: BLE001
         logger.exception("Export %s failed", job["id"])
         job_file(job["id"]).unlink(missing_ok=True)
-        _update(job, status="error", error=str(exc), finishedAt=_now())
+        for part in _export_dir().glob(f"{job['id']}.part*.xlsx"):
+            part.unlink(missing_ok=True)
+        _update(job, status="error", error=str(exc), phase=None, finishedAt=_now())
         _log(job, "export.failed", "failed", f"Export gagal: {exc}"[:300])
     finally:
         if slot is not None:
@@ -271,7 +284,8 @@ def _run(job: dict) -> None:
 def job_details(job: dict) -> dict:
     """What the activity log keeps of an export job."""
     keys = ("id", "report", "type", "format", "dateFrom", "dateTo", "branch", "totalDays", "rows", "headers", "items",
-            "fileName", "fileSize", "sheetUrl", "sheetSharedWith", "createdAt", "finishedAt", "error")
+            "fileName", "fileSize", "sheetUrl", "sheetSharedWith", "sheetLinkAccess", "sheetParts", "createdAt",
+            "finishedAt", "error")
     out = {k: job.get(k) for k in keys}
     out["branches"] = parse_branches(job.get("branch")) or "all"
     return out
@@ -309,8 +323,10 @@ def _branch_name(code: Optional[str]) -> str:
     return ", ".join(names.get(c, c) for c in codes)
 
 
-def _preamble(job: dict) -> list[list]:
-    """Title rows identical to the ESB export (data header lands on row 11)."""
+def _preamble(job: dict, date_from: Optional[str] = None, date_to: Optional[str] = None,
+              name: Optional[str] = None) -> list[list]:
+    """Title rows identical to the ESB export (data header lands on row 11); a part of a
+    Google Sheets export shows its own period and name."""
     d = lambda iso: date.fromisoformat(iso).strftime("%d-%m-%Y")  # noqa: E731
     daily = job.get("report") == "daily"
     return [
@@ -318,23 +334,24 @@ def _preamble(job: dict) -> list[list]:
         ["PT Yuda Prawira Group"],
         [],
         ["Generated", datetime.now().strftime("%d-%m-%Y %H:%M:%S")],
-        ["Period", f"{d(job['dateFrom'])} - {d(job['dateTo'])}"],
+        ["Period", f"{d(date_from or job['dateFrom'])} - {d(date_to or job['dateTo'])}"],
         ["Branch", _branch_name(job["branch"])],
         ["Sales Type", TYPE_LABELS[job["type"]]],
         *([["Date Group Mode", "Daily"]] if daily else []),
         ["Generated Username", job.get("ownerName") or "Integrated Portal"],  # who exported it
-        ["Report File Name", job["fileName"].removesuffix(".xlsx")],
+        ["Report File Name", name or job["fileName"].removesuffix(".xlsx")],
         [],
     ]
 
 
-def _summary_rows(job: dict) -> list[list]:
+def _summary_rows(job: dict, date_from: Optional[str] = None, date_to: Optional[str] = None) -> list[list]:
     from app.routes.transactions import summarize  # local import: routes import this module
 
-    s = summarize(job["dateFrom"], job["dateTo"], job["branch"])
+    date_from, date_to = date_from or job["dateFrom"], date_to or job["dateTo"]
+    s = summarize(date_from, date_to, job["branch"])
     header = ["Date", "Gross Subtotal", "Void & Cancelled", "Other Cost (CUPPING, WASTE, ...)",
               "Open Bills", "Sales Subtotal", "Sales Nett Sales", "Sales Transactions"]
-    rows = [["Ringkasan Penjualan"], ["Period", f"{job['dateFrom']} - {job['dateTo']}"],
+    rows = [["Ringkasan Penjualan"], ["Period", f"{date_from} - {date_to}"],
             ["Branch", _branch_name(job["branch"])], [], header]
     for day in s["days"] + [{"date": "TOTAL", **s["totals"]}]:
         rows.append([day["date"], day["gross"]["subtotal"], -day["void"]["subtotal"], -day["other_cost"]["subtotal"],
@@ -346,16 +363,8 @@ def _summary_rows(job: dict) -> list[list]:
     return rows
 
 
-def _too_big_for_sheets(job: dict, rows: int, columns: int) -> Optional[str]:
-    """Why the data cannot fit in one Google Sheet (the export then stops early), or None."""
-    if job.get("format") == "gsheet" and rows * columns > gsheets.MAX_CELLS:
-        return (f"Data terlalu besar untuk Google Sheets: lebih dari {rows:,} baris x {columns} kolom "
-                f"(batas Google Sheets {gsheets.MAX_CELLS:,} sel). Perkecil periode atau cabang, atau export ke Excel.")
-    return None
-
-
-def _to_google_sheet(job: dict) -> None:
-    """Upload the finished .xlsx as a Google Sheet; a heartbeat keeps the job from looking stale."""
+def _upload(job: dict, path: Path, title: str, folder: Optional[str] = None, part: Optional[int] = None) -> dict:
+    """Upload one .xlsx as a Google Sheet; a heartbeat keeps the job from looking stale meanwhile."""
     stop = threading.Event()
 
     def beat():
@@ -364,13 +373,115 @@ def _to_google_sheet(job: dict) -> None:
 
     threading.Thread(target=beat, name=f"export-upload-{job['id'][:8]}", daemon=True).start()
     try:
-        _update(job, status="running", phase="upload", uploadPct=0)
-        sheet = gsheets.upload_as_sheet(str(job_file(job["id"])), job["fileName"].removesuffix(".xlsx"),
-                                        job.get("ownerEmail"), lambda pct: _update(job, uploadPct=round(pct * 100)))
+        _update(job, phase="upload", uploadPct=0, uploadPart=part)
+        return gsheets.upload_as_sheet(str(path), title, job.get("ownerEmail"),
+                                       lambda pct: _update(job, uploadPct=round(pct * 100)), folder=folder)
     finally:
         stop.set()
+
+
+def _to_google_sheet(job: dict) -> None:
+    """Upload the finished .xlsx (one file: daily report) as a Google Sheet."""
+    sheet = _upload(job, job_file(job["id"]), job["fileName"].removesuffix(".xlsx"))
     _update(job, status="done", phase=None, uploadPct=100, sheetUrl=sheet["url"], sheetSharedWith=sheet["sharedWith"],
-            finishedAt=_now())
+            sheetLinkAccess=sheet.get("linkAccess"), finishedAt=_now())
+
+
+def _part_file(job_id: str, number: int) -> Path:
+    return _export_dir() / f"{job_id}.part{number}.xlsx"
+
+
+def _generate_sheet_parts(job: dict) -> None:
+    """Detail report for Google Sheets: written in parts that each fit in one Google Sheet,
+    every part uploaded as soon as it is complete. One part = one sheet (and the .xlsx stays
+    downloadable); several = sheets in one Drive folder named after the export."""
+    date_from = date.fromisoformat(job["dateFrom"])
+    branch, tx_type = job["branch"], job.get("type") or "sales"
+    base = job["fileName"].removesuffix(".xlsx")
+    folder = f"{base} ({datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7))):%Y-%m-%d %H.%M})"
+    parts: list[dict] = []
+    cur: Optional[dict] = None
+    rows = headers_count = 0
+    short = lambda d: d.strftime("%d %b %Y")  # noqa: E731
+
+    def open_part(day: date) -> dict:
+        number = len(parts) + 1
+        xlsx = StreamingXlsxWriter(str(_part_file(job["id"], number)))
+        part = {"number": number, "from": day, "to": day, "rows": 0, "xlsx": xlsx, "batch": []}
+        part["sheet"] = xlsx.add_sheet("Report", widths=REPORT_COLUMN_WIDTHS, header=REPORT_HEADERS,
+                                       preamble=_preamble(job, name=f"{base} - part {number}"))
+        return part
+
+    def close_part(part: dict, last: bool) -> None:
+        if part["batch"]:
+            part["sheet"].write_rows(part["batch"])
+            part["batch"] = []
+        part["xlsx"].add_static_sheet("Ringkasan", _summary_rows(job, part["from"].isoformat(), part["to"].isoformat()),
+                                      widths=[22, 18, 18, 22, 14, 20, 18, 18], bold_rows=(0, 4))
+        part["xlsx"].close()
+        path = _part_file(job["id"], part["number"])
+        single = last and not parts
+        title = base if single else f"{base} - part {part['number']} ({short(part['from'])} - {short(part['to'])})"
+        sheet = _upload(job, path, title, folder=None if single else folder, part=part["number"])
+        parts.append({"part": part["number"], "dateFrom": part["from"].isoformat(), "dateTo": part["to"].isoformat(),
+                      "rows": part["rows"], "url": sheet["url"], "folderUrl": sheet.get("folderUrl"),
+                      "linkAccess": sheet.get("linkAccess"), "sharedWith": sheet.get("sharedWith")})
+        if single:
+            os.replace(path, job_file(job["id"]))  # the one part is the whole report: keep it downloadable
+        else:
+            path.unlink(missing_ok=True)
+        _update(job, phase=None, uploadPart=None, sheetParts=parts, sheets=len(parts))
+
+    try:
+        for offset in range(job["totalDays"]):
+            day = date_from + timedelta(days=offset)
+            if cur is not None and cur["rows"] >= PART_TARGET_ROWS:
+                close_part(cur, last=False)
+                cur = None
+            day_headers = 0
+
+            def counted(headers):
+                nonlocal day_headers
+                for h in headers:
+                    day_headers += 1
+                    yield h
+
+            for row in iter_report_rows(counted(_day_headers(day, branch, tx_type))):
+                if cur is None:
+                    cur = open_part(day)
+                elif cur["rows"] >= PART_MAX_ROWS:  # a single day too big for one sheet: cut inside it
+                    close_part(cur, last=False)
+                    cur = open_part(day)
+                cur["batch"].append(row)
+                cur["rows"] += 1
+                cur["to"] = day
+                rows += 1
+                if len(cur["batch"]) >= DAY_CHUNK_ROWS:
+                    cur["sheet"].write_rows(cur["batch"])
+                    cur["batch"] = []
+            headers_count += day_headers
+            _update(job, daysDone=offset + 1, currentDate=day.isoformat(), rows=rows, headers=headers_count, items=rows)
+        if cur is not None:
+            close_part(cur, last=True)
+            cur = None
+    finally:
+        if cur is not None:  # failed half way: close the open file so it can be removed
+            try:
+                cur["xlsx"].close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    if rows == 0:
+        _update(job, status="done", fileName=None, finishedAt=_now())
+        return
+    single = len(parts) == 1
+    whole = job_file(job["id"])
+    _update(job, status="done", phase=None, uploadPct=100,
+            sheetUrl=parts[0]["url"] if single else (parts[0].get("folderUrl") or parts[0]["url"]),
+            sheetFolderUrl=None if single else parts[0].get("folderUrl"),
+            sheetSharedWith=parts[0].get("sharedWith"), sheetLinkAccess=parts[0].get("linkAccess"),
+            fileSize=whole.stat().st_size if whole.exists() else None, downloadable=whole.exists(), finishedAt=_now())
+    logger.info("Export %s to Google Sheets done: %s rows in %s part(s)", job["id"], rows, len(parts))
 
 
 def _generate(job: dict) -> None:
@@ -385,7 +496,6 @@ def _generate(job: dict) -> None:
     sheet = None
     sheets = 0
     rows = headers_count = 0
-    too_big = None
     preamble = _preamble(job)
 
     def preamble_rows(sheet_number: int) -> int:
@@ -422,18 +532,13 @@ def _generate(job: dict) -> None:
                 sheet.write_rows(batch)
 
             headers_count += day_headers
-            too_big = _too_big_for_sheets(job, rows, len(REPORT_HEADERS))
-            if too_big:
-                break  # raised once the writer has closed the file
             _update(job, daysDone=offset + 1, currentDate=day.isoformat(),
                     rows=rows, headers=headers_count, items=rows, sheets=sheets)
 
-        if rows and not too_big:
+        if rows:
             xlsx.add_static_sheet("Ringkasan", _summary_rows(job), widths=[22, 18, 18, 22, 14, 20, 18, 18],
                                   bold_rows=(0, 4))
 
-    if too_big:
-        raise gsheets.SheetsError(too_big)
     if rows == 0:
         path.unlink(missing_ok=True)
         _update(job, status="done", fileName=None, finishedAt=_now())

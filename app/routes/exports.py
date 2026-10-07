@@ -35,7 +35,8 @@ class ExportRequest(BaseModel):
 def _public(job: dict) -> dict:
     body = {k: v for k, v in job.items() if not k.startswith("owner")}
     body["downloadUrl"] = None
-    if job["status"] == "done" and job.get("fileName"):
+    # a Google Sheets export in several parts has no single file to download
+    if job["status"] == "done" and job.get("fileName") and job.get("downloadable", True):
         base = get_settings().public_base_url.rstrip("/")
         body["downloadUrl"] = f"{base}/api/exports/{job['id']}/download"
     return body

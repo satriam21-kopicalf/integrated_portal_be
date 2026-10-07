@@ -178,11 +178,14 @@ def _google_configured(monkeypatch, uploads):
                        ("google_oauth_client_secret", "secret"), ("google_oauth_refresh_token", "refresh")):
         monkeypatch.setattr(s, key, value)
 
-    def upload(path, title, share_with, progress=lambda pct: None):
-        assert os.path.exists(path) and openpyxl.load_workbook(path).sheetnames == ["Report", "Ringkasan"]
+    def upload(path, title, share_with, progress=lambda pct: None, folder=None):
+        wb = openpyxl.load_workbook(path)
+        assert wb.sheetnames == ["Report", "Ringkasan"]
         progress(0.5)
-        uploads.append((title, share_with))
-        return {"id": "sheet1", "url": "https://docs.google.com/spreadsheets/d/sheet1/edit", "sharedWith": share_with}
+        n = len(uploads) + 1
+        uploads.append((title, share_with) if folder is None else (title, share_with, folder, len(list(wb["Report"].iter_rows(min_row=12)))))  # header on row 11
+        return {"id": f"sheet{n}", "url": f"https://docs.google.com/spreadsheets/d/sheet{n}/edit", "sharedWith": share_with,
+                "linkAccess": "view", "folderUrl": "https://drive.google.com/drive/folders/f1" if folder else None}
 
     monkeypatch.setattr(gsheets, "upload_as_sheet", upload)
 
@@ -201,19 +204,32 @@ def test_google_sheets_export(client, monkeypatch, fake_db):
     assert job["status"] == "done" and job["format"] == "gsheet" and job["phase"] is None
     assert job["sheetUrl"] == "https://docs.google.com/spreadsheets/d/sheet1/edit"
     assert job["sheetSharedWith"] == "tester@kopicalf.co.id" and "ownerEmail" not in job
+    assert job["sheetLinkAccess"] == "view" and len(job["sheetParts"]) == 1 and job["sheetFolderUrl"] is None
     assert uploads == [("Sales_Recapitulation_Detail_2026-09-29_to_2026-09-30", "tester@kopicalf.co.id")]
     assert job["downloadUrl"]  # the .xlsx stays downloadable as well
     done = next(a for a in fake_db.activity if a["action"] == "export.done")
     assert done["details"]["sheetUrl"] == job["sheetUrl"] and "Google Sheets" in done["summary"]
 
 
-def test_google_sheets_export_too_large(client, monkeypatch):
+def test_google_sheets_export_in_parts(client, monkeypatch, fake_db):
+    """Too many rows for one Google Sheet: parts cut at a day (or inside one), one Drive folder, shared by link."""
     uploads = []
     _google_configured(monkeypatch, uploads)
-    monkeypatch.setattr(gsheets, "MAX_CELLS", 46 * 3)  # 3 rows of 46 columns
+    monkeypatch.setattr(exports, "PART_TARGET_ROWS", 1)   # a new part after every day with rows
+    monkeypatch.setattr(exports, "PART_MAX_ROWS", 2)      # and inside a day after 2 rows
     job = _start(client, dateFrom="2026-09-29", dateTo="2026-09-30", format="gsheet")
-    assert job["status"] == "error" and "terlalu besar untuk Google Sheets" in job["error"]
-    assert uploads == [] and not exports.job_file(job["id"]).exists()
+    assert job["status"] == "done" and job["rows"] == 4 and job["sheets"] == 3
+    # 29 Sep: 1 row · 30 Sep: 3 rows -> cut after 2
+    assert [(p["dateFrom"], p["dateTo"], p["rows"]) for p in job["sheetParts"]] == [
+        ("2026-09-29", "2026-09-29", 1), ("2026-09-30", "2026-09-30", 2), ("2026-09-30", "2026-09-30", 1)]
+    assert [u[2:] for u in uploads] == [(uploads[0][2], 1), (uploads[0][2], 2), (uploads[0][2], 1)]
+    assert uploads[0][2].startswith("Sales_Recapitulation_Detail_2026-09-29_to_2026-09-30 (")   # one folder for all parts
+    assert uploads[1][0].startswith("Sales_Recapitulation_Detail_2026-09-29_to_2026-09-30 - part 2 (30 Sep 2026")
+    assert job["sheetUrl"] == job["sheetFolderUrl"] == "https://drive.google.com/drive/folders/f1"
+    assert job["sheetLinkAccess"] == "view" and job["downloadUrl"] is None   # no single .xlsx of the whole range
+    assert not list(exports._export_dir().glob(f"{job['id']}.part*.xlsx"))     # part files removed after upload
+    done = next(a for a in fake_db.activity if a["action"] == "export.done")
+    assert len(done["details"]["sheetParts"]) == 3
 
 
 def test_google_sheets_upload_failure(client, monkeypatch):
@@ -262,6 +278,7 @@ def test_google_sheets_via_apps_script(client, monkeypatch):
     upload = calls[-1]
     assert upload["key"] == "k" * 43 and upload["name"] == "Sales_Recapitulation_Detail_2026-09-29_to_2026-09-30"
     assert upload["shareWith"] == "tester@kopicalf.co.id" and upload["role"] == "writer"
+    assert upload["linkAccess"] == "view" and upload["folder"] is None   # one part: no folder
 
     # refused by the script / not a JSON answer / file too large -> clear error on the job
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp({"ok": False, "error": "unauthorized"}))

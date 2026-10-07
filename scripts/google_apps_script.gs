@@ -10,7 +10,9 @@
  * Anyone). The portal server registers its secret key on first contact; only the key's
  * SHA-256 is kept (Project Settings > Script properties: PORTAL_KEY_SHA256). To pair with a
  * new key, delete that property. The portal's daily housekeeping sends action "cleanup":
- * sheets in the folder older than N days go to the Drive trash (restorable for 30 days).
+ * sheets (and export sub-folders) older than N days go to the Drive trash (restorable for 30 days).
+ * Uploads may name a sub-folder (the parts of one large export) and are shared with anyone who
+ * has the link when linkAccess is "view" or "edit", so nobody has to request access.
  */
 var FOLDER_NAME = 'Kopi Calf Portal Exports';
 var XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -55,7 +57,8 @@ function doPost(e) {
       var days = Number(req.days);
       if (!(days >= 1)) return json_({ ok: false, error: 'days must be at least 1' });
       var cutoff = new Date(Date.now() - days * 86400000);
-      var files = folder_().getFilesByType(MimeType.GOOGLE_SHEETS);
+      var root = folder_();
+      var files = root.getFilesByType(MimeType.GOOGLE_SHEETS);
       var trashed = 0;
       while (files.hasNext()) {
         var file = files.next();
@@ -64,13 +67,25 @@ function doPost(e) {
           trashed++;
         }
       }
+      var subs = root.getFolders();  // the parts of large exports
+      while (subs.hasNext()) {
+        var sub = subs.next();
+        if (sub.getDateCreated() < cutoff) {
+          sub.setTrashed(true);
+          trashed++;
+        }
+      }
       return json_({ ok: true, trashed: trashed });
     }
 
+    var target = req.folder ? subFolder_(String(req.folder)) : folder_();
     var blob = Utilities.newBlob(Utilities.base64Decode(req.data), XLSX, req.name + '.xlsx');
-    var file = Drive.Files.create({ name: req.name, mimeType: MimeType.GOOGLE_SHEETS, parents: [folder_().getId()] }, blob);
+    var file = Drive.Files.create({ name: req.name, mimeType: MimeType.GOOGLE_SHEETS, parents: [target.getId()] }, blob);
     var shared = req.shareWith ? share_(file.id, req.shareWith, req.role === 'reader' ? 'reader' : 'writer') : null;
-    return json_({ ok: true, id: file.id, url: 'https://docs.google.com/spreadsheets/d/' + file.id + '/edit', sharedWith: shared });
+    var link = shareLink_(DriveApp.getFileById(file.id), req.linkAccess);
+    if (req.folder) shareLink_(target, req.linkAccess);
+    return json_({ ok: true, id: file.id, url: 'https://docs.google.com/spreadsheets/d/' + file.id + '/edit', sharedWith: shared,
+                   linkAccess: link, folderUrl: req.folder ? target.getUrl() : null });
   } catch (err) {
     return json_({ ok: false, error: String(err && err.message || err) });
   }
@@ -86,6 +101,24 @@ function share_(fileId, email, role) {
     } catch (err) { /* try the next way */ }
   }
   return null;
+}
+
+/** Anyone with the link can open it ("view" or "edit"); "none" or nothing = only who it is shared with. */
+function shareLink_(item, access) {
+  if (access !== 'view' && access !== 'edit') return 'none';
+  try {
+    item.setSharing(DriveApp.Access.ANYONE_WITH_LINK, access === 'edit' ? DriveApp.Permission.EDIT : DriveApp.Permission.VIEW);
+    return access;
+  } catch (err) {
+    return 'none';  // e.g. a Workspace policy that forbids link sharing
+  }
+}
+
+/** The sub-folder of one large export (created once, reused for its next parts). */
+function subFolder_(name) {
+  var root = folder_();
+  var found = root.getFoldersByName(name);
+  return found.hasNext() ? found.next() : root.createFolder(name);
 }
 
 function folder_() {

@@ -82,13 +82,15 @@ def _fail(r, what: str):
 
 
 def upload_as_sheet(path: str, title: str, share_with: Optional[str],
-                    progress: Callable[[float], None] = lambda pct: None) -> dict:
-    """Upload the .xlsx as a Google Sheet; returns {id, url, sharedWith}."""
+                    progress: Callable[[float], None] = lambda pct: None, folder: Optional[str] = None) -> dict:
+    """Upload the .xlsx as a Google Sheet, shared with `share_with` and (GOOGLE_SHARE_LINK) with
+    anyone who has the link; `folder` = a sub-folder for the parts of one export (Apps Script).
+    Returns {id, url, sharedWith, linkAccess, folderUrl}."""
     import requests
 
     s = get_settings()
     if s.google_apps_script_url and s.google_apps_script_key:
-        return _apps_script_upload(path, title, share_with, progress)
+        return _apps_script_upload(path, title, share_with, progress, folder)
     session = _session()
     size = os.path.getsize(path)
     params = {"uploadType": "resumable", "supportsAllDrives": "true", "fields": "id,webViewLink"}
@@ -132,8 +134,25 @@ def upload_as_sheet(path: str, title: str, share_with: Optional[str],
                     offset = int(status.headers["Range"].split("-")[1]) + 1 if "Range" in status.headers else 0
 
     shared = _share(session, result["id"], share_with) if share_with else None
+    link = _share_link(session, result["id"])
     return {"id": result["id"], "url": result.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{result['id']}",
-            "sharedWith": shared}
+            "sharedWith": shared, "linkAccess": link, "folderUrl": None}
+
+
+LINK_ROLES = {"view": "reader", "edit": "writer"}
+
+
+def _share_link(session, file_id: str) -> Optional[str]:
+    """Anyone with the link can open the sheet (GOOGLE_SHARE_LINK = view | edit | none)."""
+    access = get_settings().google_share_link
+    if access not in LINK_ROLES:
+        return None
+    r = session.post(f"{DRIVE}/files/{file_id}/permissions", params={"supportsAllDrives": "true"}, timeout=60,
+                     json={"type": "anyone", "role": LINK_ROLES[access], "allowFileDiscovery": False})
+    if r.ok:
+        return access
+    logger.warning("Google Sheet %s not shared by link: HTTP %s %s", file_id, r.status_code, r.text[:200])
+    return None
 
 
 def _share(session, file_id: str, email: str) -> Optional[str]:
@@ -204,7 +223,8 @@ def pair() -> dict:
     return _apps_script_call({"action": "pair"}, timeout=120)
 
 
-def _apps_script_upload(path: str, title: str, share_with: Optional[str], progress: Callable[[float], None]) -> dict:
+def _apps_script_upload(path: str, title: str, share_with: Optional[str], progress: Callable[[float], None],
+                        folder: Optional[str] = None) -> dict:
     size = os.path.getsize(path)
     if size > APPS_SCRIPT_MAX_BYTES:
         raise SheetsError(f"File export {size / 1048576:.0f} MB melebihi batas Google Apps Script "
@@ -213,6 +233,10 @@ def _apps_script_upload(path: str, title: str, share_with: Optional[str], progre
         data = base64.b64encode(f.read()).decode()
     progress(0.1)
     # the conversion runs inside the call (Apps Script stops at 6 minutes)
+    s = get_settings()
     out = _apps_script_call({"action": "upload", "name": title, "data": data, "shareWith": share_with,
-                             "role": get_settings().google_share_role}, timeout=420)
-    return {"id": out["id"], "url": out["url"], "sharedWith": out.get("sharedWith")}
+                             "role": s.google_share_role, "folder": folder, "linkAccess": s.google_share_link},
+                            timeout=420)
+    # an older script ignores folder / linkAccess: it answers without "linkAccess"
+    return {"id": out["id"], "url": out["url"], "sharedWith": out.get("sharedWith"),
+            "linkAccess": out.get("linkAccess"), "folderUrl": out.get("folderUrl")}

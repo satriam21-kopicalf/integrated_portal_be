@@ -24,6 +24,7 @@ Implausible lines of unposted opnames are left out of actual COGS (app/cost_cont
   PUT /api/cost-control/settings  (superadmin) {key: {good, warning, serious}}
 """
 import json
+import re
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Optional
@@ -507,6 +508,22 @@ def put_settings(body: dict = Body(...), user: dict = Depends(require_superadmin
     return JSONResponse({"settings": settings()})
 
 
+# quantity checks on ESB documents and valuation (see get_issues)
+QTY_ERROR_FACTOR = 200
+QTY_HISTORY_FROM = "2025-08-01"  # usual quantities are learnt from documents since the ESB roll-out
+QTY_MODULES = ("simple_manufacturing", "goods_receipt", "goods_delivery", "simple_purchase", "item_journal",
+               "simple_transfer", "goods_transfer_request")
+
+
+def _uom_factor(uom: Optional[str]) -> float:
+    """Base units in one document unit: "KG@1000GR" -> 1000, "PACK@500PCS" -> 500, "GR" -> 1."""
+    match = re.search(r"@\s*([\d.]+)", uom or "")
+    try:
+        return float(match.group(1)) if match else 1.0
+    except ValueError:
+        return 1.0
+
+
 @router.get("/issues")
 def get_issues(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Query(None),
                branch: Optional[str] = Query(None)):
@@ -516,7 +533,15 @@ def get_issues(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Qu
       hppAnomalies  an outlet's HPP of an item > 3x the network median HPP of that item in the period
                     (impact > Rp 5 M), e.g. a mis-entered purchase price
       usageSpikes   an item's theoretical usage per Rp of network net sales in a month > 3x its median
-                    month (value > Rp 50 M), e.g. a wrong recipe (BOM) quantity"""
+                    month (value > Rp 50 M), e.g. a wrong recipe (BOM) quantity
+    and two checks on the ESB documents behind the valuation:
+      quantityErrors  document lines (production, receipt, delivery, purchase, transfer, item journal)
+                      whose qty is > QTY_ERROR_FACTOR x the usual qty of that item in the same unit and
+                      document type (>= 1,000), e.g. grams typed into a KG field; bulk-order locations
+                      are left out (their quantities are large by nature)
+      stockSpikes     valuation periods in which an item's stock coming in at a location is
+                      > QTY_ERROR_FACTOR x its usual weekly inflow there: phantom stock that distorts
+                      HPP and COGS of the period until an opname removes it ("open" = still in stock)"""
     try:
         start, end = date_range(dateFrom, dateTo)
     except BadRequest as exc:
@@ -581,6 +606,50 @@ def get_issues(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Qu
             WHERE med.months >= 3 AND r.per_rp > 3 * med.med AND r.value > 50000000
               AND r.m BETWEEN date_trunc('month', %(start)s::date) AND %(end)s
             ORDER BY r.value DESC LIMIT 50""", params)
+        locations = db.fetch(f"SELECT DISTINCT location_id, branch_code FROM {PERIOD}")
+        loc_branch = {r["location_id"]: r["branch_code"] for r in locations}
+        qparams: dict[str, Any] = {"start": start, "end": end, "factor": QTY_ERROR_FACTOR, "since": QTY_HISTORY_FROM}
+        loc_cond = ""
+        if branch:
+            loc_cond = " AND d.location_id = ANY(%(locs)s)"
+            qparams["locs"] = [l for l, b in loc_branch.items() if b in parse_branches(branch)]
+        qty_errors = db.fetch(f"""
+            WITH l AS (
+                SELECT d.module, d.doc_num, d.doc_date, d.status_name, d.location_id, d.location_name, d.created_by,
+                       l.line_type, COALESCE(l.product_code, l.product_id, l.product_name) AS item, l.product_code,
+                       l.product_name, l.uom_name, l.qty, abs(l.qty) AS q
+                FROM {SCHEMA}.erp_documents d
+                JOIN {SCHEMA}.erp_document_lines l ON l.module = d.module AND l.doc_num = d.doc_num
+                WHERE d.deleted_at IS NULL AND d.module IN {QTY_MODULES!r} AND d.doc_date >= %(since)s
+                  AND l.qty IS NOT NULL AND l.qty <> 0 AND COALESCE(d.location_name, '') NOT ILIKE 'BULK%%'
+            ), m AS (
+                SELECT module, line_type, item, uom_name, percentile_cont(0.5) WITHIN GROUP (ORDER BY q) AS med, count(*) AS n
+                FROM l GROUP BY 1, 2, 3, 4
+            )
+            SELECT l.*, m.med, l.q / m.med AS factor
+            FROM l JOIN m USING (module, line_type, item, uom_name)
+            WHERE m.n >= 10 AND m.med > 0 AND l.q >= 1000 AND l.q > %(factor)s * m.med
+              AND l.doc_date BETWEEN %(start)s AND %(end)s{loc_cond.replace("d.location_id", "l.location_id")}
+            ORDER BY l.doc_date DESC, l.doc_num LIMIT 500""", qparams)
+        stock_spikes = db.fetch(f"""
+            WITH v AS (
+                SELECT location_id, location_name, period_start, period_end, product_id, product_name,
+                       COALESCE(purchase_qty, 0) + COALESCE(transfer_in_qty, 0) + COALESCE(manufacturing_in_qty, 0)
+                         + COALESCE(other_in_qty, 0) AS in_qty,
+                       COALESCE(opname_in_qty, 0) + COALESCE(opname_out_qty, 0) AS opname_qty, end_qty
+                FROM {SCHEMA}.inventory_valuation
+            ), m AS (
+                SELECT location_id, product_id, percentile_cont(0.5) WITHIN GROUP (ORDER BY in_qty) AS med, count(*) AS n
+                FROM v WHERE in_qty > 0 GROUP BY 1, 2
+            )
+            SELECT v.*, m.med, v.in_qty / m.med AS factor,
+                   (SELECT x.end_qty FROM {SCHEMA}.inventory_valuation x WHERE x.location_id = v.location_id
+                     AND x.product_id = v.product_id ORDER BY x.period_start DESC LIMIT 1) AS latest_end_qty
+            FROM v JOIN m USING (location_id, product_id)
+            WHERE m.n >= 8 AND v.in_qty >= 100000 AND v.in_qty > %(factor)s * m.med
+              AND COALESCE(v.location_name, '') NOT ILIKE 'BULK%%'
+              AND v.period_start BETWEEN %(start)s AND %(end)s{loc_cond.replace("d.location_id", "v.location_id")}
+            ORDER BY v.period_start DESC LIMIT 200""", qparams)
         names = branch_names()
         rows = period_rows(start, end, branch)
         sales: dict[str, float] = {}
@@ -613,6 +682,22 @@ def get_issues(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Qu
                 "month": r["m"].isoformat(), "productId": r["product_id"], "productName": r["product_name"], "unit": r["base_unit"],
                 "qty": _f(r["qty"]), "value": _f(r["value"]), "factor": round(_f(r["factor"]), 1),
             } for r in spikes],
+            "quantityErrors": [{
+                "module": r["module"], "docNum": r["doc_num"], "docDate": r["doc_date"].isoformat(), "status": r["status_name"],
+                "branchCode": loc_branch.get(r["location_id"]), "locationName": r["location_name"], "createdBy": r["created_by"],
+                "lineType": r["line_type"], "productCode": r["product_code"], "productName": r["product_name"],
+                "qty": _f(r["qty"]), "unit": r["uom_name"], "baseQty": _f(r["qty"]) * _uom_factor(r["uom_name"]),
+                "usualQty": round(_f(r["med"]), 3), "factor": round(_f(r["factor"])),
+            } for r in qty_errors],
+            "stockSpikes": [{
+                "branchCode": loc_branch.get(r["location_id"]), "locationName": r["location_name"],
+                "periodStart": r["period_start"].isoformat(), "periodEnd": r["period_end"].isoformat(),
+                "productId": r["product_id"], "productName": r["product_name"], "inQty": _f(r["in_qty"]),
+                "usualInQty": round(_f(r["med"]), 3), "factor": round(_f(r["factor"])), "opnameQty": _f(r["opname_qty"]),
+                "endQty": _f(r["end_qty"]), "latestEndQty": _f(r["latest_end_qty"]),
+                # still in stock: the latest closing stock holds most of the spike
+                "open": _f(r["latest_end_qty"]) > 0.5 * _f(r["in_qty"]),
+            } for r in stock_spikes],
             "withoutSales": sorted(({"branchCode": c, "branchName": names.get(c, c), "actualCogs": v}
                                     for c, v in costs.items() if sales.get(c, 0) <= 0 and v), key=lambda x: -x["actualCogs"]),
         }

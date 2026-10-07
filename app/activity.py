@@ -16,7 +16,7 @@ from app import database as db
 logger = logging.getLogger("activity")
 
 T = "integration_portal.activity_log"
-CATEGORIES = ("auth", "page", "filter", "transaction", "export", "user", "profile", "access")
+CATEGORIES = ("auth", "page", "filter", "transaction", "export", "user", "profile", "access", "system")
 MAX_DETAILS = 8000  # characters of JSON per entry
 
 
@@ -106,7 +106,33 @@ def summarize(date_from: date, date_to: date, **filters) -> dict:
         f"SELECT a.user_id, max(a.username) AS username, max(a.role) AS role, count(*)::int AS n, "
         f"count(*) FILTER (WHERE a.category = 'export')::int AS exports, max(a.created_at) AS last_at "
         f"FROM {T} a WHERE {where} AND a.user_id IS NOT NULL GROUP BY a.user_id ORDER BY n DESC LIMIT 10", params)
-    return {"totals": totals, "byCategory": {r["category"]: r["n"] for r in by_category}, "topUsers": top_users}
+    wib = "(a.created_at AT TIME ZONE 'Asia/Jakarta')"
+    by_day = db.fetch(
+        f"SELECT {wib}::date AS day, count(*)::int AS n, count(*) FILTER (WHERE a.status <> 'ok')::int AS issues, "
+        f"count(*) FILTER (WHERE a.category = 'export')::int AS exports, count(DISTINCT a.user_id)::int AS users "
+        f"FROM {T} a WHERE {where} GROUP BY 1 ORDER BY 1", params)
+    by_hour = db.fetch(f"SELECT extract(hour FROM {wib})::int AS hour, count(*)::int AS n FROM {T} a WHERE {where} GROUP BY 1",
+                       params)
+    by_status = db.fetch(f"SELECT a.status, count(*)::int AS n FROM {T} a WHERE {where} GROUP BY 1", params)
+    top_pages = db.fetch(f"SELECT a.page, count(*)::int AS n, count(DISTINCT a.user_id)::int AS users FROM {T} a "
+                         f"WHERE {where} AND a.page IS NOT NULL GROUP BY 1 ORDER BY n DESC LIMIT 8", params)
+    return {"totals": totals, "byCategory": {r["category"]: r["n"] for r in by_category}, "topUsers": top_users,
+            "byDay": by_day, "byHour": by_hour, "byStatus": {r["status"]: r["n"] for r in by_status}, "topPages": top_pages}
+
+
+def storage() -> dict:
+    """Everything the log holds now (whatever the filters): size of what a reset would remove."""
+    r = db.fetchrow(f"SELECT count(*)::int AS n, min(created_at) AS oldest, max(created_at) AS newest FROM {T}") or {}
+    return {"entries": r.get("n", 0), "oldest": r.get("oldest"), "newest": r.get("newest")}
+
+
+def reset(before: Optional[date] = None) -> int:
+    """Delete every entry (before=None) or those before a WIB day; returns how many were removed."""
+    with db.transaction(timeout_ms=600_000) as conn:
+        if before is None:
+            return conn.execute(f"DELETE FROM {T}").rowcount
+        return conn.execute(f"DELETE FROM {T} WHERE created_at < (%s::date)::timestamp AT TIME ZONE 'Asia/Jakarta'",
+                            (before.isoformat(),)).rowcount
 
 
 def default_range() -> tuple[date, date]:

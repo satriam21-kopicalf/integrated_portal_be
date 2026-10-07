@@ -467,3 +467,22 @@ def test_users_summary_is_superadmin_only(anon, store):
     login(anon, "superadmin", "Admin1234")
     body = anon.get("/api/users/summary").json()
     assert {"total", "active", "locked", "superadmins", "users", "withoutBranch", "active7d", "branchesCovered"} <= set(body)
+
+
+def test_activity_reset_is_superadmin_only_and_logged(anon, store, fake_db, monkeypatch):
+    from app import activity
+    calls = []
+    monkeypatch.setattr(activity, "reset", lambda before=None: calls.append(before) or 42)
+    login(anon, "kasir", "Kasir1234")
+    assert anon.request("DELETE", "/api/activity", json={"confirm": "RESET"}).status_code == 403
+    login(anon, "superadmin", "Admin1234")
+    assert anon.request("DELETE", "/api/activity", json={"confirm": "reset"}).status_code == 422   # exact word
+    assert anon.request("DELETE", "/api/activity", json={"confirm": "RESET", "before": "07-10-2026"}).status_code == 422
+    assert calls == []
+    res = anon.request("DELETE", "/api/activity", json={"confirm": "RESET", "before": "2026-10-01"})
+    assert res.status_code == 200 and res.json() == {"removed": 42, "before": "2026-10-01"}
+    assert anon.request("DELETE", "/api/activity", json={"confirm": "RESET"}).json()["before"] is None
+    from datetime import date
+    assert calls == [date(2026, 10, 1), None]
+    entry = [e for e in fake_db.activity if e["action"] == "system.logs_reset"]
+    assert len(entry) == 2 and entry[0]["username"] == "superadmin" and entry[0]["details"]["removed"] == 42

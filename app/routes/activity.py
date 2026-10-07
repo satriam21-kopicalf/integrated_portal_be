@@ -4,6 +4,8 @@
          ?dateFrom&dateTo (WIB days, default last 7) &user=<id> &category=export,auth &status=ok|failed|denied
          &role=user|superadmin &search &limit (<=200) &offset
     GET  /api/activity/summary    superadmin: totals, per category, most active users (same filters)
+    DELETE /api/activity          superadmin: reset the log now {"confirm": "RESET", "before": "YYYY-MM-DD" | null}
+                                  (null = everything); the reset itself is logged as the first new entry
     POST /api/activity/events     any signed-in user: what the dashboard reports itself
          {"action": "page.view" | "filter.change", "page": "/sales", "details": {...}}
 
@@ -18,12 +20,18 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from app import activity
+from app.config import get_settings
 from app.routes.auth import current_user, require_superadmin
 from app.utils import to_json_value
 
 router = APIRouter(prefix="/api/activity", tags=["activity"])
 
 CLIENT_ACTIONS = {"page.view", "filter.change"}
+
+
+class ResetRequest(BaseModel):
+    confirm: str = Field(max_length=10)
+    before: Optional[str] = None  # WIB day: entries before it are removed; None = all
 
 
 class ClientEvent(BaseModel):
@@ -89,7 +97,31 @@ def activity_summary(dateFrom: Optional[str] = None, dateTo: Optional[str] = Non
         "byCategory": s["byCategory"],
         "topUsers": [{"id": str(r["user_id"]), "username": r["username"], "role": r["role"], "count": r["n"],
                       "exports": r["exports"], "lastAt": to_json_value(r["last_at"])} for r in s["topUsers"]],
+        "byDay": [{"day": r["day"].isoformat(), "count": r["n"], "issues": r["issues"], "exports": r["exports"],
+                   "users": r["users"]} for r in s["byDay"]],
+        "byHour": sorted(({"hour": r["hour"], "count": r["n"]} for r in s["byHour"]), key=lambda h: h["hour"]),
+        "byStatus": s["byStatus"],
+        "topPages": [{"page": r["page"], "count": r["n"], "users": r["users"]} for r in s["topPages"]],
+        "storage": {k: to_json_value(v) for k, v in activity.storage().items()},
+        "retentionDays": get_settings().activity_retention_days,
     })
+
+
+@router.delete("")
+def reset_activity(body: ResetRequest, request: Request, user: dict = Depends(require_superadmin)):
+    """Superadmin: remove the log now instead of waiting for the daily clean-up."""
+    if body.confirm != "RESET":
+        return JSONResponse({"error": 'Ketik "RESET" untuk mengonfirmasi'}, status_code=422)
+    try:
+        before = date.fromisoformat(body.before) if body.before else None
+    except ValueError:
+        return JSONResponse({"error": "Format tanggal harus YYYY-MM-DD"}, status_code=422)
+    removed = activity.reset(before)
+    activity.record("system.logs_reset", user=user, request=request, page="/activity",
+                    summary=(f"Reset activity log: {removed:,} entri dihapus"
+                             + (f" (sebelum {before:%d-%m-%Y})" if before else " (semua)")),
+                    details={"removed": removed, "before": before.isoformat() if before else None})
+    return JSONResponse({"removed": removed, "before": before.isoformat() if before else None})
 
 
 @router.post("/events", status_code=204)

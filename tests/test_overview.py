@@ -102,6 +102,17 @@ def fake_hourly_branch_rows(f):
     return list(out.values())
 
 
+def fake_trend_hour_rows(f, start, end, by_channel=False):
+    out = {}
+    for r in HOURLY:
+        if start <= r["sales_date"] <= end and (not f.branch or r["branch_code"] in f.branch.split(",")):
+            k = (r["hour"], r["channel"]) if by_channel else (r["hour"],)
+            o = out.setdefault(k, {"hour": r["hour"], **({"channel": r["channel"]} if by_channel else {}), "bills": 0, "subtotal": 0})
+            o["bills"] += r["bills"]
+            o["subtotal"] += r["subtotal"]
+    return list(out.values())
+
+
 MENU_DAILY = [
     {"sales_date": date(2026, 9, 1), "branch_code": "CCI01", "channel": "Dine In", "menu_id": "1", "kind": "menu", "bills": 8, "qty": 12, "subtotal": 1_200_000, "discount": 0},
     {"sales_date": date(2026, 9, 2), "branch_code": "TGP17", "channel": "GoFood", "menu_id": "1", "kind": "menu", "bills": 4, "qty": 8, "subtotal": 800_000, "discount": 50_000},
@@ -128,6 +139,7 @@ def fake_aggregates(monkeypatch):
     monkeypatch.setattr(ov, "menu_rows", lambda f: [dict(m) for m in MENUS])
     monkeypatch.setattr(ov, "hourly_rows", fake_hourly_rows)
     monkeypatch.setattr(ov, "hourly_branch_rows", fake_hourly_branch_rows)
+    monkeypatch.setattr(ov, "trend_hour_rows", fake_trend_hour_rows)
     monkeypatch.setattr(ov, "menu_detail_rows", fake_menu_detail_rows)
     monkeypatch.setattr(ov, "branch_names", lambda: {"CCI01": "Kopi Calf Supratman", "TGP17": "Kopi Calf To Go Pamulang"})
     monkeypatch.setattr(ov, "freshness", lambda: {"dataFrom": "2026-08-01", "dataTo": "2026-09-02",
@@ -381,3 +393,36 @@ def test_deductions_offline_online(client):
     assert day2["offline"]["voidBills"] == 2 and day2["online"]["bills"] == 0
     cci = next(b for b in body["branchGroups"] if b["branchCode"] == "CCI01")
     assert cci["offline"]["voidBills"] == 2 and cci["online"]["voidBills"] == 0
+
+
+DAY_VS_DAY = "dateFrom=2026-09-01&dateTo=2026-09-01&compareFrom=2026-09-02&compareTo=2026-09-02"
+
+
+def test_day_vs_day_trend_per_hour(client):
+    body = client.get(f"/api/overview/trend?{DAY_VS_DAY}").json()
+    assert body["granularity"] == "hour"
+    assert [p["hour"] for p in body["series"]] == [9, 10, 11, 12]          # gaps between the first and last hour filled
+    h9 = body["series"][0]
+    assert (h9["subtotal"], h9["bills"], h9["previous"]["subtotal"], h9["previous"]["bills"]) == (1_000_000, 10, 500_000, 5)
+    assert body["series"][3]["previous"]["subtotal"] == 0 and body["series"][3]["channels"]["GoFood"]["bills"] == 5
+    assert body["series"][0]["nettSales"] is None                          # not kept per hour
+    assert client.get(f"/api/overview/trend?{DAY_VS_DAY}&granularity=day").json()["granularity"] == "day"
+
+
+def test_day_vs_day_busy_hours_menus_payments(client):
+    hourly = client.get(f"/api/overview/hourly?{DAY_VS_DAY}").json()
+    prev = hourly["previous"]
+    assert prev["from"] == prev["to"] == "2026-09-02" and prev["days"] == 1
+    assert [(h["hour"], h["bills"]) for h in prev["hours"]] == [(9, 5)] and prev["peakHour"] == 9
+
+    menus = client.get(f"/api/overview/menus?{Q}&limit=2").json()
+    top = menus["top"][0]
+    assert top["previousSubtotal"] == 2_000_000 and top["deltaPct"] == 0.0   # the fake menu table ignores dates
+    assert menus["totals"]["previousSubtotal"] == 2_500_000 and menus["categories"][0]["deltaPct"] == 0.0
+
+    pay = client.get(f"/api/overview/payments?{Q}").json()
+    qris = next(m for m in pay["methods"] if m["method"] == "Qris")
+    assert qris["previousSubtotal"] == 2_100_000 and qris["deltaPct"] == round((1_500_000 - 2_100_000) / 2_100_000 * 100, 2)
+    gofood = next(m for m in pay["methods"] if m["method"] == "GOFOOD_INT")
+    assert gofood["previousSubtotal"] == 0 and gofood["deltaPct"] is None
+    assert pay["previous"] == {"subtotal": 2_100_000, "bills": 11} and pay["types"][0]["previousSubtotal"] == 2_100_000

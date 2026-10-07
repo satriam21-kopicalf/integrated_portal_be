@@ -347,6 +347,37 @@ def build_trend(f: Filters, granularity: str) -> dict:
     return {"granularity": granularity, "series": out}
 
 
+def trend_hour_rows(f: Filters, start: date, end: date, by_channel: bool = False) -> list[dict]:
+    """Bills and sales per hour (and channel) over [start, end]."""
+    where, params = f.where(start, end)
+    cols = "hour, channel" if by_channel else "hour"
+    return db.fetch(f"SELECT {cols}, sum(bills)::int AS bills, sum(subtotal) AS subtotal FROM {HOURLY} "
+                    f"WHERE {where} GROUP BY {'1, 2' if by_channel else '1'}", params)
+
+
+def build_trend_hourly(f: Filters) -> dict:
+    """Sales per hour of the day (summed over the period's days) vs the comparison period: the trend of
+    a single day, e.g. Monday 5 Oct vs Monday 28 Sep. Nett sales are not kept per hour."""
+    def per_hour(start: date, end: date, by_channel: bool = False) -> list[dict]:
+        return trend_hour_rows(f, start, end, by_channel)
+
+    cur = {r["hour"]: r for r in per_hour(f.start, f.end)}
+    prev = {r["hour"]: r for r in per_hour(f.prev_start, f.prev_end)} if f.prev_complete else {}
+    channels: dict[int, dict] = {}
+    for r in per_hour(f.start, f.end, True):
+        channels.setdefault(r["hour"], {})[r["channel"]] = {"subtotal": _f(r["subtotal"]), "bills": int(r["bills"])}
+    hours = sorted(set(cur) | set(prev))
+    out = []
+    for h in range(hours[0], hours[-1] + 1) if hours else []:
+        c, pv = cur.get(h), prev.get(h)
+        out.append({"date": f.start.isoformat(), "hour": h, "days": f.days,
+                    "subtotal": _f(c["subtotal"]) if c else 0.0, "nettSales": None, "bills": int(c["bills"]) if c else 0,
+                    "discountPct": None, "channels": channels.get(h, {}),
+                    "previous": {"subtotal": _f(pv["subtotal"]) if pv else 0.0, "nettSales": None,
+                                 "bills": int(pv["bills"]) if pv else 0}})
+    return {"granularity": "hour", "series": out}
+
+
 def build_channels(f: Filters, granularity: str) -> dict:
     cur = sales_rows(f, f.start, f.end, ("sales_date", "channel"))
     prev = {r["channel"]: _f(r["subtotal"]) for r in prev_rows(f, ("channel",))}
@@ -434,7 +465,7 @@ def hourly_rows(f: Filters) -> list[dict]:
                     f"FROM ({src}) s GROUP BY 1, 2", params)
 
 
-def build_hourly(f: Filters) -> dict:
+def build_hourly(f: Filters, with_previous: bool = True) -> dict:
     rows = hourly_rows(f)
     fresh = freshness()
     data_from = date.fromisoformat(fresh["dataFrom"]) if fresh["dataFrom"] else None
@@ -448,7 +479,12 @@ def build_hourly(f: Filters) -> dict:
                       "avgBills": r2(ratio(int(r["bills"]), n) or 0.0), "avgSubtotal": r2(ratio(_f(r["subtotal"]), n) or 0.0)})
     cells.sort(key=lambda c: (c["dow"], c["hour"]))
     peak = max(cells, key=lambda c: c["avgBills"], default=None)
-    return {"daysPerDow": days, "cells": cells, "peak": peak}
+    out = {"daysPerDow": days, "cells": cells, "peak": peak}
+    if with_previous:
+        # the comparison period per hour (averaged per day), for "vs" lines and peak shifts
+        p = hours_profile(replace(f, start=f.prev_start, end=f.prev_end)) if f.prev_complete else None
+        out["previous"] = p and {k: p[k] for k in ("from", "to", "days", "bills", "subtotal", "avgBillsPerDay", "hours", "peakHour")}
+    return out
 
 
 def _add_months(d: date, n: int) -> date:
@@ -498,6 +534,14 @@ def menu_rows(f: Filters) -> list[dict]:
 
 def build_menus(f: Filters, limit: int, sort: str) -> dict:
     rows = menu_rows(f)
+    prev_rows_ = menu_rows(replace(f, start=f.prev_start, end=f.prev_end)) if f.prev_complete else []
+    prev_menu = {r["menu_id"]: r for r in prev_rows_ if r["kind"] == "menu"}
+    prev_cat: dict[str, float] = {}
+    for r in prev_rows_:
+        if r["kind"] == "menu":
+            prev_cat[r["category"]] = prev_cat.get(r["category"], 0.0) + _f(r["subtotal"])
+    prev_total = sum(prev_cat.values())
+    prev_qty = sum(_f(r["qty"]) for r in prev_rows_ if r["kind"] == "menu")
     menus = [r for r in rows if r["kind"] == "menu"]
     order = "qty" if sort == "qty" else "subtotal"
     top = sorted(menus, key=lambda m: (-_f(m[order]), m["menu_id"]))[:limit]
@@ -527,6 +571,9 @@ def build_menus(f: Filters, limit: int, sort: str) -> dict:
     for g in categories.values():
         g["share"] = r2(ratio(g["subtotal"] * 100, menu_total))
         g["details"].sort(key=lambda d: -d["subtotal"])
+        if f.prev_complete:
+            g["previousSubtotal"] = prev_cat.get(g["category"], 0.0)
+            g["deltaPct"] = delta_pct(g["subtotal"], g["previousSubtotal"])
     groups: dict[str, dict] = {}
     for a in addons:
         g = groups.setdefault(a["category_detail"], {"group": a["category_detail"], "qty": 0.0, "subtotal": 0.0, "options": []})
@@ -538,12 +585,22 @@ def build_menus(f: Filters, limit: int, sort: str) -> dict:
         for o in g["options"]:
             o["share"] = r2(ratio(o["qty"] * 100, g["qty"]))
         g["options"] = g["options"][:10]
+    def previous(m: dict) -> dict:
+        if not f.prev_complete:
+            return {}
+        pm = prev_menu.get(m["menu_id"])
+        pq, ps = (_f(pm["qty"]), _f(pm["subtotal"])) if pm else (0.0, 0.0)
+        return {"previousQty": pq, "previousSubtotal": ps, "deltaPct": delta_pct(_f(m["subtotal"]), ps),
+                "qtyDeltaPct": delta_pct(_f(m["qty"]), pq)}
+
     return {
-        "totals": {"subtotal": menu_total, "qty": qty_total},
+        "totals": {"subtotal": menu_total, "qty": qty_total,
+                   **({"previousSubtotal": prev_total, "previousQty": prev_qty,
+                       "deltaPct": delta_pct(menu_total, prev_total)} if f.prev_complete else {})},
         "top": [{"menuId": m["menu_id"], "name": m["menu_name"], "category": m["category"],
                  "categoryDetail": m["category_detail"], "bills": m["bills"], "qty": _f(m["qty"]),
                  "subtotal": _f(m["subtotal"]), "discount": _f(m["discount"]),
-                 "share": r2(ratio(_f(m["subtotal"]) * 100, menu_total))} for m in top],
+                 "share": r2(ratio(_f(m["subtotal"]) * 100, menu_total)), **previous(m)} for m in top],
         "categories": sorted(categories.values(), key=lambda g: -g["subtotal"]),
         "addons": sorted(groups.values(), key=lambda g: -g["qty"]),
     }
@@ -764,19 +821,30 @@ def build_monthly(f: Filters) -> dict:
 def build_payments(f: Filters) -> dict:
     rows = sales_rows(f, f.start, f.end, ("payment_type", "payment_method"))
     t = totals(rows)
+    prev = {(r["payment_type"], r["payment_method"]): r for r in prev_rows(f, ("payment_type", "payment_method"))}
+    pt = totals(list(prev.values()))
     types: dict[str, dict] = {}
     methods = []
     for r in rows:
         bills, subtotal = int(r["bills"]), _f(r["subtotal"])
+        pv = prev.get((r["payment_type"], r["payment_method"]))
+        ps = _f(pv["subtotal"]) if pv else 0.0
         methods.append({"type": r["payment_type"], "method": r["payment_method"], "bills": bills, "subtotal": subtotal,
-                        "share": r2(ratio(subtotal * 100, t["subtotal"])), "billShare": r2(ratio(bills * 100, t["bills"]))})
+                        "share": r2(ratio(subtotal * 100, t["subtotal"])), "billShare": r2(ratio(bills * 100, t["bills"])),
+                        **({"previousSubtotal": ps, "previousBills": int(pv["bills"]) if pv else 0,
+                            "previousShare": r2(ratio(ps * 100, pt["subtotal"])), "deltaPct": delta_pct(subtotal, ps)}
+                           if f.prev_complete else {})})
         g = types.setdefault(r["payment_type"], {"type": r["payment_type"], "bills": 0, "subtotal": 0.0})
         g["bills"] += bills
         g["subtotal"] += subtotal
     for g in types.values():
         g["share"] = r2(ratio(g["subtotal"] * 100, t["subtotal"]))
+        if f.prev_complete:
+            g["previousSubtotal"] = sum(_f(v["subtotal"]) for (ty, _), v in prev.items() if ty == g["type"])
+            g["deltaPct"] = delta_pct(g["subtotal"], g["previousSubtotal"])
     return {"methods": sorted(methods, key=lambda m: -m["subtotal"]),
-            "types": sorted(types.values(), key=lambda g: -g["subtotal"])}
+            "types": sorted(types.values(), key=lambda g: -g["subtotal"]),
+            "previous": {"subtotal": pt["subtotal"], "bills": pt["bills"]} if f.prev_complete else None}
 
 
 BASKET_COLS = ("sum(menu_lines)::int AS lines, sum(item_qty) AS qty, sum(bills_with_beverage)::int AS bev, "
@@ -821,7 +889,7 @@ MAX_COMPARE_BRANCHES = 8
 
 def hours_profile(f: Filters) -> dict:
     """Busy hours of one period: per hour (all weekdays) and per weekday x hour, averaged per day."""
-    h = build_hourly(f)
+    h = build_hourly(f, with_previous=False)
     days = sum(h["daysPerDow"].values())
     by_hour: dict[int, dict] = {}
     for c in h["cells"]:
@@ -1130,6 +1198,13 @@ def get_meta():
     return respond("meta", None, "", build)
 
 
+@router.get("/health")
+def get_health():
+    """Company health over the whole ESB history (network level, not filtered): app/health.py."""
+    from app.health import build_health
+    return respond("health", None, today().isoformat(), lambda: build_health(today(), data_start()))
+
+
 @router.get("/kpis")
 def get_kpis(dateFrom: Optional[str] = None, dateTo: Optional[str] = None,
              branch: Optional[str] = None, channel: Optional[str] = None):
@@ -1140,8 +1215,11 @@ def get_kpis(dateFrom: Optional[str] = None, dateTo: Optional[str] = None,
 @router.get("/trend")
 def get_trend(dateFrom: Optional[str] = None, dateTo: Optional[str] = None, branch: Optional[str] = None,
               channel: Optional[str] = None, granularity: Optional[str] = None):
-    """Sales per day/week/month with the previous period shifted onto the same timeline."""
+    """Sales per day/week/month with the previous period shifted onto the same timeline; per hour
+    (granularity=hour, the default for a single day) against the comparison period's hours."""
     def build(f):
+        if granularity == "hour" or (granularity not in GRANULARITIES and f.days == 1):
+            return build_trend_hourly(f)
         return build_trend(f, resolve_granularity(granularity, f.days))
     return endpoint("trend", granularity or "", build, dateFrom, dateTo, branch, channel)
 

@@ -557,26 +557,59 @@ def quantity_checks() -> dict:
         WHERE m.n >= 10 AND m.med > 0 AND l.q >= 1000 AND l.q > %(factor)s * m.med
         ORDER BY l.doc_date DESC, l.doc_num LIMIT 5000""", params)
     spikes = db.fetch(f"""
-        WITH v AS (
+        WITH v0 AS (
             SELECT location_id, location_name, period_start, period_end, product_id, product_name,
                    COALESCE(purchase_qty, 0) + COALESCE(transfer_in_qty, 0) + COALESCE(manufacturing_in_qty, 0)
                      + COALESCE(other_in_qty, 0) AS in_qty,
+                   -(COALESCE(transfer_out_qty, 0) + COALESCE(manufacturing_out_qty, 0) + COALESCE(other_out_qty, 0)) AS out_qty,
                    COALESCE(opname_in_qty, 0) + COALESCE(opname_out_qty, 0) AS opname_qty, end_qty
             FROM {SCHEMA}.inventory_valuation
+        ), v AS (
+            SELECT v0.*, 'in' AS direction, in_qty AS qty FROM v0
+            UNION ALL
+            SELECT v0.*, 'out' AS direction, out_qty AS qty FROM v0
         ), m AS (
-            SELECT location_id, product_id, percentile_cont(0.5) WITHIN GROUP (ORDER BY in_qty) AS med, count(*) AS n
-            FROM v WHERE in_qty > 0 GROUP BY 1, 2
+            SELECT direction, location_id, product_id, percentile_cont(0.5) WITHIN GROUP (ORDER BY qty) AS med, count(*) AS n
+            FROM v WHERE qty > 0 GROUP BY 1, 2, 3
         )
-        SELECT v.*, m.med, v.in_qty / m.med AS factor,
+        SELECT v.*, m.med, v.qty / m.med AS factor,
                (SELECT x.end_qty FROM {SCHEMA}.inventory_valuation x WHERE x.location_id = v.location_id
                  AND x.product_id = v.product_id ORDER BY x.period_start DESC LIMIT 1) AS latest_end_qty
-        FROM v JOIN m USING (location_id, product_id)
-        WHERE m.n >= 8 AND v.in_qty >= 100000 AND v.in_qty > %(factor)s * m.med
+        FROM v JOIN m USING (direction, location_id, product_id)
+        WHERE m.n >= 8 AND v.qty >= 100000 AND v.qty > %(factor)s * m.med
           AND COALESCE(v.location_name, '') NOT ILIKE 'BULK%%'
         ORDER BY v.period_start DESC LIMIT 2000""", params)
     out = {"locBranch": loc_branch, "quantityErrors": errors, "stockSpikes": spikes}
     _qty_cache.set(key, out, QTY_CACHE_TTL)
     return out
+
+
+NEGATIVE_STOCK_FLOOR = 10_000_000  # list negative balances worth more than Rp 10 M
+
+
+def negative_book_stock(end: date, locations: list[str], loc_branch: dict) -> dict:
+    """Closing book stock of the last opname period starting by `end`: positive and negative balances,
+    and the largest negative ones. A negative balance = ESB recorded more going out than coming in
+    (a receipt or production not entered yet, or a wrong quantity going out)."""
+    period = db.fetchrow(f"SELECT max(period_start) AS p FROM {SCHEMA}.inventory_valuation WHERE period_start <= %s", (end,))
+    if not period or not period.get("p") or not locations:
+        return {"periodStart": None, "positive": 0.0, "negative": 0.0, "items": []}
+    p = period["p"]
+    sold = {r["location_id"] for r in db.fetch(f"SELECT DISTINCT location_id FROM {PERIOD} WHERE net_sales > 0")}
+    locs = [l for l in locations if l in sold]
+    totals = db.fetchrow(f"""
+        SELECT COALESCE(sum(end_hpp) FILTER (WHERE end_hpp > 0), 0) AS pos, COALESCE(sum(end_hpp) FILTER (WHERE end_hpp < 0), 0) AS neg
+        FROM {SCHEMA}.inventory_valuation WHERE period_start = %s AND location_id = ANY(%s)""", (p, locs)) or {}
+    items = db.fetch(f"""
+        SELECT location_id, location_name, product_id, product_name, end_qty, end_hpp
+        FROM {SCHEMA}.inventory_valuation
+        WHERE period_start = %s AND location_id = ANY(%s) AND end_hpp < -%s
+        ORDER BY end_hpp LIMIT 100""", (p, locs, NEGATIVE_STOCK_FLOOR))
+    return {
+        "periodStart": p.isoformat(), "positive": _f(totals.get("pos")), "negative": _f(totals.get("neg")),
+        "items": [{"branchCode": loc_branch.get(r["location_id"]), "locationName": r["location_name"], "productId": r["product_id"],
+                   "productName": r["product_name"], "qty": _f(r["end_qty"]), "value": _f(r["end_hpp"])} for r in items],
+    }
 
 
 @router.get("/issues")
@@ -594,9 +627,12 @@ def get_issues(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Qu
                       whose qty is > QTY_ERROR_FACTOR x the usual qty of that item in the same unit and
                       document type (>= 1,000), e.g. grams typed into a KG field; bulk-order locations
                       are left out (their quantities are large by nature)
-      stockSpikes     valuation periods in which an item's stock coming in at a location is
-                      > QTY_ERROR_FACTOR x its usual weekly inflow there: phantom stock that distorts
-                      HPP and COGS of the period until an opname removes it ("open" = still in stock)"""
+      stockSpikes     valuation periods in which an item's stock coming in (direction "in") or going out
+                      other than by sales ("out": production material, transfer, item journal) at a location
+                      is > QTY_ERROR_FACTOR x its usual weekly flow there: phantom stock that distorts HPP
+                      and COGS until it is corrected ("open" = still in the books)
+      bookStock       closing book stock at the end of the range: positive and negative balances and the
+                      largest negative ones (> NEGATIVE_STOCK_FLOOR)"""
     try:
         start, end = date_range(dateFrom, dateTo)
     except BadRequest as exc:
@@ -669,6 +705,7 @@ def get_issues(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Qu
             return start <= day <= end and (wanted is None or loc_branch.get(location_id) in wanted)
 
         qty_errors = [r for r in checks["quantityErrors"] if keep(r["doc_date"], r["location_id"])]
+        book_stock = negative_book_stock(end, [l for l, b in loc_branch.items() if wanted is None or b in wanted], loc_branch)
         stock_spikes = [r for r in checks["stockSpikes"] if keep(r["period_start"], r["location_id"])]
         names = branch_names()
         rows = period_rows(start, end, branch)
@@ -712,12 +749,15 @@ def get_issues(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Qu
             "stockSpikes": [{
                 "branchCode": loc_branch.get(r["location_id"]), "locationName": r["location_name"],
                 "periodStart": r["period_start"].isoformat(), "periodEnd": r["period_end"].isoformat(),
-                "productId": r["product_id"], "productName": r["product_name"], "inQty": _f(r["in_qty"]),
-                "usualInQty": round(_f(r["med"]), 3), "factor": round(_f(r["factor"])), "opnameQty": _f(r["opname_qty"]),
-                "endQty": _f(r["end_qty"]), "latestEndQty": _f(r["latest_end_qty"]),
-                # still in stock: the latest closing stock holds most of the spike
-                "open": _f(r["latest_end_qty"]) > 0.5 * _f(r["in_qty"]),
+                "productId": r["product_id"], "productName": r["product_name"], "direction": r["direction"],
+                # kept as inQty / usualInQty for the "in" direction (older dashboards read these names)
+                "inQty": _f(r["qty"]), "usualInQty": round(_f(r["med"]), 3), "factor": round(_f(r["factor"])),
+                "opnameQty": _f(r["opname_qty"]), "endQty": _f(r["end_qty"]), "latestEndQty": _f(r["latest_end_qty"]),
+                # still in the books: the latest closing stock holds most of the spike (above or below zero)
+                "open": (_f(r["latest_end_qty"]) > 0.5 * _f(r["qty"])) if r["direction"] == "in"
+                        else (_f(r["latest_end_qty"]) < -0.5 * _f(r["qty"])),
             } for r in stock_spikes],
+            "bookStock": book_stock,
             "withoutSales": sorted(({"branchCode": c, "branchName": names.get(c, c), "actualCogs": v}
                                     for c, v in costs.items() if sales.get(c, 0) <= 0 and v), key=lambda x: -x["actualCogs"]),
         }

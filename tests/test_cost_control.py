@@ -120,8 +120,20 @@ def test_issues_report_quantity_errors_and_stock_spikes(monkeypatch):
                      "qty": 25163, "uom_name": "KG@1000GR", "med": 20.16, "factor": 1248.2}]
         if "inventory_valuation" in sql and "latest_end_qty" in sql:
             return [{"location_id": "9", "location_name": "Kopi Calf Supratman Bandung", "period_start": d(2026, 9, 22),
-                     "period_end": d(2026, 9, 30), "product_id": "77", "product_name": "BAWANG PUTIH KUPAS", "in_qty": 250000,
-                     "opname_qty": 0, "end_qty": 249880, "med": 500, "factor": 500, "latest_end_qty": 249700}]
+                     "period_end": d(2026, 9, 30), "product_id": "77", "product_name": "BAWANG PUTIH KUPAS", "direction": "in",
+                     "qty": 250000, "opname_qty": 0, "end_qty": 249880, "med": 500, "factor": 500, "latest_end_qty": 249700},
+                    {"location_id": "9", "location_name": "Kopi Calf Supratman Bandung", "period_start": d(2026, 7, 8),
+                     "period_end": d(2026, 7, 14), "product_id": "88", "product_name": "BEANS PREMIUM", "direction": "out",
+                     "qty": 55714333, "opname_qty": 0, "end_qty": -55694540, "med": 40000, "factor": 1393, "latest_end_qty": -55626300}]
+        if "max(period_start)" in sql:
+            return [{"p": d(2026, 9, 22)}]
+        if "DISTINCT location_id FROM" in sql and "net_sales > 0" in sql:
+            return [{"location_id": "9"}, {"location_id": "174"}]
+        if "FILTER (WHERE end_hpp > 0)" in sql:
+            return [{"pos": 6_000_000_000, "neg": -10_000_000_000}]
+        if "end_hpp < -" in sql:
+            return [{"location_id": "9", "location_name": "Kopi Calf Supratman Bandung", "product_id": "88",
+                     "product_name": "BEANS PREMIUM", "end_qty": -55626300, "end_hpp": -9_984_000_000}]
         return []
 
     monkeypatch.setattr(db, "fetch", fetch)
@@ -134,7 +146,14 @@ def test_issues_report_quantity_errors_and_stock_spikes(monkeypatch):
     q = body["quantityErrors"][0]
     assert q["branchCode"] == "CCI01" and q["baseQty"] == 25_163_000 and q["factor"] == 1248 and q["unit"] == "KG@1000GR"
     s = body["stockSpikes"][0]
-    assert s["open"] is True and s["factor"] == 500 and s["branchCode"] == "CCI01"
+    assert s["open"] is True and s["factor"] == 500 and s["branchCode"] == "CCI01" and s["direction"] == "in"
+    out = body["stockSpikes"][1]
+    assert out["direction"] == "out" and out["open"] is True and out["inQty"] == 55714333
+    bs = body["bookStock"]
+    assert bs["periodStart"] == "2026-09-22" and bs["negative"] == -10_000_000_000
+    assert bs["items"][0]["productName"] == "BEANS PREMIUM" and bs["items"][0]["branchCode"] == "CCI01"
+    neg_params = next(p for q, p in queries if "end_hpp < -" in q)
+    assert neg_params[1] == ["9"]   # branch filter CCI01 -> its selling location only
     # bulk-order locations are excluded; usual qty learnt from the whole history, computed once and filtered per request
     qty_sql, qty_params = next((s, p) for s, p in queries if "l.q /" in s)
     assert "NOT ILIKE 'BULK%%'" in qty_sql and qty_params["since"] == cc.QTY_HISTORY_FROM

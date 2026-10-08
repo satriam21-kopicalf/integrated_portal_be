@@ -19,8 +19,8 @@ Only fields that are 100% filled are used (integrated_portal/docs/overview-analy
 /growth: sales growth on subtotal against the previous period, the same days a year earlier or
 bucket over bucket (per day), with the branches and channels behind it.
 
-/average-sales: one day per branch against the average of the same weekday in the period
-(gross sales, pending = open bills of that day, variance %).
+/average-sales: per branch, gross sales per day of the period against the comparison period
+(optionally one weekday only), with pending (open) bills and variance %.
 
 Drill-down endpoints (the dashboard's detail drawers): /hourly-compare (busy hours of two periods
 or of several branches), /breakdown (sales by branch / channel / payment / date / type, optionally
@@ -1086,56 +1086,70 @@ BREAKDOWN = {"branch": "branch_code", "channel": "channel", "payment": "payment_
              "paymentType": "payment_type", "date": "sales_date", "type": "tx_type"}
 
 
-def weekday_rows(f: Filters, isodow: int, exclude: date) -> list[dict]:
-    """Gross sales per branch on one weekday (1 = Monday) of the period, without `exclude`; days = dates with sales."""
-    where, params = f.where(f.start, f.end)
+WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def branch_type_rows(f: Filters, start: date, end: date, isodow: Optional[int]) -> list[dict]:
+    """Per branch and transaction type: bills, subtotal and the number of dates with transactions (one weekday or all)."""
+    where, params = f.where(start, end)
+    if isodow:
+        where += " AND extract(isodow FROM sales_date) = %(dow)s"
+        params["dow"] = isodow
     return db.fetch(
-        f"""SELECT branch_code, count(DISTINCT sales_date)::int AS days, sum(bills)::int AS bills, sum(subtotal) AS subtotal
-            FROM {DAILY} WHERE {where} AND tx_type = 'sales' AND extract(isodow FROM sales_date) = %(dow)s
-              AND sales_date <> %(exclude)s
-            GROUP BY 1""",
-        {**params, "dow": isodow, "exclude": exclude})
+        f"""SELECT branch_code, tx_type, count(DISTINCT sales_date)::int AS days, sum(bills)::int AS bills, sum(subtotal) AS subtotal
+            FROM {DAILY} WHERE {where} AND tx_type IN ('sales', 'open') GROUP BY 1, 2""",
+        params)
 
 
-def build_average_sales(f: Filters, day: date) -> dict:
-    """Gross sales of `day` per branch against the average of the same weekday in the period.
-
-    Average = gross sales on that weekday in the period (the day itself left out) ÷ the number of those
-    days on which the branch sold; pending = open (unfinished) bills of the day; total = sales + pending;
-    variance % = (total − average) ÷ average × 100.
-    """
-    dow = day.isoweekday()
-    dates = []
-    d = f.start
-    while d <= f.end:
-        if d.isoweekday() == dow and d != day:
-            dates.append(d.isoformat())
+def _calendar_days(start: date, end: date, isodow: Optional[int]) -> int:
+    n, d = 0, start
+    while d <= end:
+        n += not isodow or d.isoweekday() == isodow
         d += timedelta(days=1)
-    avg = {r["branch_code"]: r for r in weekday_rows(f, dow, day)}
-    cur: dict[str, dict] = {}
-    for r in sales_rows(f, day, day, ("branch_code", "tx_type"), tx_type=None):
-        if r["tx_type"] in ("sales", "open"):
-            c = cur.setdefault(r["branch_code"], {"sales": 0.0, "pending": 0.0, "bills": 0})
-            c["sales" if r["tx_type"] == "sales" else "pending"] += _f(r["subtotal"])
+    return n
+
+
+def build_average_sales(f: Filters, isodow: Optional[int]) -> dict:
+    """Average gross sales per day per branch: this period against the comparison period (one weekday or all days).
+
+    Average = gross sales ÷ days on which the branch sold (in the period, on that weekday when chosen);
+    pending = open (unfinished) bills of the period; total = gross sales + pending;
+    variance % = (average − comparison average) ÷ comparison average × 100.
+    """
+    def collect(rows: list[dict]) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for r in rows:
+            o = out.setdefault(r["branch_code"], {"sales": 0.0, "pending": 0.0, "bills": 0, "days": 0})
             if r["tx_type"] == "sales":
-                c["bills"] += int(r["bills"] or 0)
+                o.update(sales=_f(r["subtotal"]), bills=int(r["bills"] or 0), days=int(r["days"] or 0))
+            else:
+                o["pending"] = _f(r["subtotal"])
+        return out
+
+    cur = collect(branch_type_rows(f, f.start, f.end, isodow))
+    cmp = collect(branch_type_rows(f, f.prev_start, f.prev_end, isodow)) if f.prev_complete else {}
     names = branch_names()
     rows = []
-    for code in sorted(set(avg) | set(cur)):
-        a = avg.get(code)
-        c = cur.get(code, {"sales": 0.0, "pending": 0.0, "bills": 0})
-        average = _f(a["subtotal"]) / a["days"] if a and a["days"] else None
-        total = c["sales"] + c["pending"]
-        rows.append({"key": code, "label": names.get(code, code), "averageSales": r2(average), "averageDays": a["days"] if a else 0,
-                     "pendingSales": c["pending"], "sales": c["sales"], "bills": c["bills"], "totalSales": total,
-                     "variancePct": delta_pct(total, average) if average else None})
+    for code in sorted(set(cur) | {c for c, v in cmp.items() if v["sales"]}):
+        c = cur.get(code, {"sales": 0.0, "pending": 0.0, "bills": 0, "days": 0})
+        p = cmp.get(code)
+        average = c["sales"] / c["days"] if c["days"] else None
+        previous = p["sales"] / p["days"] if p and p["days"] else None
+        rows.append({"key": code, "label": names.get(code, code), "days": c["days"], "averageSales": r2(average),
+                     "compareAverage": r2(previous), "pendingSales": c["pending"], "sales": c["sales"], "bills": c["bills"],
+                     "totalSales": c["sales"] + c["pending"],
+                     "variancePct": delta_pct(average, previous) if average is not None and previous else None})
     rows.sort(key=lambda r: -(r["averageSales"] or 0))
-    t_avg = sum(r["averageSales"] or 0 for r in rows)
-    t_pending = sum(r["pendingSales"] for r in rows)
     t_sales = sum(r["sales"] for r in rows)
-    return {"date": day.isoformat(), "weekday": dow, "averageDates": dates,
-            "totals": {"averageSales": r2(t_avg), "pendingSales": t_pending, "sales": t_sales, "totalSales": t_sales + t_pending,
-                       "variancePct": delta_pct(t_sales + t_pending, t_avg) if t_avg else None},
+    t_pending = sum(r["pendingSales"] for r in rows)
+    t_avg = sum(r["averageSales"] or 0 for r in rows)
+    t_prev = sum(r["compareAverage"] or 0 for r in rows)
+    return {"weekday": isodow, "weekdayName": WEEKDAY_NAMES[isodow - 1] if isodow else None,
+            "days": _calendar_days(f.start, f.end, isodow),
+            "compareDays": _calendar_days(f.prev_start, f.prev_end, isodow) if f.prev_complete else 0,
+            "totals": {"averageSales": r2(t_avg), "compareAverage": r2(t_prev) if cmp else None, "pendingSales": t_pending,
+                       "sales": t_sales, "totalSales": t_sales + t_pending,
+                       "variancePct": delta_pct(t_avg, t_prev) if cmp and t_prev else None},
             "rows": rows}
 
 
@@ -1358,15 +1372,12 @@ def get_growth(dateFrom: Optional[str] = None, dateTo: Optional[str] = None, bra
 
 
 @router.get("/average-sales")
-def get_average_sales(date_: Optional[str] = Query(None, alias="date"), dateFrom: Optional[str] = None,
-                      dateTo: Optional[str] = None, branch: Optional[str] = None, channel: Optional[str] = None):
-    """One day (default: the last day of the period) per branch vs the average of the same weekday in the period."""
-    def build(f):
-        day = _parse_date(date_, "date") if date_ else f.end
-        if day < f.data_from or day > today():
-            raise BadRequest(f"date must be between {f.data_from.isoformat()} and today")
-        return build_average_sales(f, day)
-    return drill("average-sales", date_ or "", build, dateFrom, dateTo, branch, channel)
+def get_average_sales(dateFrom: Optional[str] = None, dateTo: Optional[str] = None, branch: Optional[str] = None,
+                      channel: Optional[str] = None, weekday: Optional[int] = None):
+    """Average gross sales per day per branch vs the comparison period; weekday = 1 (Monday) .. 7 for one weekday only."""
+    if weekday is not None and not 1 <= weekday <= 7:
+        return JSONResponse({"error": "weekday must be 1 (Monday) to 7 (Sunday)"}, status_code=400)
+    return endpoint("average-sales", str(weekday or ""), lambda f: build_average_sales(f, weekday), dateFrom, dateTo, branch, channel)
 
 
 def drill(name: str, extra: str, build: Callable[[Filters], dict], dateFrom, dateTo, branch, channel):

@@ -428,23 +428,30 @@ def test_day_vs_day_busy_hours_menus_payments(client):
     assert pay["previous"] == {"subtotal": 2_100_000, "bills": 11} and pay["types"][0]["previousSubtotal"] == 2_100_000
 
 
-def test_average_sales_same_weekday(client, monkeypatch):
-    seen = {}
+def test_average_sales_per_day_vs_comparison(client, monkeypatch):
+    calls = []
 
-    def fake_weekday_rows(f, isodow, exclude):
-        seen.update(dow=isodow, exclude=exclude)
-        return [{"branch_code": "CCI01", "days": 2, "bills": 40, "subtotal": 4_000_000},
-                {"branch_code": "OLD01", "days": 1, "bills": 5, "subtotal": 500_000}]
-    monkeypatch.setattr(ov, "weekday_rows", fake_weekday_rows)
-    body = client.get(f"/api/overview/average-sales?{Q}&date=2026-09-01").json()
-    assert body["date"] == "2026-09-01" and body["weekday"] == 2 and seen == {"dow": 2, "exclude": date(2026, 9, 1)}
-    assert body["averageDates"] == []                      # the only Tuesday of the period is the day itself
+    def fake_rows(f, start, end, isodow):
+        calls.append((start, end, isodow))
+        if start == f.start:  # this period
+            return [{"branch_code": "CCI01", "tx_type": "sales", "days": 2, "bills": 40, "subtotal": 4_000_000},
+                    {"branch_code": "CCI01", "tx_type": "open", "days": 1, "bills": 1, "subtotal": 50_000},
+                    {"branch_code": "TGP17", "tx_type": "sales", "days": 1, "bills": 5, "subtotal": 500_000}]
+        return [{"branch_code": "CCI01", "tx_type": "sales", "days": 2, "bills": 30, "subtotal": 3_000_000},
+                {"branch_code": "OLD01", "tx_type": "sales", "days": 1, "bills": 3, "subtotal": 300_000}]
+    monkeypatch.setattr(ov, "branch_type_rows", fake_rows)
+    body = client.get(f"/api/overview/average-sales?{Q}").json()
+    assert body["filters"]["from"] == "2026-09-01" and body["weekday"] is None and body["days"] == 2
+    assert calls == [(date(2026, 9, 1), date(2026, 9, 2), None), (date(2026, 8, 30), date(2026, 8, 31), None)]
     rows = {r["key"]: r for r in body["rows"]}
-    assert rows["CCI01"]["averageSales"] == 2_000_000 and rows["CCI01"]["label"] == "Kopi Calf Supratman"
-    assert rows["OLD01"]["sales"] == 0 and rows["OLD01"]["variancePct"] == -100.0
-    assert rows["CCI01"]["totalSales"] == rows["CCI01"]["sales"] + rows["CCI01"]["pendingSales"]
-    t = body["totals"]
-    assert t["averageSales"] == 2_500_000 and t["totalSales"] == t["sales"] + t["pendingSales"]
-    # default day = the end of the period; out-of-range days are refused
-    assert client.get(f"/api/overview/average-sales?{Q}").json()["date"] == "2026-09-02"
-    assert client.get(f"/api/overview/average-sales?{Q}&date=2026-09-04").status_code == 400
+    c = rows["CCI01"]
+    assert c["averageSales"] == 2_000_000 and c["compareAverage"] == 1_500_000 and c["variancePct"] == 33.33
+    assert c["pendingSales"] == 50_000 and c["totalSales"] == 4_050_000 and c["label"] == "Kopi Calf Supratman"
+    assert rows["TGP17"]["compareAverage"] is None and rows["TGP17"]["variancePct"] is None   # new branch
+    assert rows["OLD01"]["averageSales"] is None and rows["OLD01"]["sales"] == 0              # stopped selling
+    assert body["totals"]["averageSales"] == 2_500_000 and body["totals"]["compareAverage"] == 1_800_000
+
+    calls.clear()
+    body = client.get(f"/api/overview/average-sales?{Q}&weekday=2").json()
+    assert body["weekday"] == 2 and body["weekdayName"] == "Tuesday" and body["days"] == 1 and calls[0][2] == 2
+    assert client.get(f"/api/overview/average-sales?{Q}&weekday=8").status_code == 400

@@ -426,3 +426,25 @@ def test_day_vs_day_busy_hours_menus_payments(client):
     gofood = next(m for m in pay["methods"] if m["method"] == "GOFOOD_INT")
     assert gofood["previousSubtotal"] == 0 and gofood["deltaPct"] is None
     assert pay["previous"] == {"subtotal": 2_100_000, "bills": 11} and pay["types"][0]["previousSubtotal"] == 2_100_000
+
+
+def test_average_sales_same_weekday(client, monkeypatch):
+    seen = {}
+
+    def fake_weekday_rows(f, isodow, exclude):
+        seen.update(dow=isodow, exclude=exclude)
+        return [{"branch_code": "CCI01", "days": 2, "bills": 40, "subtotal": 4_000_000},
+                {"branch_code": "OLD01", "days": 1, "bills": 5, "subtotal": 500_000}]
+    monkeypatch.setattr(ov, "weekday_rows", fake_weekday_rows)
+    body = client.get(f"/api/overview/average-sales?{Q}&date=2026-09-01").json()
+    assert body["date"] == "2026-09-01" and body["weekday"] == 2 and seen == {"dow": 2, "exclude": date(2026, 9, 1)}
+    assert body["averageDates"] == []                      # the only Tuesday of the period is the day itself
+    rows = {r["key"]: r for r in body["rows"]}
+    assert rows["CCI01"]["averageSales"] == 2_000_000 and rows["CCI01"]["label"] == "Kopi Calf Supratman"
+    assert rows["OLD01"]["sales"] == 0 and rows["OLD01"]["variancePct"] == -100.0
+    assert rows["CCI01"]["totalSales"] == rows["CCI01"]["sales"] + rows["CCI01"]["pendingSales"]
+    t = body["totals"]
+    assert t["averageSales"] == 2_500_000 and t["totalSales"] == t["sales"] + t["pendingSales"]
+    # default day = the end of the period; out-of-range days are refused
+    assert client.get(f"/api/overview/average-sales?{Q}").json()["date"] == "2026-09-02"
+    assert client.get(f"/api/overview/average-sales?{Q}&date=2026-09-04").status_code == 400

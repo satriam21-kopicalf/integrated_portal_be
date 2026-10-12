@@ -24,7 +24,9 @@ T_USER_BRANCH = "integration_portal.user_branch"
 
 MAX_FAILED_LOGINS = 5
 LOCK_MINUTES = 15
-ROLES = ("superadmin", "user")
+ROLES = ("superadmin", "cost_control", "user")
+# roles that see every branch (no user_branch rows); "user" sees only its branches
+GLOBAL_ROLES = ("superadmin", "cost_control")
 
 USER_COLUMNS = """u.id, u.username, u.email, u.full_name, u.role, u.is_active, u.phone_number, u.job_title,
     u.department, u.notes, u.must_change_password, u.last_login_at, u.last_login_ip,
@@ -165,11 +167,16 @@ def user_counts() -> dict:
 
 
 def known_branch_codes(codes: list[str]) -> set[str]:
-    """The codes that exist in the ESB branch master."""
+    """The codes that exist in the ESB branch master, or as an active kopicalf facility (HUB WH / HUB CK, stock opname)."""
     if not codes:
         return set()
     rows = db.fetch("SELECT DISTINCT branch_code FROM integration_esb.master_branches WHERE branch_code = ANY(%s)", (codes,))
-    return {r["branch_code"] for r in rows}
+    found = {r["branch_code"] for r in rows}
+    rest = [c for c in codes if c not in found]
+    if rest:
+        found |= {r.get("code") for r in db.fetch(
+            "SELECT code FROM kc_master.facility WHERE is_active AND code = ANY(%s)", (rest,)) if r.get("code")}
+    return found
 
 
 def _set_branches(conn, user_id: str, codes: list[str], actor_id: Optional[str]) -> None:

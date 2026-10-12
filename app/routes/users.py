@@ -33,7 +33,7 @@ class UserFields(BaseModel):
     username: Optional[str] = Field(default=None, max_length=32)
     email: Optional[str] = Field(default=None, max_length=254)
     fullName: Optional[str] = Field(default=None, max_length=120)
-    role: Optional[Literal["superadmin", "user"]] = None
+    role: Optional[Literal["superadmin", "cost_control", "user"]] = None
     isActive: Optional[bool] = None
     phoneNumber: Optional[str] = Field(default=None, max_length=32)
     jobTitle: Optional[str] = Field(default=None, max_length=80)
@@ -92,7 +92,7 @@ def _clean(body: UserFields, creating: bool, user_id: Optional[str] = None,
             return None, _error(f"Cabang tidak dikenal: {', '.join(sorted(unknown))}", field="branches")
         data["branches"] = codes
     role = data.get("role") or (current or {}).get("role") or "user"
-    if role == "superadmin":
+    if role in accounts.GLOBAL_ROLES:  # superadmin / cost_control see every branch
         if creating or "branches" in data or (current or {}).get("branch_codes"):
             data["branches"] = []
     else:

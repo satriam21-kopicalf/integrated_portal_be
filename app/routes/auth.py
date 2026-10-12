@@ -80,6 +80,20 @@ def require_superadmin(request: Request, user: dict = Depends(current_user)) -> 
     return user
 
 
+def require_roles(*roles: str):
+    """Dependency: the signed-in user has one of `roles` (refusals are logged like require_superadmin)."""
+
+    def check(request: Request, user: dict = Depends(current_user)) -> dict:
+        if user["role"] not in roles:
+            activity.record("access.denied", user=user, request=request, status="denied",
+                            summary=f"Akses ditolak: {request.method} {request.url.path}",
+                            details={"method": request.method, "path": request.url.path, "query": str(request.url.query)})
+            raise HTTPException(status_code=403, detail="Anda tidak memiliki akses ke fitur ini")
+        return user
+
+    return check
+
+
 def forget_sessions() -> None:
     """Drop cached session lookups (after a user or role change)."""
     _sessions._data.clear()

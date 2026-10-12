@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     # Overview: first date of complete history (ESB roll-out reached all branches end of July 2025)
     overview_data_from: str = "2025-08-01"
 
+    # Stock opname (Cost Control menu): kopicalf-platform gateway (warehouse-backend /portal, D-51) and the shared
+    # HMAC secret (same value as KC_PORTAL_GATEWAY_SECRET there); empty secret = stock opname disabled
+    so_gateway_url: str = "https://api-wms.kopicalf.co.id/portal"
+    so_gateway_secret: str = ""
+    so_gateway_timeout: int = 180
+
     # Excel export jobs
     export_dir: str = os.path.join(tempfile.gettempdir(), "portal-exports")
     export_ttl_hours: int = 24

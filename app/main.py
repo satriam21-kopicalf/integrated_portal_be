@@ -13,6 +13,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app import accounts
 from app import database as db
 from app.config import get_settings
 from app.utils import data_version
@@ -20,7 +21,8 @@ from app.routes.activity import router as activity_router
 from app.routes import (auth_router, avatars_router, branches_router, cost_control_router, exports_router, live_router,
                         overview_router, realtime_router,
                         summary_router, transactions_router, users_router)
-from app.routes.auth import current_user, require_superadmin, session_lookup
+from app.routes.auth import current_user, require_roles, require_superadmin, session_lookup
+from app.routes.stock_opname import router as stock_opname_router
 from app.scope import branch_scope
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -68,7 +70,7 @@ async def scope_to_user_branches(request: Request, call_next):
     token = None
     if request.url.path.startswith("/api/") and not request.url.path.startswith("/api/auth/"):
         user = await run_in_threadpool(session_lookup, request)
-        if user and user["role"] != "superadmin":
+        if user and user["role"] not in accounts.GLOBAL_ROLES:
             token = branch_scope.set(tuple(user.get("branch_codes") or ()))
     try:
         return await call_next(request)
@@ -99,7 +101,8 @@ app.include_router(branches_router, dependencies=signed_in)
 app.include_router(exports_router, dependencies=signed_in)
 app.include_router(overview_router, dependencies=signed_in)
 app.include_router(live_router, dependencies=signed_in)
-app.include_router(cost_control_router, dependencies=[Depends(require_superadmin)])  # superadmin only
+app.include_router(cost_control_router, dependencies=[Depends(require_roles("superadmin", "cost_control"))])
+app.include_router(stock_opname_router, dependencies=signed_in)  # stock opname through the kopicalf gateway
 app.include_router(activity_router)  # superadmin reads; any signed-in user reports page views
 app.include_router(realtime_router)
 

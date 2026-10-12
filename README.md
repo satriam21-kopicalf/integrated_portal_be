@@ -53,6 +53,8 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | POST | `/api/users/{id}/unlock` | (superadmin) buka kunci akun |
 | PUT/DELETE | `/api/users/{id}/avatar` | (superadmin) foto profil user lain |
 | GET | `/api/avatars/{id}` | Foto profil (URL berversi, cache 1 tahun) |
+| ANY | `/api/so/{path}` | **Stock opname** (menu Cost Control): diteruskan ke API stock count kopicalf-platform (`SO_GATEWAY_URL`, warehouse-backend `/portal`) dengan identitas bertanda tangan HMAC (`SO_GATEWAY_SECRET`). Role `user` mengisi SO di cabangnya (outlet, HUB WH, HUB CK); `cost_control`/`superadmin` monitor, review, pengaturan daftar & jadwal, ekspor ESB |
+| GET | `/api/so-sites` | (superadmin) lokasi SO tanpa kode cabang ESB (HUB WH, HUB CK, gudang, kitchen) untuk ditugaskan di User Accounts |
 | GET | `/api/cost-control/{meta,summary,trend,items,forecast}` | Cost Control: COGS ratio (net sales & subtotal), usage ratio, selisih stok, waste, estimasi belanja 1/2/4 minggu per outlet (lihat docs) |
 | PUT | `/api/cost-control/settings` | (superadmin) ambang status & parameter forecast |
 | GET | `/api/activity`, `/api/activity/summary` | (superadmin) Activity log: `dateFrom`, `dateTo`, `user`, `category` (auth, page, filter, transaction, export, user, profile, access), `status` (ok/failed/denied), `role`, `search`, `limit`, `offset` |
@@ -62,6 +64,8 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 
 Tanpa `dateFrom`/`dateTo`, rentang default adalah 65 hari terakhir (Asia/Jakarta). Dokumentasi interaktif: `https://api.kopicalf.co.id/docs`.
 Semua endpoint `/api/overview/*` menerima `compareFrom` & `compareTo` (opsional): periode pembanding pilihan (default: periode sepanjang sama tepat sebelumnya).
+
+**Role**: `superadmin` (semua), `cost_control` (semua cabang + menu Cost Control termasuk stock opname; tanpa kelola user, migration 011), `user` (cabang yang ditugaskan; cabang boleh kode ESB atau kode fasilitas kopicalf untuk HUB WH / HUB CK).
 
 **Semua endpoint data membutuhkan login** (cookie `portal_session`, atau `Authorization: Bearer <token>`); `/api/users`, `/api/cost-control/*` dan `GET /api/activity*` hanya untuk role `superadmin`. Terbuka: `/health`, `/api/auth/login|logout`, WebSocket `/ws`.
 

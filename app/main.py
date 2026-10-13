@@ -23,6 +23,7 @@ from app.routes import (auth_router, avatars_router, branches_router, cost_contr
                         summary_router, transactions_router, users_router)
 from app.access import require_page
 from app.routes.access import router as access_router
+from app.routes.ratio import router as ratio_router
 from app.routes.auth import current_user, require_superadmin, session_lookup
 from app.routes.stock_opname import router as stock_opname_router
 from app.scope import branch_scope
@@ -104,7 +105,8 @@ app.include_router(branches_router, dependencies=signed_in)
 app.include_router(exports_router, dependencies=[Depends(require_page("sales"))])
 app.include_router(overview_router, dependencies=[Depends(require_page("overview"))])
 app.include_router(live_router, dependencies=[Depends(require_page("overview"))])
-app.include_router(cost_control_router, dependencies=[Depends(require_page("cc.cogs", "cc.ratio"))])
+app.include_router(ratio_router)  # /api/cost-control/ratio (page cc.ratio), before the COGS routes
+app.include_router(cost_control_router, dependencies=[Depends(require_page("cc.cogs"))])
 app.include_router(stock_opname_router, dependencies=signed_in)  # stock opname through the kopicalf gateway (pages per path)
 app.include_router(access_router)  # pages of roles & users, job titles, departments
 app.include_router(activity_router)  # superadmin reads; any signed-in user reports page views

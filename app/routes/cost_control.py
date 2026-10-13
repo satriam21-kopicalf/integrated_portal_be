@@ -36,7 +36,8 @@ from app import database as db
 from app.cost_control import IGNORED_STATUSES, POSTED_STATUSES, SUSPECT_FLOOR, SUSPECT_SHARE, period_bounds
 from app.database import SCHEMA
 from app.routes.auth import require_superadmin
-from app.utils import TTLCache, data_version, jsonable, normalize_branch, parse_branches, today
+from app.scope import scoped_branch
+from app.utils import TTLCache, data_version, jsonable, parse_branches, today
 
 router = APIRouter(prefix="/api/cost-control", tags=["cost-control"])
 
@@ -226,7 +227,7 @@ def get_summary(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Q
         start, end = date_range(dateFrom, dateTo)
     except BadRequest as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    branch = normalize_branch(branch)
+    branch = scoped_branch(branch)  # role user given the page: its own branches only
 
     def build() -> dict:
         s = settings()
@@ -288,7 +289,7 @@ def get_trend(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Que
     except BadRequest as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     grain = grain if grain in ("period", "month") else "period"
-    branch = normalize_branch(branch)
+    branch = scoped_branch(branch)  # role user given the page: its own branches only
 
     def build() -> dict:
         s = settings()
@@ -317,7 +318,7 @@ def get_items(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Que
         start, end = date_range(dateFrom, dateTo)
     except BadRequest as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    branch = normalize_branch(branch)
+    branch = scoped_branch(branch)  # role user given the page: its own branches only
 
     def build() -> dict:
         s = settings()
@@ -386,7 +387,7 @@ def _trend_factor(branch: Optional[str], cap_pct: float) -> dict[str, float]:
 
 @router.get("/forecast")
 def get_forecast(branch: Optional[str] = Query(None)):
-    branch = normalize_branch(branch)
+    branch = scoped_branch(branch)  # role user given the page: its own branches only
     single = branch is not None and "," not in branch
     """Purchase need and spend for the next 7 / 14 / 30 days, per outlet (and per item for one outlet).
 
@@ -637,7 +638,7 @@ def get_issues(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Qu
         start, end = date_range(dateFrom, dateTo)
     except BadRequest as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    branch = normalize_branch(branch)
+    branch = scoped_branch(branch)  # role user given the page: its own branches only
 
     def build() -> dict:
         params: dict[str, Any] = {"start": start, "end": end, "floor": SUSPECT_FLOOR, "share": SUSPECT_SHARE}

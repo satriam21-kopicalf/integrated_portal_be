@@ -27,6 +27,8 @@ PAGES: list[tuple[str, str, str]] = [
     ("stock-opname", "Stock Opname (count)", "Main menu"),
     ("cc.monitor", "Monitor", "Cost Control · Stock opname"),
     ("cc.reviews", "Review", "Cost Control · Stock opname"),
+    ("cc.entry", "Enter / import SO", "Cost Control · Stock opname"),
+    ("cc.reports", "SO report (xlsx)", "Cost Control · Stock opname"),
     ("cc.esb-export", "ESB export", "Cost Control · ESB"),
     ("cc.esb-compare", "ESB comparison", "Cost Control · ESB"),
     ("cc.lists", "Count lists", "Cost Control · Stock opname settings"),
@@ -110,6 +112,9 @@ SO_RULES: list[tuple[Optional[str], str, tuple[str, ...]]] = [
     (None, "counts/today", ("stock-opname",)),
     (None, "counts/monitor", ("cc.monitor",)),
     ("POST", "counts/review", ("cc.reviews",)),
+    ("POST", "counts/entries", ("cc.entry",)),
+    ("POST", "counts/imports", ("cc.entry",)),
+    (None, "count-reports", ("cc.reports", "cc.reviews")),
     ("GET", "count-settings/types", ("stock-opname", *CC_PAGES)),  # names of the count types on every SO screen
     ("POST", "count-settings/types/preview", ("cc.types",)),
     (None, "count-settings/types", ("cc.types",)),
@@ -117,10 +122,10 @@ SO_RULES: list[tuple[Optional[str], str, tuple[str, ...]]] = [
     (None, "count-settings", ("cc.lists", "cc.groups", "cc.types")),
     (None, "count-exports", ("cc.esb-export",)),
     (None, "count-compare", ("cc.esb-compare",)),
-    ("GET", "recipes", ("cc.premix", "stock-opname")),
+    ("GET", "recipes", ("cc.premix", "stock-opname", "cc.entry")),
     (None, "recipes", ("cc.premix",)),
-    (None, "counts", ("stock-opname", "cc.monitor", "cc.reviews", "cc.esb-export", "cc.esb-compare")),
-    (None, "count-photos", ("stock-opname", "cc.monitor", "cc.reviews")),
+    (None, "counts", ("stock-opname", "cc.monitor", "cc.reviews", "cc.entry", "cc.esb-export", "cc.esb-compare")),
+    (None, "count-photos", ("stock-opname", "cc.monitor", "cc.reviews", "cc.entry")),
 ]
 
 

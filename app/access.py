@@ -124,6 +124,7 @@ SO_RULES: list[tuple[Optional[str], str, tuple[str, ...]]] = [
     (None, "count-compare", ("cc.esb-compare",)),
     ("GET", "recipes", ("cc.premix", "stock-opname", "cc.entry")),
     (None, "recipes", ("cc.premix",)),
+    ("GET", "counts", ("stock-opname", "cc.monitor", "cc.reviews", "cc.entry", "cc.reports", "cc.esb-export", "cc.esb-compare")),
     (None, "counts", ("stock-opname", "cc.monitor", "cc.reviews", "cc.entry", "cc.esb-export", "cc.esb-compare")),
     (None, "count-photos", ("stock-opname", "cc.monitor", "cc.reviews", "cc.entry")),
 ]

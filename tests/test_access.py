@@ -81,5 +81,6 @@ def test_stock_opname_paths_map_to_pages():
     assert access.so_page("POST", "counts/imports") == ("cc.entry",)
     assert "cc.entry" in access.so_page("PUT", "counts/abc/lines")
     assert access.so_page("GET", "count-reports/file") == ("cc.reports", "cc.reviews")
+    assert "cc.reports" in access.so_page("GET", "counts") and "cc.reports" not in access.so_page("PUT", "counts/abc/lines")
     assert "stock-opname" in access.so_page("GET", "recipes/active")
     assert access.so_page("GET", "something-else") == ()

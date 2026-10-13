@@ -21,7 +21,9 @@ from app.routes.activity import router as activity_router
 from app.routes import (auth_router, avatars_router, branches_router, cost_control_router, exports_router, live_router,
                         overview_router, realtime_router,
                         summary_router, transactions_router, users_router)
-from app.routes.auth import current_user, require_roles, require_superadmin, session_lookup
+from app.access import require_page
+from app.routes.access import router as access_router
+from app.routes.auth import current_user, require_superadmin, session_lookup
 from app.routes.stock_opname import router as stock_opname_router
 from app.scope import branch_scope
 
@@ -88,21 +90,23 @@ async def remember_data_version(request: Request, call_next):
         data_version.reset(token)
 
 
-# every data endpoint needs a signed-in user; /api/users additionally a superadmin.
+# every data endpoint needs a signed-in user; the dashboard pages also need the page (app/access.py);
+# /api/users additionally a superadmin.
 # Open: /health, /, /api/auth/login|logout and the /ws socket (it only carries
 # data-version stamps, no data; its HTTP twin /api/realtime/version is protected).
 signed_in = [Depends(current_user)]
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(avatars_router, dependencies=signed_in)
-app.include_router(transactions_router, dependencies=signed_in)
-app.include_router(summary_router, dependencies=signed_in)
+app.include_router(transactions_router, dependencies=[Depends(require_page("sales"))])
+app.include_router(summary_router, dependencies=[Depends(require_page("sales"))])
 app.include_router(branches_router, dependencies=signed_in)
-app.include_router(exports_router, dependencies=signed_in)
-app.include_router(overview_router, dependencies=signed_in)
-app.include_router(live_router, dependencies=signed_in)
-app.include_router(cost_control_router, dependencies=[Depends(require_roles("superadmin", "cost_control"))])
-app.include_router(stock_opname_router, dependencies=signed_in)  # stock opname through the kopicalf gateway
+app.include_router(exports_router, dependencies=[Depends(require_page("sales"))])
+app.include_router(overview_router, dependencies=[Depends(require_page("overview"))])
+app.include_router(live_router, dependencies=[Depends(require_page("overview"))])
+app.include_router(cost_control_router, dependencies=[Depends(require_page("cc.cogs", "cc.ratio"))])
+app.include_router(stock_opname_router, dependencies=signed_in)  # stock opname through the kopicalf gateway (pages per path)
+app.include_router(access_router)  # pages of roles & users, job titles, departments
 app.include_router(activity_router)  # superadmin reads; any signed-in user reports page views
 app.include_router(realtime_router)
 

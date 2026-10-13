@@ -201,3 +201,45 @@ def client(fake_db):
             yield c
     finally:
         app.dependency_overrides.pop(current_user, None)
+
+
+class MemoryAccess:
+    """In-memory page access (app/access.py): role defaults, per-user exceptions, job title / department lists."""
+
+    def __init__(self):
+        from app import access
+        self.roles = {r: list(p) for r, p in access.DEFAULT_ROLE_PAGES.items()}
+        self.overrides: dict[str, dict[str, bool]] = {}
+        self.masters: dict[str, list[str]] = {"jobTitle": [], "department": []}
+
+    def role_pages(self):
+        return {r: list(p) for r, p in self.roles.items()}
+
+    def user_overrides(self, user_id):
+        return dict(self.overrides.get(str(user_id), {}))
+
+    def set_role_pages(self, role, pages, actor_id):
+        self.roles[role] = list(pages)
+
+    def set_user_overrides(self, user_id, overrides, actor_id):
+        self.overrides[str(user_id)] = dict(overrides)
+
+    def add_master(self, kind, name, actor_id):
+        name = " ".join(name.split())
+        known = {n.lower(): n for n in self.masters[kind]}
+        if name.lower() in known:
+            return {"id": name, "name": known[name.lower()], "created": False}
+        self.masters[kind].append(name)
+        return {"id": name, "name": name, "created": True}
+
+    def list_master(self, kind):
+        return [{"id": n, "name": n, "isActive": True, "users": 0} for n in self.masters[kind]]
+
+
+@pytest.fixture(autouse=True)
+def page_access(monkeypatch):
+    from app import access
+    mem = MemoryAccess()
+    for name in ("role_pages", "user_overrides", "set_role_pages", "set_user_overrides", "add_master", "list_master"):
+        monkeypatch.setattr(access, name, getattr(mem, name))
+    return mem

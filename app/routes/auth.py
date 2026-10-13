@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app import accounts, activity, avatars
+from app import access, accounts, activity, avatars
 from app.profile import PROFILE_FIELDS, ProfileError, clean_profile
 from app.config import get_settings
 from app.security import DUMMY_HASH, hash_password, new_token, password_problem, token_hash, verify_password
@@ -94,6 +94,11 @@ def require_roles(*roles: str):
     return check
 
 
+def signed_in_user(row: dict) -> dict:
+    """The user as the app keeps it after sign-in: the account plus the pages it opens."""
+    return {**accounts.public_user(row), "pages": access.pages_for(row)}
+
+
 def forget_sessions() -> None:
     """Drop cached session lookups (after a user or role change)."""
     _sessions._data.clear()
@@ -162,7 +167,7 @@ def login(req: LoginRequest, request: Request):
     logger.info("login %s (%s) from %s", row["username"], row["role"], ip)
     activity.record("auth.login", user=row, request=request, summary="Login",
                     details={"method": req.method, "remember": req.remember})
-    response = JSONResponse({"user": accounts.public_user(accounts.get_user(str(row["id"])))})
+    response = JSONResponse({"user": signed_in_user(accounts.get_user(str(row["id"])))})
     _set_cookie(response, token, int(ttl.total_seconds()))
     return response
 
@@ -183,7 +188,7 @@ def logout(request: Request):
 
 @router.get("/me")
 def me(user: dict = Depends(current_user)):
-    return {"user": accounts.public_user(user)}
+    return {"user": signed_in_user(user)}
 
 
 @router.patch("/me")
@@ -202,7 +207,7 @@ def update_me(body: dict, request: Request, user: dict = Depends(current_user)):
     activity.record("profile.update", user=user, request=request, summary="Memperbarui profil sendiri",
                     details={"fields": sorted(data)})
     forget_sessions()
-    return {"user": accounts.public_user(updated)}
+    return {"user": signed_in_user(updated)}
 
 
 @router.post("/password")
@@ -220,7 +225,7 @@ def change_password(req: PasswordChange, request: Request, user: dict = Depends(
     accounts.revoke_other_sessions(str(user["id"]), keep)
     activity.record("auth.password_change", user=user, request=request, summary="Mengganti password sendiri")
     forget_sessions()
-    return {"user": accounts.public_user(accounts.get_user(str(user["id"])))}
+    return {"user": signed_in_user(accounts.get_user(str(user["id"])))}
 
 
 @router.put("/me/avatar")
@@ -230,14 +235,14 @@ def set_my_avatar(body: AvatarUpload, user: dict = Depends(current_user)):
         return JSONResponse({"error": problem}, status_code=422)
     avatars.save(str(user["id"]), *parsed, str(user["id"]))
     forget_sessions()
-    return {"user": accounts.public_user(accounts.get_user(str(user["id"])))}
+    return {"user": signed_in_user(accounts.get_user(str(user["id"])))}
 
 
 @router.delete("/me/avatar")
 def delete_my_avatar(user: dict = Depends(current_user)):
     avatars.remove(str(user["id"]), str(user["id"]))
     forget_sessions()
-    return {"user": accounts.public_user(accounts.get_user(str(user["id"])))}
+    return {"user": signed_in_user(accounts.get_user(str(user["id"])))}
 
 
 def _now() -> datetime:

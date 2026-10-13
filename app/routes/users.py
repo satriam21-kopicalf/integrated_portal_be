@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app import accounts, activity, avatars
+from app import access, accounts, activity, avatars
 from app.profile import ProfileError, clean_profile
 from app.routes.auth import AvatarUpload, forget_sessions, require_superadmin
 from app.security import EMAIL_RE, USERNAME_RE, hash_password, password_problem
@@ -48,6 +48,8 @@ class UserFields(BaseModel):
     city: Optional[str] = Field(default=None, max_length=80)
     workBranchCode: Optional[str] = Field(default=None, max_length=32)
     branches: Optional[list[str]] = Field(default=None, max_length=500)
+    # pages added (true) or removed (false) on top of the role (app/access.py); None = leave as is
+    pageOverrides: Optional[dict[str, bool]] = None
 
 
 def _error(message: str, status: int = 422, field: Optional[str] = None) -> JSONResponse:
@@ -115,7 +117,7 @@ def _password(body: UserFields, required: bool) -> tuple[Optional[str], Optional
 def list_users(search: str = "", role: str = "", status: str = "", branch: str = "",
                page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100)):
     rows, total = accounts.list_users(search, role, status, pageSize, (page - 1) * pageSize, branch)
-    return {"data": [accounts.public_user(r) for r in rows], "total": total, "page": page, "pageSize": pageSize}
+    return {"data": [_view(r) for r in rows], "total": total, "page": page, "pageSize": pageSize}
 
 
 def _target(user: dict) -> dict:
@@ -141,16 +143,19 @@ def create_user(body: UserFields, request: Request, actor: dict = Depends(requir
     if error:
         return error
     user = accounts.create_user(data, password_hash, str(actor["id"]))
+    error = _after_save(user, body, actor)
+    if error:
+        return error
     activity.record("user.create", user=actor, request=request, page="/users",
                     summary=f"Membuat akun {user['username']} ({user['role']})",
                     details={**_target(user), "email": user["email"], "branches": list(user.get("branch_codes") or [])})
-    return JSONResponse({"user": accounts.public_user(user)}, status_code=201)
+    return JSONResponse({"user": _view(user)}, status_code=201)
 
 
 @router.get("/{user_id}")
 def get_user(user_id: UUID):
     user = accounts.get_user(str(user_id))
-    return {"user": accounts.public_user(user)} if user else _error("User tidak ditemukan", 404)
+    return {"user": _view(user)} if user else _error("User tidak ditemukan", 404)
 
 
 @router.patch("/{user_id}")
@@ -173,6 +178,11 @@ def update_user(user_id: UUID, body: UserFields, request: Request, actor: dict =
     if leaves_superadmin and accounts.count_active_superadmins(exclude_id=uid) == 0:
         return _error("Minimal harus ada satu superadmin aktif", 409, "role")
     user = accounts.update_user(uid, data, str(actor["id"]), password_hash)
+    error = _after_save(user, body, actor)
+    if error:
+        return error
+    if body.pageOverrides is not None and body.pageOverrides != access.user_overrides(uid):
+        data["pageOverrides"] = body.pageOverrides
     changes = {k: {"from": _plain(current.get(accounts.EDITABLE.get(k, k))), "to": _plain(v)}
                for k, v in data.items() if k in accounts.EDITABLE and current.get(accounts.EDITABLE[k]) != v}
     if "branches" in data and sorted(current.get("branch_codes") or []) != data["branches"]:
@@ -181,7 +191,27 @@ def update_user(user_id: UUID, body: UserFields, request: Request, actor: dict =
                     summary=f"Mengubah akun {current['username']}" + (" (reset password)" if password_hash else ""),
                     details={**_target(current), "changes": changes, "passwordReset": bool(password_hash)})
     forget_sessions()
-    return {"user": accounts.public_user(user)}
+    return {"user": _view(user)}
+
+
+def _view(row: dict) -> dict:
+    """A user for this page: the account, the pages it opens and the exceptions to its role."""
+    return {**accounts.public_user(row), "pages": access.pages_for(row),
+            "pageOverrides": {} if row["role"] == "superadmin" else access.user_overrides(str(row["id"]))}
+
+
+def _after_save(user: dict, body: UserFields, actor: dict) -> Optional[JSONResponse]:
+    """Page exceptions of the form, and new job titles / departments into their lists."""
+    for kind, value in (("jobTitle", user.get("job_title")), ("department", user.get("department"))):
+        if value and value.strip():
+            access.add_master(kind, value, str(actor["id"]))
+    if body.pageOverrides is not None:
+        try:
+            access.set_user_overrides(str(user["id"]), access.clean_overrides(user["role"], body.pageOverrides),
+                                      str(actor["id"]))
+        except ValueError as exc:
+            return _error(str(exc), 422, "pageOverrides")
+    return None
 
 
 def _plain(value):
@@ -194,7 +224,7 @@ def unlock_user(user_id: UUID, request: Request, actor: dict = Depends(require_s
     if user:
         activity.record("user.unlock", user=actor, request=request, page="/users",
                         summary=f"Membuka kunci akun {user['username']}", details=_target(user))
-    return {"user": accounts.public_user(user)} if user else _error("User tidak ditemukan", 404)
+    return {"user": _view(user)} if user else _error("User tidak ditemukan", 404)
 
 
 @router.put("/{user_id}/avatar")

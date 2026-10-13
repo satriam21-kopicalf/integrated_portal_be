@@ -19,7 +19,7 @@ import time
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
-from app import accounts
+from app import access, accounts
 from app import database as db
 from app.config import get_settings
 from app.routes.auth import current_user, require_superadmin
@@ -53,7 +53,7 @@ def facilities_of(codes: list[str]) -> list[str]:
 
 
 def assertion(user: dict, secret: str) -> str:
-    role = user["role"] if user["role"] in accounts.ROLES else "user"
+    role = access.so_role(user) if user["role"] in accounts.ROLES else "user"
     payload = {
         "sub": str(user["id"]),
         "username": user.get("username") or "",
@@ -81,6 +81,9 @@ async def so_proxy(path: str, request: Request, user: dict = Depends(current_use
     s = get_settings()
     if not s.so_gateway_secret:
         raise HTTPException(503, detail="Stock opname belum diaktifkan")
+    pages = access.so_page(request.method, path)
+    if user["role"] != "superadmin" and not any(access.has_page(user, p) for p in pages):
+        access.deny(request, user)
     body = await request.body()
     headers = {"x-portal-assertion": assertion(user, s.so_gateway_secret)}
     if request.headers.get("content-type"):

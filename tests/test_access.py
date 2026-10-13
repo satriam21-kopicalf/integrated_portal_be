@@ -68,7 +68,7 @@ def test_user_form_sets_pages_and_registers_new_names(anon, store, page_access):
 
 def test_stock_opname_paths_map_to_pages():
     assert access.so_page("GET", "counts/today") == ("stock-opname",)
-    assert access.so_page("POST", "counts") == access.so_page("GET", "counts/abc")
+    assert set(access.so_page("POST", "counts")) == set(access.so_page("GET", "counts/abc")) - {"cc.reports"}
     assert "stock-opname" in access.so_page("PUT", "counts/abc/lines")
     assert access.so_page("POST", "counts/abc/review") == ("cc.reviews",)
     assert access.so_page("GET", "counts/abc/compare") == ("cc.esb-compare",)

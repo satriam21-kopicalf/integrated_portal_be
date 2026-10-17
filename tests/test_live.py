@@ -1,4 +1,4 @@
-"""/api/live: today's totals vs yesterday, per hour/channel, the last sync batch and the latest sales."""
+"""/api/live: today's totals vs the same weekday last week, per hour/channel, the last sync batch and the latest sales."""
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -64,14 +64,15 @@ def test_live_today_and_latest(client, live_db):
     assert t["yesterdaySameTime"] == {"bills": 2, "subtotal": 160_000, "nettSales": 150_000}
     assert t["deltaPct"] == 25.0 and t["billsDeltaPct"] == 100.0 and t["nettDeltaPct"] == 26.67
     y = body["yesterday"]
-    assert y["date"] == "2026-10-02" and y["subtotal"] == 360_000 and [h["hour"] for h in y["hours"]] == [8, 9, 20]
+    assert body["compareDate"] == "2026-09-26"  # the same weekday last week (2026-10-17)
+    assert y["date"] == "2026-09-26" and y["subtotal"] == 360_000 and [h["hour"] for h in y["hours"]] == [8, 9, 20]
     assert body["lastBatch"] == {"bills": 3, "subtotal": 150_000, "syncedHour": SYNC.isoformat()}
     assert body["lastSyncedAt"].startswith("2026-10-03T03:05")
     tx = body["transactions"][0]
     assert tx["branchName"] == "Kopi Calf Supratman Bandung" and tx["orderTime"] == "2026-10-03T09:58:01"
     assert len(tx["items"]) == live.MAX_ITEMS and tx["moreItems"] == 2 and tx["itemQty"] == 6
     clock = next(p for q, p in live_db.queries if "::time <=" in q)
-    assert clock["day"] == "2026-10-02" and clock["clock"] == "10:00:00"
+    assert clock["day"] == "2026-09-26" and clock["clock"] == "10:00:00"
 
 
 def test_live_filters_use_header_columns(client, live_db):

@@ -23,6 +23,13 @@ def test_formulas_match_the_workbook():
     assert row["usageRatioGross"] == pytest.approx(0.4781500586, abs=1e-6)
     assert row["usageRatioNet"] == pytest.approx(0.6290707468, abs=1e-6)
     assert row["delta"] == pytest.approx(0.05118274835, abs=1e-6)
+    # the gross view: every ratio on gross sales
+    assert row["net"] == row["pendapatan"]
+    assert row["bbRatioGross"] == pytest.approx((172963389.0 + 10998760.0) / 506209000.0, abs=1e-6)
+    assert row["espressoRatioGross"] == pytest.approx(77775000.0 / 506209000.0, abs=1e-6)
+    assert row["deltaGross"] == pytest.approx(0.5170535273 - 0.4781500586, abs=1e-6)
+    total = ratio._total([row])
+    assert total["bbRatioGross"] == pytest.approx(row["bbRatioGross"]) and total["nonSalesPctNet"] == pytest.approx(6172000.0 / row["pendapatan"])
     # without an MDR the ratios use the ESB nett sales
     plain = ratio._row("CTG54", "x", 506209000.0, 467769108.0, 1, 0.0, {"bb": 1.0}, 0.0, so_a, {"value": None}, None)
     assert plain["netBasis"] == "nett" and plain["pendapatan"] is None and plain["usage"] is None

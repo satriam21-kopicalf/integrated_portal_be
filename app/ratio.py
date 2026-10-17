@@ -153,10 +153,11 @@ def _row(code: str, name: str, gross: float, nett: float, bills: int, non_sales:
     usage = cogs + so_a["value"] - so_b["value"] if have_so else None
     out = {
         "branchCode": code, "branchName": name, "bills": bills,
-        "gross": gross, "nett": nett, "pendapatan": pendapatan, "mdrPct": mdr_row["pct"] if mdr_row else None,
+        "gross": gross, "nett": nett, "net": net, "pendapatan": pendapatan, "mdrPct": mdr_row["pct"] if mdr_row else None,
         "netBasis": "pendapatan" if pendapatan is not None else "nett",
         "bb": bb, "espresso": esp, "dimsum": dim, "otherPurchases": other, "cogs": cogs,
         "espressoShare": _div(esp, cogs), "bbRatio": _div(bb + dim, net), "espressoRatio": _div(esp, net),
+        "bbRatioGross": _div(bb + dim, gross), "espressoRatioGross": _div(esp, gross),
         "cogsRatioGross": _div(cogs, gross), "cogsRatioNet": _div(cogs, net),
         "soStart": so_a, "soEnd": so_b, "usage": usage,
         "usageRatioGross": _div(usage, gross) if usage is not None else None,
@@ -164,7 +165,10 @@ def _row(code: str, name: str, gross: float, nett: float, bills: int, non_sales:
         "nonSales": non_sales, "itemJournal": journal,
         "nonSalesPct": _div(non_sales, gross), "itemJournalPct": _div(journal, gross),
     }
-    out["delta"] = round(out["cogsRatioNet"] - out["usageRatioNet"], 6) if out["cogsRatioNet"] is not None and out["usageRatioNet"] is not None else None
+    # COGS ratio minus usage ratio, on net sales (the workbook) and on gross sales (the gross view of the page)
+    for key, basis in (("delta", "Net"), ("deltaGross", "Gross")):
+        c, u = out[f"cogsRatio{basis}"], out[f"usageRatio{basis}"]
+        out[key] = round(c - u, 6) if c is not None and u is not None else None
     return out
 
 
@@ -180,9 +184,11 @@ def _total(rows: list[dict]) -> dict:
     net_so = sum((r["pendapatan"] if r["pendapatan"] is not None else r["nett"]) for r in with_so)
     return {**t, "net": net, "outlets": len(rows), "outletsWithSo": len(with_so), "soStart": so_a, "soEnd": so_b, "usage": usage,
             "espressoShare": _div(t["espresso"], t["cogs"]), "bbRatio": _div(t["bb"] + t["dimsum"], net),
-            "espressoRatio": _div(t["espresso"], net), "cogsRatioGross": _div(t["cogs"], t["gross"]),
+            "espressoRatio": _div(t["espresso"], net), "bbRatioGross": _div(t["bb"] + t["dimsum"], t["gross"]),
+            "espressoRatioGross": _div(t["espresso"], t["gross"]), "cogsRatioGross": _div(t["cogs"], t["gross"]),
             "cogsRatioNet": _div(t["cogs"], net), "usageRatioGross": _div(usage, gross_so), "usageRatioNet": _div(usage, net_so),
-            "nonSalesPct": _div(t["nonSales"], t["gross"]), "itemJournalPct": _div(t["itemJournal"], t["gross"])}
+            "nonSalesPct": _div(t["nonSales"], t["gross"]), "itemJournalPct": _div(t["itemJournal"], t["gross"]),
+            "nonSalesPctNet": _div(t["nonSales"], net), "itemJournalPctNet": _div(t["itemJournal"], net)}
 
 
 # ---------------------------------------------------------------- corrections

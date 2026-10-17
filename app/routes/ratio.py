@@ -57,10 +57,11 @@ COLUMNS = [
     ("Outlet", "branchName", 34), ("Kode", "branchCode", 10), ("Gross sales", "gross", 16), ("Nett sales ESB", "nett", 16),
     ("MDR %", "mdrPct", 8), ("Pendapatan", "pendapatan", 16), ("Pembelian BB", "bb", 16), ("Pembelian Espresso", "espresso", 16),
     ("Pembelian Dimsum", "dimsum", 16), ("COGS value", "cogs", 16), ("% Espresso thd COGS", "espressoShare", 10),
-    ("BB ratio", "bbRatio", 10), ("Espresso ratio", "espressoRatio", 10), ("COGS ratio (gross)", "cogsRatioGross", 10),
+    ("BB ratio (gross)", "bbRatioGross", 10), ("BB ratio (net)", "bbRatio", 10), ("Espresso ratio (gross)", "espressoRatioGross", 10),
+    ("Espresso ratio (net)", "espressoRatio", 10), ("COGS ratio (gross)", "cogsRatioGross", 10),
     ("COGS ratio (net)", "cogsRatioNet", 10), ("SO awal", "soStart", 16), ("SO akhir", "soEnd", 16), ("Usage", "usage", 16),
     ("Usage ratio (gross)", "usageRatioGross", 10), ("Usage ratio (net)", "usageRatioNet", 10),
-    ("Delta COGS - usage (net)", "delta", 10), ("Non sales", "nonSales", 14), ("Item journal", "itemJournal", 14),
+    ("Delta COGS - usage (gross)", "deltaGross", 10), ("Delta COGS - usage (net)", "delta", 10), ("Non sales", "nonSales", 14), ("Item journal", "itemJournal", 14),
     ("Pembelian lain", "otherPurchases", 14),
 ]
 
@@ -86,9 +87,8 @@ def export_ratio(request: Request, dateFrom: Optional[str] = Query(None), dateTo
             [c[0] for c in COLUMNS]]
     rows += [[_cell(o, c[1]) for c in COLUMNS] for o in data["outlets"]]
     t = data["total"]
-    rows.append(["Total", "", t["gross"], t["nett"], None, None, t["bb"], t["espresso"], t["dimsum"], t["cogs"], t["espressoShare"],
-                 t["bbRatio"], t["espressoRatio"], t["cogsRatioGross"], t["cogsRatioNet"], t["soStart"], t["soEnd"], t["usage"],
-                 t["usageRatioGross"], t["usageRatioNet"], None, t["nonSales"], t["itemJournal"], t["otherPurchases"]])
+    total = {**t, "branchName": "Total", "branchCode": "", "mdrPct": None, "pendapatan": None, "deltaGross": None, "delta": None}
+    rows.append([_cell(total, c[1]) for c in COLUMNS])
     with StreamingXlsxWriter(path) as xlsx:
         xlsx.add_static_sheet("Rasio Outlet", rows, widths=[c[2] for c in COLUMNS], bold_rows=(0, 2, len(rows) - 1))
     user = getattr(request.state, "user", None)

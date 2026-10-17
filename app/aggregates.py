@@ -16,12 +16,14 @@ import argparse
 import logging
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from app import database as db
 from app.database import SCHEMA, TABLE_TRANSACTIONS
 from app.esb_report import TYPE_CASE_SQL, TYPE_CONDITIONS, active_line_sql
+from app.config import get_settings
 from app.utils import today
 
 logger = logging.getLogger("aggregates")
@@ -171,27 +173,26 @@ def refresh_day(day: date) -> dict:
 
 
 # Like-for-like comparison of the running day (user decision 2026-10-17): the same weekday 1-5 weeks back, cut at
-# the time of today's last bill, so "today vs the same weekday last week" compares the same hours.
+# the current WIB time of the refresh (as the live card, /api/live), so "today vs the same weekday last week" compares
+# the same hours. salesDateIn is the outlet's wall clock, so the time of the last bill is no cut (Bali bills run on
+# WITA, an hour ahead).
 CMP_WEEKS = 5
 CUT_FILTER = f"{DAY_FILTER} AND substr(h.raw_data->>'salesDateIn', 12, 8) <= %(cut)s"
 SQL_CMP_DAILY = SQL_DAILY.replace(f"INSERT INTO {PORTAL}.agg_sales_daily", f"INSERT INTO {PORTAL}.agg_cmp_daily").replace(DAY_FILTER, CUT_FILTER)
 SQL_CMP_MENU = SQL_MENU.replace(f"INSERT INTO {PORTAL}.agg_menu_daily", f"INSERT INTO {PORTAL}.agg_cmp_menu").replace(DAY_FILTER, CUT_FILTER)
-SQL_CUT_TIME = f"""
-SELECT max(substr(h.raw_data->>'salesDateIn', 12, 8)) AS cut FROM {TABLE_TRANSACTIONS} h
-WHERE {DAY_FILTER} AND {TYPE_CONDITIONS['sales']} AND COALESCE(h.raw_data->>'salesDateIn', '') <> ''
-"""
 
 
 def refresh_compare(day: date) -> Optional[str]:
-    """Cut the same weekday 1..CMP_WEEKS weeks before `day` (the running day) at the time of its last bill."""
+    """Cut the same weekday 1..CMP_WEEKS weeks before `day` (the running day) at the current WIB time."""
     t0 = time.monotonic()
+    now = datetime.now(ZoneInfo(get_settings().timezone))
+    if now.date() != day:
+        return None
+    cut = now.strftime("%H:%M:%S")
     with db.transaction(timeout_ms=DAY_TIMEOUT_MS) as conn:
-        cut = conn.execute(SQL_CUT_TIME, {"day": day.isoformat()}).fetchone()["cut"]
         conn.execute(f"DELETE FROM {PORTAL}.agg_cmp_daily")
         conn.execute(f"DELETE FROM {PORTAL}.agg_cmp_menu")
         conn.execute(f"DELETE FROM {PORTAL}.agg_cmp_meta")
-        if not cut:
-            return None
         for w in range(1, CMP_WEEKS + 1):
             params = {"day": (day - timedelta(days=7 * w)).isoformat(), "cut": cut}
             conn.execute(SQL_CMP_DAILY, params)

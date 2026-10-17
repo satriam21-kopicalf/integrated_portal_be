@@ -29,7 +29,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("cc.monitor", "Monitor", "Cost Control · Stock opname"),
     ("cc.reviews", "Review", "Cost Control · Stock opname"),
     ("cc.entry", "Enter / import SO", "Cost Control · Stock opname"),
-    ("cc.reports", "SO report (xlsx)", "Cost Control · Stock opname"),
+    ("cc.reports", "SO report", "Cost Control · Stock opname"),
     ("cc.esb-export", "ESB export", "Cost Control · ESB"),
     ("cc.esb-compare", "ESB comparison", "Cost Control · ESB"),
     ("cc.lists", "Count lists", "Cost Control · Stock opname settings"),

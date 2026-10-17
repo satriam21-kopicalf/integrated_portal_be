@@ -23,7 +23,10 @@ DAILY = [
     day_row("2026-09-02", "TGP17", "Dine In", "sales", 5, 500_000, lines=10),
     day_row("2026-09-02", "CCI01", "Dine In", "void", 2, 100_000),
     day_row("2026-09-02", "TGP17", "Dine In", "other_cost", 1, 50_000, method="CUPPING"),
-    # previous period 2026-08-30 .. 2026-08-31
+    # default comparison: the same weekdays a week earlier, 2026-08-25 .. 2026-08-26 (user decision 2026-10-17)
+    day_row("2026-08-25", "CCI01", "Dine In", "sales", 10, 2_000_000),
+    day_row("2026-08-26", "OLD01", "Dine In", "sales", 1, 100_000),
+    # the days just before the period (custom comparisons, day over day growth)
     day_row("2026-08-30", "CCI01", "Dine In", "sales", 10, 2_000_000),
     day_row("2026-08-31", "OLD01", "Dine In", "sales", 1, 100_000),
 ]
@@ -154,7 +157,8 @@ Q = "dateFrom=2026-09-01&dateTo=2026-09-02"
 
 def test_filters_default_and_validation(client):
     body = client.get("/api/overview/kpis").json()
-    assert body["filters"]["from"] == "2026-08-04" and body["filters"]["to"] == "2026-09-02"  # 30 days to yesterday
+    assert body["filters"]["from"] == "2026-09-03" and body["filters"]["to"] == "2026-09-03"  # today
+    assert body["filters"]["previous"]["from"] == "2026-08-27"  # vs the same weekday last week
     assert client.get("/api/overview/kpis?dateFrom=2026-09-05&dateTo=2026-09-01").status_code == 400
     assert client.get("/api/overview/kpis?dateFrom=bad").status_code == 400
     assert client.get("/api/overview/kpis?dateFrom=2020-01-01&dateTo=2026-09-01").status_code == 400
@@ -163,7 +167,7 @@ def test_filters_default_and_validation(client):
 def test_kpis_vs_previous_period(client):
     body = client.get(f"/api/overview/kpis?{Q}").json()
     k = body["kpis"]
-    assert body["filters"]["previous"] == {"from": "2026-08-30", "to": "2026-08-31", "complete": True, "custom": False, "days": 2}
+    assert body["filters"]["previous"] == {"from": "2026-08-25", "to": "2026-08-26", "complete": True, "custom": False, "days": 2}
     assert k["sales"] == {"value": 2_500_000, "previous": 2_100_000, "deltaPct": 19.05}
     assert k["nettSales"]["value"] == 2_300_000
     assert k["bills"]["value"] == 20 and k["avgTicket"]["value"] == 125_000
@@ -258,7 +262,7 @@ def test_monthly_growth_per_calendar_day(client):
     aug, sep = months
     assert aug["month"] == "2026-08-01" and aug["days"] == 31 and not aug["partial"]
     assert sep["partial"] and sep["days"] == 2 and sep["subtotal"] == 2_500_000
-    assert sep["momPct"] == delta(2_500_000 / 2, 2_100_000 / 31)
+    assert sep["momPct"] == delta(2_500_000 / 2, 4_200_000 / 31)
 
 
 def delta(cur, prev):
@@ -290,7 +294,7 @@ def test_hourly_compare_periods(client):
     cur, cmp = body["current"], body["compare"]
     assert body["mode"] == "period" and cur["bills"] == 20 and cur["days"] == 2 and cur["peakHour"] == 9
     assert {h["hour"]: h["share"] for h in cur["hours"]} == {9: 75.0, 12: 25.0}
-    assert cmp["from"] == "2026-08-30" and cmp["to"] == "2026-08-31" and cmp["bills"] == 0
+    assert cmp["from"] == "2026-08-25" and cmp["to"] == "2026-08-26" and cmp["bills"] == 0
     custom = client.get(f"/api/overview/hourly-compare?{Q}&compareFrom=2026-09-01").json()["compare"]
     assert custom["to"] == "2026-09-02" and custom["bills"] == 20  # same length as the selected period
     assert client.get(f"/api/overview/hourly-compare?{Q}&compareFrom=2026-09-05&compareTo=2026-09-01").status_code == 400
@@ -332,11 +336,11 @@ def test_menu_detail(client):
 def test_growth_vs_previous_period(client):
     body = client.get(f"/api/overview/growth?{Q}").json()
     t = body["totals"]
-    assert body["compare"] == {"basis": "previous", "from": "2026-08-30", "to": "2026-08-31", "complete": True}
+    assert body["compare"] == {"basis": "previous", "from": "2026-08-25", "to": "2026-08-26", "complete": True}
     assert t["subtotal"] == 2_500_000 and t["compareSubtotal"] == 2_100_000 and t["growthAbs"] == 400_000
     assert t["growthPct"] == 19.05 and t["bucketsUp"] == 1 and t["bucketsDown"] == 0
     first, second = body["series"]
-    assert first["growthPct"] == 0.0 and first["compareFrom"] == "2026-08-30"
+    assert first["growthPct"] == 0.0 and first["compareFrom"] == "2026-08-25"
     assert second["compareSubtotal"] == 100_000 and second["growthPct"] == 400.0
     rows = {b["key"]: b for b in body["branches"]}
     assert rows["TGP17"]["status"] == "new" and rows["OLD01"]["status"] == "lost" and rows["CCI01"]["status"] == "flat"
@@ -360,7 +364,7 @@ def test_growth_sequential_per_day(client):
     week = client.get(f"/api/overview/growth?{Q}&basis=sequential&granularity=week").json()["series"]
     # the period's part of the week (2 days) per day vs the whole week before (7 days) per day
     assert week[0]["days"] == 2 and week[0]["compareDays"] == 7 and week[0]["compareFrom"] == "2026-08-24"
-    assert week[0]["avgPerDay"] == 1_250_000 and week[0]["growthPct"] == delta(1_250_000, 2_000_000 / 7)
+    assert week[0]["avgPerDay"] == 1_250_000 and week[0]["growthPct"] == delta(1_250_000, 4_100_000 / 7)
 
 
 def test_custom_comparison_period(client):
@@ -442,7 +446,7 @@ def test_average_sales_per_day_vs_comparison(client, monkeypatch):
     monkeypatch.setattr(ov, "branch_type_rows", fake_rows)
     body = client.get(f"/api/overview/average-sales?{Q}").json()
     assert body["filters"]["from"] == "2026-09-01" and body["weekday"] is None and body["days"] == 2
-    assert calls == [(date(2026, 9, 1), date(2026, 9, 2), None), (date(2026, 8, 30), date(2026, 8, 31), None)]
+    assert calls == [(date(2026, 9, 1), date(2026, 9, 2), None), (date(2026, 8, 25), date(2026, 8, 26), None)]
     rows = {r["key"]: r for r in body["rows"]}
     c = rows["CCI01"]
     assert c["averageSales"] == 2_000_000 and c["compareAverage"] == 1_500_000 and c["variancePct"] == 33.33

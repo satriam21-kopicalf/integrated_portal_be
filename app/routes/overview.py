@@ -1,14 +1,15 @@
 """Overview analytics, read from the integration_portal aggregates (app/aggregates.py).
 
 Common query parameters:
-  dateFrom, dateTo  YYYY-MM-DD; default: the last 30 complete days (ending yesterday, WIB)
+  dateFrom, dateTo  YYYY-MM-DD; default: today (WIB, the day so far)
   branch            branch_code, or several separated by commas (CCI01,CCI04)
   channel           comma separated visitPurposeName values, e.g. "Dine In,GoFood"
 
-The comparison period has the same length and ends the day before dateFrom, unless
-compareFrom (and optionally compareTo, default: same length) chooses another one, e.g.
-1-10 Sep vs 1-10 Aug; every comparison (KPIs, trend, channels, branches, basket, growth,
-busy hours, menus, breakdowns) then uses it.
+The comparison period has the same length and the same weekdays: it is moved back by whole weeks (today vs
+the same weekday last week, a 7-day period vs the 7 days before, a 30-day period vs 35 days earlier; months have
+different numbers of days, weekdays do not, user decision 2026-10-17), unless compareFrom (and optionally
+compareTo, default: same length) chooses another one, e.g. 1-10 Sep vs 1-10 Aug; every comparison (KPIs, trend,
+channels, branches, basket, growth, busy hours, menus, breakdowns) then uses it.
 Comparisons that reach before OVERVIEW_DATA_FROM (ESB roll-out finished at the
 end of July 2025) are left empty, so growth figures are never computed against
 a partially onboarded history.
@@ -59,7 +60,7 @@ MENU = f"{PORTAL}.agg_menu_daily"
 MENU_MONTHLY = f"{PORTAL}.agg_menu_monthly"
 HOURLY_MONTHLY = f"{PORTAL}.agg_hourly_monthly"
 REFRESH_LOG = f"{PORTAL}.agg_refresh_log"
-DEFAULT_DAYS = 30
+DEFAULT_DAYS = 1  # today
 MAX_DAYS = 3 * 366
 CACHE_TTL = 300
 GRANULARITIES = ("day", "week", "month")
@@ -80,7 +81,7 @@ class Filters:
     branch: Optional[str] = None
     channels: tuple[str, ...] = ()
     data_from: date = date.min
-    # chosen comparison period (None = the period of the same length just before)
+    # chosen comparison period (None = the same weekdays, whole weeks earlier)
     cmp_start: Optional[date] = None
     cmp_end: Optional[date] = None
 
@@ -89,12 +90,17 @@ class Filters:
         return (self.end - self.start).days + 1
 
     @property
+    def week_shift(self) -> int:
+        """Whole weeks that cover the period: the default comparison keeps the weekdays (Thursday vs Thursday)."""
+        return 7 * -(-self.days // 7)
+
+    @property
     def prev_start(self) -> date:
-        return self.cmp_start or self.start - timedelta(days=self.days)
+        return self.cmp_start or self.start - timedelta(days=self.week_shift)
 
     @property
     def prev_end(self) -> date:
-        return self.cmp_end or self.start - timedelta(days=1)
+        return self.cmp_end or self.end - timedelta(days=self.week_shift)
 
     @property
     def shift(self) -> int:
@@ -142,7 +148,7 @@ def _parse_date(value: str, name: str) -> date:
 
 def parse_filters(date_from: Optional[str], date_to: Optional[str], branch: Optional[str],
                   channel: Optional[str]) -> Filters:
-    end = _parse_date(date_to, "dateTo") if date_to else today() - timedelta(days=1)
+    end = _parse_date(date_to, "dateTo") if date_to else today()
     start = _parse_date(date_from, "dateFrom") if date_from else end - timedelta(days=DEFAULT_DAYS - 1)
     if start > end:
         raise BadRequest("dateFrom must not be after dateTo")
@@ -1253,7 +1259,7 @@ def get_meta():
     def build() -> dict:
         rows = db.fetch(f"SELECT channel, sum(bills)::int AS bills FROM {DAILY} WHERE tx_type = 'sales' "
                         "GROUP BY channel ORDER BY 2 DESC")
-        end = today() - timedelta(days=1)
+        end = today()
         return {"channels": [{"channel": r["channel"], "bills": r["bills"]} for r in rows],
                 "defaultPeriod": {"from": (end - timedelta(days=DEFAULT_DAYS - 1)).isoformat(), "to": end.isoformat()},
                 "freshness": freshness()}

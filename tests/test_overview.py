@@ -150,9 +150,25 @@ def fake_aggregates(monkeypatch):
                                                   "refreshedAt": "2026-09-02T10:25:00+00:00"})
     monkeypatch.setattr(ov, "data_start", lambda: date(2026, 8, 1))
     monkeypatch.setattr(ov, "today", lambda: date(2026, 9, 3))
+    monkeypatch.setattr(ov, "compare_cut", lambda day: None)
 
 
 Q = "dateFrom=2026-09-01&dateTo=2026-09-02"
+
+
+def test_today_is_compared_like_for_like(client, monkeypatch):
+    """Today (still running) vs the same weekday last week cut at the time of today's last bill (2026-10-17)."""
+    monkeypatch.setattr(ov, "compare_cut", lambda day: "14:03:00" if day == date(2026, 8, 27) else None)
+    prev = client.get("/api/overview/kpis").json()["filters"]["previous"]
+    assert (prev["from"], prev["to"], prev["until"]) == ("2026-08-27", "2026-08-27", "14:03")
+    f = ov.parse_filters(None, None, None, None)
+    assert f.cut_day == date(2026, 8, 27)
+    src = f.daily_source(date(2026, 8, 27), date(2026, 8, 27), ov.DAILY, ov.CMP_DAILY)
+    assert ov.CMP_DAILY in src and "DATE '2026-08-27'" in src
+    assert f.daily_source(date(2026, 9, 3), date(2026, 9, 3), ov.DAILY, ov.CMP_DAILY) == ov.DAILY  # today itself is whole
+    # a past period or a chosen comparison is never cut
+    assert ov.parse_filters("2026-09-01", "2026-09-02", None, None).cut_day is None
+    assert client.get(f"/api/overview/kpis?{Q}").json()["filters"]["previous"]["until"] is None
 
 
 def test_filters_default_and_validation(client):
@@ -167,7 +183,7 @@ def test_filters_default_and_validation(client):
 def test_kpis_vs_previous_period(client):
     body = client.get(f"/api/overview/kpis?{Q}").json()
     k = body["kpis"]
-    assert body["filters"]["previous"] == {"from": "2026-08-25", "to": "2026-08-26", "complete": True, "custom": False, "days": 2}
+    assert body["filters"]["previous"] == {"from": "2026-08-25", "to": "2026-08-26", "complete": True, "custom": False, "days": 2, "until": None}
     assert k["sales"] == {"value": 2_500_000, "previous": 2_100_000, "deltaPct": 19.05}
     assert k["nettSales"]["value"] == 2_300_000
     assert k["bills"]["value"] == 20 and k["avgTicket"]["value"] == 125_000
@@ -370,7 +386,7 @@ def test_growth_sequential_per_day(client):
 def test_custom_comparison_period(client):
     q = f"{Q}&compareFrom=2026-08-30&compareTo=2026-08-30"
     body = client.get(f"/api/overview/kpis?{q}").json()
-    assert body["filters"]["previous"] == {"from": "2026-08-30", "to": "2026-08-30", "complete": True, "custom": True, "days": 1}
+    assert body["filters"]["previous"] == {"from": "2026-08-30", "to": "2026-08-30", "complete": True, "custom": True, "days": 1, "until": None}
     assert body["kpis"]["sales"]["previous"] == 2_000_000 and body["kpis"]["sales"]["deltaPct"] == 25.0
     first, second = client.get(f"/api/overview/trend?{q}").json()["series"]
     assert first["previous"]["subtotal"] == 2_000_000 and second["previous"]["subtotal"] == 0  # 30 Aug lines up with 1 Sep

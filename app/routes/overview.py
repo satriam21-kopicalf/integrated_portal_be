@@ -60,6 +60,10 @@ MENU = f"{PORTAL}.agg_menu_daily"
 MENU_MONTHLY = f"{PORTAL}.agg_menu_monthly"
 HOURLY_MONTHLY = f"{PORTAL}.agg_hourly_monthly"
 REFRESH_LOG = f"{PORTAL}.agg_refresh_log"
+# today's comparison day cut at the time of today's last bill (app/aggregates.py refresh_compare)
+CMP_DAILY = f"{PORTAL}.agg_cmp_daily"
+CMP_MENU = f"{PORTAL}.agg_cmp_menu"
+CMP_META = f"{PORTAL}.agg_cmp_meta"
 DEFAULT_DAYS = 1  # today
 MAX_DAYS = 3 * 366
 CACHE_TTL = 300
@@ -84,6 +88,9 @@ class Filters:
     # chosen comparison period (None = the same weekdays, whole weeks earlier)
     cmp_start: Optional[date] = None
     cmp_end: Optional[date] = None
+    # like for like while the period ends today: the comparison's last day is cut at the time of today's last bill
+    cut_day: Optional[date] = None
+    cut_time: Optional[str] = None
 
     @property
     def days(self) -> int:
@@ -131,12 +138,21 @@ class Filters:
             "from": self.start.isoformat(), "to": self.end.isoformat(), "days": self.days,
             "previous": {"from": self.prev_start.isoformat(), "to": self.prev_end.isoformat(),
                          "complete": self.prev_complete, "custom": self.cmp_start is not None,
-                         "days": (self.prev_end - self.prev_start).days + 1},
+                         "days": (self.prev_end - self.prev_start).days + 1,
+                         "until": self.cut_time[:5] if self.cut_time else None},
             "branch": self.branch, "branches": parse_branches(self.branch), "channels": list(self.channels),
         }
 
     def key(self) -> str:
-        return f"{self.start}:{self.end}:{self.branch}:{','.join(self.channels)}:{self.cmp_start}:{self.cmp_end}"
+        return f"{self.start}:{self.end}:{self.branch}:{','.join(self.channels)}:{self.cmp_start}:{self.cmp_end}:{self.cut_time}"
+
+    def daily_source(self, start: date, end: date, daily: str, cut_table: str) -> str:
+        """`daily`, with the comparison day replaced by its cut when [start, end] holds it."""
+        if not self.cut_day or not (start <= self.cut_day <= end):
+            return daily
+        day = self.cut_day.isoformat()
+        return (f"(SELECT * FROM {daily} WHERE sales_date <> DATE '{day}' "
+                f"UNION ALL SELECT * FROM {cut_table} WHERE sales_date = DATE '{day}') src_cut")
 
 
 def _parse_date(value: str, name: str) -> date:
@@ -164,7 +180,27 @@ def parse_filters(date_from: Optional[str], date_to: Optional[str], branch: Opti
             raise BadRequest("compareFrom must not be after compareTo")
         if (ce - cs).days + 1 > MAX_DAYS:
             raise BadRequest(f"the comparison period is limited to {MAX_DAYS} days")
-    return Filters(start, end, scoped_branch(branch), channels, data_start(), cs, ce)
+    f = Filters(start, end, scoped_branch(branch), channels, data_start(), cs, ce)
+    if cs is None and end == today():
+        cut = compare_cut(f.prev_end)
+        if cut:
+            f = replace(f, cut_day=f.prev_end, cut_time=cut)
+    return f
+
+
+def compare_cut(day: date) -> Optional[str]:
+    """Time (HH:MM:SS) the comparison day `day` is cut at for today, None when no cut was built (cached 60 s)."""
+    key = f"cut:{day}:{today()}"
+    hit = _cache.get(key)
+    if hit is None:
+        try:
+            row = db.fetchrow(f"SELECT cut_time::text AS cut FROM {CMP_META} WHERE sales_date = %s AND for_day = %s",
+                              (day, today()))
+            hit = row["cut"] if row else ""
+        except Exception:  # noqa: BLE001 - no cut (e.g. before migration 016): compare the whole day
+            hit = ""
+        _cache.set(key, hit, 60)
+    return hit or None
 
 
 def data_start() -> date:
@@ -235,6 +271,7 @@ def sales_rows(f: Filters, start: date, end: date, group: tuple[str, ...] = (), 
     measures = "sum(bills)::int AS bills, sum(subtotal) AS subtotal"
     if table == DAILY:
         measures += ", sum(nett_sales) AS nett"
+        table = f.daily_source(start, end, DAILY, CMP_DAILY)
     cols = "".join(f"{g}, " for g in group)
     group_by = f" GROUP BY {', '.join(str(i) for i in range(1, len(group) + 1))}" if group else ""
     return db.fetch(
@@ -257,7 +294,7 @@ def day_rows(f: Filters, start: date, end: date, group: tuple[str, ...], tx_type
                    count(*)::int AS days
             FROM (SELECT branch_code, sales_date, tx_type, sum(bills) AS bills, sum(subtotal) AS subtotal,
                          sum(nett_sales) AS nett
-                  FROM {DAILY} WHERE {where} GROUP BY 1, 2, 3) d
+                  FROM {f.daily_source(start, end, DAILY, CMP_DAILY)} WHERE {where} GROUP BY 1, 2, 3) d
             GROUP BY {group_by}""",
         params,
     )
@@ -517,7 +554,7 @@ def rollup_source(f: Filters, monthly: str, daily: str, monthly_cols: str, daily
     return (
         f"""SELECT {monthly_cols} FROM {monthly} WHERE month >= %(first)s AND month < %(stop)s{cond}
             UNION ALL
-            SELECT {daily_cols} FROM {daily} WHERE sales_date BETWEEN %(start)s AND %(end)s
+            SELECT {daily_cols} FROM {f.daily_source(f.start, f.end, daily, CMP_MENU) if daily == MENU else daily} WHERE sales_date BETWEEN %(start)s AND %(end)s
                 AND NOT (sales_date >= %(first)s AND sales_date < %(stop)s){cond}""",
         params,
     )

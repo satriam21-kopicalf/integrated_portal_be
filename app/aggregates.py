@@ -17,6 +17,7 @@ import logging
 import sys
 import time
 from datetime import date, timedelta
+from typing import Optional
 
 from app import database as db
 from app.database import SCHEMA, TABLE_TRANSACTIONS
@@ -169,6 +170,38 @@ def refresh_day(day: date) -> dict:
     return {"day": day.isoformat(), "ms": ms, "subtotal": float(rec["agg"]), "ok": ok}
 
 
+# Like-for-like comparison of the running day (user decision 2026-10-17): the same weekday 1-5 weeks back, cut at
+# the time of today's last bill, so "today vs the same weekday last week" compares the same hours.
+CMP_WEEKS = 5
+CUT_FILTER = f"{DAY_FILTER} AND substr(h.raw_data->>'salesDateIn', 12, 8) <= %(cut)s"
+SQL_CMP_DAILY = SQL_DAILY.replace(f"INSERT INTO {PORTAL}.agg_sales_daily", f"INSERT INTO {PORTAL}.agg_cmp_daily").replace(DAY_FILTER, CUT_FILTER)
+SQL_CMP_MENU = SQL_MENU.replace(f"INSERT INTO {PORTAL}.agg_menu_daily", f"INSERT INTO {PORTAL}.agg_cmp_menu").replace(DAY_FILTER, CUT_FILTER)
+SQL_CUT_TIME = f"""
+SELECT max(substr(h.raw_data->>'salesDateIn', 12, 8)) AS cut FROM {TABLE_TRANSACTIONS} h
+WHERE {DAY_FILTER} AND {TYPE_CONDITIONS['sales']} AND COALESCE(h.raw_data->>'salesDateIn', '') <> ''
+"""
+
+
+def refresh_compare(day: date) -> Optional[str]:
+    """Cut the same weekday 1..CMP_WEEKS weeks before `day` (the running day) at the time of its last bill."""
+    t0 = time.monotonic()
+    with db.transaction(timeout_ms=DAY_TIMEOUT_MS) as conn:
+        cut = conn.execute(SQL_CUT_TIME, {"day": day.isoformat()}).fetchone()["cut"]
+        conn.execute(f"DELETE FROM {PORTAL}.agg_cmp_daily")
+        conn.execute(f"DELETE FROM {PORTAL}.agg_cmp_menu")
+        conn.execute(f"DELETE FROM {PORTAL}.agg_cmp_meta")
+        if not cut:
+            return None
+        for w in range(1, CMP_WEEKS + 1):
+            params = {"day": (day - timedelta(days=7 * w)).isoformat(), "cut": cut}
+            conn.execute(SQL_CMP_DAILY, params)
+            conn.execute(SQL_CMP_MENU, params)
+            conn.execute(f"INSERT INTO {PORTAL}.agg_cmp_meta (sales_date, for_day, cut_time) VALUES (%(day)s, %(for_day)s, %(cut)s)",
+                         {**params, "for_day": day.isoformat()})
+    logger.info("comparison cut %s for %s (%s weeks, %sms)", cut, day, CMP_WEEKS, int((time.monotonic() - t0) * 1000))
+    return cut
+
+
 def refresh_month(month: date) -> None:
     """Roll one calendar month up into agg_menu_monthly and agg_hourly_monthly."""
     t0 = time.monotonic()
@@ -211,6 +244,12 @@ def refresh_range(start: date, end: date, months_only: bool = False) -> int:
         except Exception:  # noqa: BLE001
             failed += 1
             logger.exception("%s monthly rollup failed", month)
+    if not months_only and start <= today() <= end:
+        try:
+            refresh_compare(today())
+        except Exception:  # noqa: BLE001
+            failed += 1
+            logger.exception("comparison cut failed")
     return failed
 
 

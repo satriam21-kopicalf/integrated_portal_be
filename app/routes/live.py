@@ -170,7 +170,9 @@ def pct(cur: float, prev: float):
 def build(limit: int, branch: Optional[str], channels: list[str]) -> dict:
     now = now_local()
     today = now.date()
-    yesterday = today - timedelta(days=1)
+    # compared with the same weekday last week, up to the same time (user decision 2026-10-17; the JSON keys keep
+    # their "yesterday" names for compatibility)
+    yesterday = today - timedelta(days=7)
     cond, params = filters(branch, channels)
     rows = day_rows(today.isoformat(), cond, params)
     t = summarise_day(rows)
@@ -181,6 +183,7 @@ def build(limit: int, branch: Optional[str], channels: list[str]) -> dict:
         "serverTime": now.isoformat(timespec="seconds"),
         "lastSyncedAt": synced.isoformat() if synced else None,
         "filters": {"branch": branch, "channels": channels},
+        "compareDate": yesterday.isoformat(),
         "today": {
             "date": today.isoformat(),
             **t,
@@ -198,7 +201,7 @@ def build(limit: int, branch: Optional[str], channels: list[str]) -> dict:
 
 @router.get("")
 def get_live(limit: int = Query(30, ge=1, le=100), branch: Optional[str] = None, channel: Optional[str] = None):
-    """Today so far (vs yesterday at the same time) and the latest sales."""
+    """Today so far (vs the same weekday last week at the same time) and the latest sales."""
     channels = sorted({c.strip() for c in (channel or "").split(",") if c.strip()})
     branch = scoped_branch(branch)
     key = f"live:{limit}:{branch}:{','.join(channels)}:{data_version.get()}"

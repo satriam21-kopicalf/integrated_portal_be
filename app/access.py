@@ -41,6 +41,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("cc.groups", "Item groups", "Cost Control · Stock opname settings"),
     ("cc.types", "Count types", "Cost Control · Stock opname settings"),
     ("cc.premix", "Premix calculator", "Cost Control · Stock opname settings"),
+    ("cc.locations", "Outlet locations", "Cost Control · Stock opname settings"),
     ("cc.waste-monitor", "Waste monitor", "Cost Control · Waste"),
     ("cc.waste-review", "Waste review", "Cost Control · Waste"),
     ("cc.ratio", "Outlet ratio", "Cost Control · Analytics"),
@@ -131,6 +132,7 @@ SO_RULES: list[tuple[Optional[str], str, tuple[str, ...]]] = [
     ("POST", "count-settings/types/preview", ("cc.types",)),
     (None, "count-settings/types", ("cc.types",)),
     (None, "count-settings/calendar", ("cc.types",)),
+    (None, "count-settings/locations", ("cc.locations",)),  # coordinates & radius of the facilities (06.9 §12.15)
     (None, "count-settings", ("cc.lists", "cc.groups", "cc.types")),
     (None, "count-exports", ("cc.esb-export",)),
     (None, "count-compare", ("cc.esb-compare",)),

@@ -28,7 +28,7 @@ class ExportRequest(BaseModel):
     dateTo: Optional[str] = None
     branch: Optional[str] = None  # branch_code, or several separated by commas
     type: Optional[str] = None  # sales (default, = ESB report) | void | other_cost | all
-    report: Optional[str] = None  # detail (default) | daily
+    report: Optional[str] = None  # detail (default) | daily | menu (one sheet, at most exports.MENU_MAX_DAYS days)
     format: Optional[str] = None  # xlsx (default) | gsheet (Google Sheets, when configured)
 
 
@@ -74,6 +74,8 @@ def create_export(req: ExportRequest, request: Request, user: dict = Depends(cur
     tx_type = req.type if req.type in TYPE_CONDITIONS else "sales"
     report = req.report if req.report in exports.REPORTS else "detail"
     fmt = req.format if req.format in exports.FORMATS else "xlsx"
+    if report == "menu" and (date_to - date_from).days + 1 > exports.MENU_MAX_DAYS:
+        return _error(f"Sales Recapitulation per Menu maksimal {exports.MENU_MAX_DAYS} hari (satu sheet Excel)", 422)
     if fmt == "gsheet" and not gsheets.enabled():
         return _error("Export ke Google Sheets belum dikonfigurasi di server", 422)
     job = exports.create_job(date_from, date_to, scoped_branch(req.branch), tx_type, report, user, fmt)

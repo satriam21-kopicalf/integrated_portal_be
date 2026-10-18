@@ -38,6 +38,7 @@ from app.database import SCHEMA, TABLE_TRANSACTIONS
 from app.esb_report import (REPORT_COLUMN_WIDTHS, REPORT_HEADERS, TYPE_CONDITIONS, TYPE_LABELS,
                             iter_report_rows)
 from app.daily_report import DAILY_COLUMN_WIDTHS, DAILY_HEADERS, daily_rows
+from app.menu_report import MENU_COLUMN_WIDTHS, MENU_HEADERS, menu_rows
 from app.utils import parse_branches
 from app.xlsx_stream import StreamingXlsxWriter
 
@@ -143,7 +144,12 @@ def cleanup_old_exports() -> None:
 REPORTS = {
     "detail": ("Sales Recapitulation Detail Report", "Sales_Recapitulation_Detail"),
     "daily": ("Daily Sales Recapitulation Report", "Daily_Sales_Recapitulation"),
+    "menu": ("Sales Recapitulation per Menu", "Sales_Recapitulation_per_Menu"),
 }
+# reports written as one file (and one Google Sheet) instead of parts
+SINGLE_FILE_REPORTS = ("daily", "menu")
+# Sales Recapitulation per Menu: one sheet only, so the period is capped (one month of every branch ≈ 450k rows)
+MENU_MAX_DAYS = 62
 
 
 def _file_name(date_from: date, date_to: date, branch: Optional[str], tx_type: str, report: str) -> str:
@@ -263,7 +269,7 @@ def _run(job: dict) -> None:
     slot = _acquire_slot(job)
     try:
         _update(job, status="running")
-        if job.get("format") == "gsheet" and job.get("report") != "daily":
+        if job.get("format") == "gsheet" and job.get("report") not in SINGLE_FILE_REPORTS:
             _generate_sheet_parts(job)
         else:
             _generate(job)
@@ -493,6 +499,9 @@ def _generate(job: dict) -> None:
     if job.get("report") == "daily":
         _generate_daily(job)
         return
+    if job.get("report") == "menu":
+        _generate_menu(job)
+        return
     date_from = date.fromisoformat(job["dateFrom"])
     branch = job["branch"]
     tx_type = job.get("type") or "sales"
@@ -553,6 +562,42 @@ def _generate(job: dict) -> None:
     _update(job, status="running" if job.get("format") == "gsheet" else "done", fileSize=path.stat().st_size,
             finishedAt=None if job.get("format") == "gsheet" else _now())
     logger.info("Export %s done: %s rows, %s sheet(s), %s bytes", job["id"], rows, sheets, job["fileSize"])
+
+
+def _generate_menu(job: dict) -> None:
+    """Sales Recapitulation per Menu: one sheet, header in row 1 (ready for a pivot table / filter); no title rows and
+    no summary sheet. Stops with a clear message if the period would not fit in one Excel sheet."""
+    date_from = date.fromisoformat(job["dateFrom"])
+    tx_type = job.get("type") or "sales"
+    path = job_file(job["id"])
+    rows = bills = 0
+    with StreamingXlsxWriter(str(path)) as xlsx:
+        sheet = xlsx.add_sheet("Report", widths=MENU_COLUMN_WIDTHS, header=MENU_HEADERS)
+        for offset in range(job["totalDays"]):
+            day = date_from + timedelta(days=offset)
+            day_bills = 0
+
+            def counted(headers):
+                nonlocal day_bills
+                for h in headers:
+                    day_bills += 1
+                    yield h
+
+            day_rows = menu_rows(day, counted(_day_headers(day, job["branch"], tx_type)))
+            if rows + len(day_rows) > MAX_SHEET_ROWS:
+                raise ValueError(f"Periode terlalu besar untuk satu sheet Excel (lebih dari {MAX_SHEET_ROWS + 1:,} baris "
+                                 f"sampai {day:%d-%m-%Y}). Perkecil periode atau pilih cabang.".replace(",", "."))
+            sheet.write_rows(day_rows)
+            rows += len(day_rows)
+            bills += day_bills
+            _update(job, daysDone=offset + 1, currentDate=day.isoformat(), rows=rows, headers=bills, items=rows, sheets=1)
+    if rows == 0:
+        path.unlink(missing_ok=True)
+        _update(job, status="done", fileName=None, finishedAt=_now())
+        return
+    _update(job, status="running" if job.get("format") == "gsheet" else "done", fileSize=path.stat().st_size,
+            finishedAt=None if job.get("format") == "gsheet" else _now())
+    logger.info("Menu export %s done: %s rows", job["id"], rows)
 
 
 def _generate_daily(job: dict) -> None:

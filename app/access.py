@@ -25,6 +25,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("overview", "Dashboard", "Main menu"),
     ("sales", "Sales Transactions", "Main menu"),
     ("stock-opname", "Stock Opname (count)", "Main menu"),
+    ("waste", "Waste (input)", "Main menu"),
     ("guide", "Guide", "Main menu"),
     ("cc.monitor", "Monitor", "Cost Control · Stock opname"),
     ("cc.reviews", "Review", "Cost Control · Stock opname"),
@@ -36,6 +37,8 @@ PAGES: list[tuple[str, str, str]] = [
     ("cc.groups", "Item groups", "Cost Control · Stock opname settings"),
     ("cc.types", "Count types", "Cost Control · Stock opname settings"),
     ("cc.premix", "Premix calculator", "Cost Control · Stock opname settings"),
+    ("cc.waste-monitor", "Waste monitor", "Cost Control · Waste"),
+    ("cc.waste-review", "Waste review", "Cost Control · Waste"),
     ("cc.ratio", "Outlet ratio", "Cost Control · Analytics"),
     ("cc.cogs", "COGS & usage", "Cost Control · Analytics"),
 ]
@@ -44,7 +47,7 @@ CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))
 EDITABLE_ROLES = ("cost_control", "user")
 DEFAULT_ROLE_PAGES = {
     "user": ["overview", "sales", "stock-opname", "guide"],
-    "cost_control": ["overview", "sales", "stock-opname", "guide", *CC_PAGES],
+    "cost_control": ["overview", "sales", "stock-opname", "waste", "guide", *CC_PAGES],
 }
 
 _cache = TTLCache()

@@ -74,8 +74,12 @@ def create_export(req: ExportRequest, request: Request, user: dict = Depends(cur
     tx_type = req.type if req.type in TYPE_CONDITIONS else "sales"
     report = req.report if req.report in exports.REPORTS else "detail"
     fmt = req.format if req.format in exports.FORMATS else "xlsx"
-    if report == "menu" and (date_to - date_from).days + 1 > exports.MENU_MAX_DAYS:
+    days = (date_to - date_from).days + 1
+    if report == "menu" and days > exports.MENU_MAX_DAYS:
         return _error(f"Sales Recapitulation per Menu maksimal {exports.MENU_MAX_DAYS} hari (satu sheet Excel)", 422)
+    if report == "menu" and fmt == "gsheet" and days > exports.MENU_MAX_DAYS_GSHEET:
+        return _error(f"Sales Recapitulation per Menu ke Google Sheets maksimal {exports.MENU_MAX_DAYS_GSHEET} hari "
+                      "(batas 10 juta sel); pilih Excel untuk periode lebih panjang", 422)
     if fmt == "gsheet" and not gsheets.enabled():
         return _error("Export ke Google Sheets belum dikonfigurasi di server", 422)
     job = exports.create_job(date_from, date_to, scoped_branch(req.branch), tx_type, report, user, fmt)

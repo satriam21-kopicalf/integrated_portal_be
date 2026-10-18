@@ -150,6 +150,7 @@ REPORTS = {
 SINGLE_FILE_REPORTS = ("daily", "menu")
 # Sales Recapitulation per Menu: one sheet only, so the period is capped (one month of every branch ≈ 450k rows)
 MENU_MAX_DAYS = 62
+MENU_MAX_DAYS_GSHEET = 31  # 10 million cells per Google Sheet: ~500k rows of 20 columns
 
 
 def _file_name(date_from: date, date_to: date, branch: Optional[str], tx_type: str, report: str) -> str:

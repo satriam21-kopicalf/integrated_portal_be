@@ -27,6 +27,10 @@ PAGES: list[tuple[str, str, str]] = [
     ("stock-opname", "Stock Opname (count)", "Main menu"),
     ("waste", "Waste (input)", "Main menu"),
     ("guide", "Guide", "Main menu"),
+    ("form.pic-check-in", "PIC Check In (form)", "Form"),
+    ("form.outlet", "Monitoring Outlet (form)", "Form"),
+    ("form.product", "Monitoring Product (form)", "Form"),
+    ("form.tools", "Tools & Heavy Tools (form)", "Form"),
     ("cc.monitor", "Monitor", "Cost Control · Stock opname"),
     ("cc.reviews", "Review", "Cost Control · Stock opname"),
     ("cc.entry", "Enter / import SO", "Cost Control · Stock opname"),
@@ -41,6 +45,10 @@ PAGES: list[tuple[str, str, str]] = [
     ("cc.waste-review", "Waste review", "Cost Control · Waste"),
     ("cc.ratio", "Outlet ratio", "Cost Control · Analytics"),
     ("cc.cogs", "COGS & usage", "Cost Control · Analytics"),
+    ("mon.pic-check-in", "PIC Check In", "Monitoring"),
+    ("mon.outlet", "Monitoring Outlet", "Monitoring"),
+    ("mon.product", "Monitoring Product", "Monitoring"),
+    ("mon.tools", "Tools & Heavy Tools", "Monitoring"),
 ]
 PAGE_KEYS = tuple(p[0] for p in PAGES)
 CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))

@@ -324,7 +324,9 @@ def overview(codes: Optional[tuple[str, ...]] = None) -> list[dict]:
             "rating": d.get("rating"), "reviewCount": d.get("userRatingCount"), "businessStatus": business,
             "openNow": None if business and business != "OPERATIONAL" else is_open(hours.get("periods"), now),
             "todayHours": today_hours(hours.get("weekdayDescriptions"), now), "weekHours": hours.get("weekdayDescriptions") or [],
-            "mapsUri": d.get("googleMapsUri"), "reviews": [_review(x) for x in d.get("reviews") or []],
+            # the reviews Google gives (it has no "newest" order in the Places API New), newest first
+            "mapsUri": d.get("googleMapsUri"),
+            "reviews": sorted((_review(x) for x in d.get("reviews") or []), key=lambda x: x["publishedAt"] or "", reverse=True),
             "fetchedAt": r["fetched_at"].isoformat() if r.get("fetched_at") else None, "error": r.get("error"),
         })
     return out

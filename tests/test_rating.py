@@ -114,3 +114,11 @@ def test_one_place_one_outlet(places):
     gmaps.sync()
     assert places["rows"]["A"]["place_id"] == "beji" and places["rows"]["A"]["status"] == "auto"
     assert places["rows"]["B"]["place_id"] is None and places["rows"]["B"]["status"] == "missing"
+
+
+def test_reviews_newest_first(places):
+    places["rows"]["CCI01"] = {"branch_code": "CCI01", "status": "auto", "place_id": "p1", "data": {"reviews": [
+        {"rating": 5, "publishTime": "2024-06-29T10:00:00Z"}, {"rating": 4, "publishTime": "2026-08-08T10:00:00Z"},
+        {"rating": 3, "publishTime": "2025-05-12T10:00:00Z"}]}}
+    got = next(o for o in gmaps.overview() if o["code"] == "CCI01")["reviews"]
+    assert [r["publishedAt"][:4] for r in got] == ["2026", "2025", "2024"]

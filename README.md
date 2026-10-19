@@ -148,6 +148,14 @@ Data dibaca dari tabel agregat (bukan `raw_data`), dibangun ulang per tanggal ol
 - Setiap tanggal di-rebuild dalam satu transaksi lalu direkonsiliasi: Σ subtotal Sales agregat harus sama dengan `transactions_pos_sales`.
 - **Backfill / rebuild manual** di VPS: `bash /opt/integrated-portal-be/repo/scripts/aggregates.sh --from 2025-06-09 --to 2026-10-03` (≈ 2 dtk per hari).
 
+### Rating & Review → Google Maps (migration 020)
+
+`app/gmaps.py` membaca outlet Kopi Calf di Google Maps lewat **Places API (New)** resmi: nama, rating, jumlah ulasan, alamat, status bisnis, jam buka (buka/tutup dihitung saat dibaca, WIB) dan ulasan yang diberikan API (**maksimal 5 per outlet**, pilihan Google; seluruh ulasan hanya lewat Business Profile API).
+
+- **Pencocokan outlet → tempat** (`integration_portal.gmaps_place`): Text Search nama cabang di sekitar koordinat outlet (Lokasi Outlet). `auto` = tempat "Kopi Calf" ≤ 300 m; `review` = lebih jauh / outlet tanpa koordinat tetapi nama mirip; `missing` = tidak ditemukan (dicari ulang tiap 7 hari); `manual` / `none` = dipilih super admin / Cost Control di halaman. Satu tempat hanya untuk satu outlet.
+- **Sinkron**: cron 06:10 WIB (`python -m app.gmaps`), tombol sinkron di halaman, `--branch KODE`, `--rematch` (cari ulang semua kecuali manual). Log: `/var/log/integrated-portal-gmaps.log`. Hanya place id yang disimpan permanen; data tempat = hasil ambil terakhir (ditimpa tiap sinkron, tanpa riwayat), ditampilkan dengan atribusi Google Maps.
+- **Endpoint**: `GET /api/rating/google-maps`, `GET .../search?q&branch`, `PUT .../places/{branch}` `{"placeId"}` (null = tidak ada di Google Maps), `POST .../sync`. Halaman `rating.google-maps` (off untuk semua role sampai dicentang); edit hanya super admin / Cost Control.
+
 ## Konfigurasi
 
 Lihat [.env.example](.env.example). Kredensial database sama dengan yang dipakai engine ESB di VPS (`/opt/esb-integration/.env`).
@@ -170,6 +178,7 @@ Lihat [.env.example](.env.example). Kredensial database sama dengan yang dipakai
 | `GOOGLE_SERVICE_ACCOUNT_JSON_B64` | kosong | Alternatif: service account + Shared Drive |
 | `GOOGLE_SHARE_ROLE` | `writer` | Akses user pembuat export ke sheet (`writer`/`reader`) |
 | `GOOGLE_SHARE_LINK` | `view` | Akses siapa pun yang punya link sheet/folder export (`view`/`edit`/`none`) |
+| `GOOGLE_PLACES_API_KEY` | kosong | Key Places API (New) untuk Rating & Review → Google Maps; batasi ke Places API (New) + IP VPS |
 | `TIMEZONE` | `Asia/Jakarta` | Untuk rentang tanggal default |
 | `OVERVIEW_DATA_FROM` | `2025-08-01` | Awal riwayat lengkap untuk perbandingan Overview |
 | `SESSION_HOURS` / `SESSION_REMEMBER_DAYS` | 12 / 30 | Masa berlaku sesi login (biasa / "keep me signed in") |

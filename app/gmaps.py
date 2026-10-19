@@ -7,8 +7,11 @@ chosen by Google: the full list needs the Business Profile API, see the portal g
 Mapping outlet → Google place (integration_portal.gmaps_place, migration 020):
   * auto: a Text Search "<branch name>" biased to the outlet's coordinates (Cost Control → Lokasi Outlet) whose result
     is named "Kopi Calf …" and lies within AUTO_RADIUS_M of the outlet;
-  * review: a "Kopi Calf" result found but farther away, or the outlet has no coordinates: shown, flagged to confirm;
+  * review: a "Kopi Calf" result farther away (or the outlet has no coordinates) that shares a word of the outlet's
+    name (Kopi Calf To Go *Depok Beji*): shown, flagged to confirm;
   * missing: nothing found (searched again after a week);
+  one place belongs to one outlet: when two outlets land on the same place, the better match keeps it (manual, auto,
+  then the name, then the distance) and the other one searches again without the places already taken.
   * manual: picked by Cost Control / super admin in the portal (search → choose), or "none" = not on Google Maps.
 
 Only the place id is kept for good; the place data is the latest fetch, replaced at every sync (no history), shown
@@ -22,6 +25,7 @@ import argparse
 import json
 import logging
 import math
+import re
 import sys
 import threading
 from datetime import datetime
@@ -89,8 +93,20 @@ def outlets() -> list[dict]:
             for r in rows]
 
 
+_STOP = {"kopi", "calf", "to", "go", "signature", "the", "coffee", "cafe", "outlet", "jl", "jalan"}
+
+
 def _is_kopi_calf(name: str) -> bool:
     return "kopi calf" in " ".join((name or "").lower().replace("-", " ").split())
+
+
+def _words(name: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]+", (name or "").lower()) if w not in _STOP and len(w) > 1}
+
+
+def name_score(outlet_name: str, place_name: str) -> int:
+    """Words the outlet's name and the place's name share, besides "Kopi Calf To Go"."""
+    return len(_words(outlet_name) & _words(place_name))
 
 
 def search(query: str, lat: Optional[float] = None, lng: Optional[float] = None, limit: int = 5) -> list[dict]:
@@ -108,17 +124,27 @@ def search(query: str, lat: Optional[float] = None, lng: Optional[float] = None,
     return out
 
 
-def match(outlet: dict) -> dict:
-    """{place_id, status, distance} for an outlet from a Text Search (see the module doc)."""
-    found = [c for c in search(outlet["name"], outlet.get("latitude"), outlet.get("longitude")) if _is_kopi_calf(c["name"])]
-    if not found:
-        return {"place_id": None, "status": "missing", "distance": None}
-    if outlet.get("latitude") is not None:
-        found.sort(key=lambda c: c["distanceM"] if c["distanceM"] is not None else math.inf)
-        best = found[0]
-        ok = best["distanceM"] is not None and best["distanceM"] <= AUTO_RADIUS_M
-        return {"place_id": best["placeId"], "status": "auto" if ok else "review", "distance": best["distanceM"]}
-    return {"place_id": found[0]["placeId"], "status": "review", "distance": None}
+def match(outlet: dict, exclude: frozenset = frozenset()) -> dict:
+    """{place_id, status, distance} for an outlet from a Text Search (see the module doc); `exclude`: places of other outlets."""
+    found = [c for c in search(outlet["name"], outlet.get("latitude"), outlet.get("longitude"))
+             if _is_kopi_calf(c["name"]) and c["placeId"] not in exclude]
+    found.sort(key=lambda c: c["distanceM"] if c["distanceM"] is not None else math.inf)
+    near = [c for c in found if c["distanceM"] is not None and c["distanceM"] <= AUTO_RADIUS_M]
+    if near:
+        return {"place_id": near[0]["placeId"], "status": "auto", "distance": near[0]["distanceM"]}
+    # stable sort: the nearest first among the same score
+    named = sorted((c for c in found if name_score(outlet["name"], c["name"])), key=lambda c: -name_score(outlet["name"], c["name"]))
+    if named:
+        return {"place_id": named[0]["placeId"], "status": "review", "distance": named[0]["distanceM"]}
+    return {"place_id": None, "status": "missing", "distance": None}
+
+
+def _rank(row: dict) -> tuple:
+    """Which of the outlets on one place keeps it: manual, auto, the name, the distance."""
+    name = ((row.get("data") or {}).get("displayName") or {}).get("text", "")
+    d = row.get("match_distance_m")
+    return (row.get("status") != "manual", row.get("status") != "auto", -name_score(row.get("branch_name", ""), name),
+            d if d is not None else math.inf)
 
 
 def details(place_id: str) -> dict:
@@ -201,28 +227,55 @@ def sync(branch: Optional[str] = None, rematch: bool = False) -> dict:
         known = _rows([o["code"] for o in todo])
         now = datetime.now(WIB)
         stats = {"outlets": len(todo), "matched": 0, "refreshed": 0, "missing": 0, "failed": 0}
-        for o in todo:
-            row = known.get(o["code"]) or {}
-            status, place = row.get("status"), row.get("place_id")
+        by_code = {o["code"]: o for o in todo}
+
+        def matched(o: dict, exclude: frozenset = frozenset()) -> None:
+            m = match(o, exclude)
+            _save(o["code"], o["name"], place_id=m["place_id"], status=m["status"], match_distance_m=m["distance"],
+                  matched_at=now, error=None, data=None, fetched_at=None)
+            stats["matched"] += bool(m["place_id"])
+
+        def guarded(o: dict, job) -> bool:
             try:
-                stale = row.get("matched_at") is None or (now - row["matched_at"]).days >= RETRY_MISSING_DAYS
-                if status not in ("manual", "none") and (not place or rematch) and (status != "missing" or stale or rematch):
-                    m = match(o)
-                    place, status = m["place_id"], m["status"]
-                    _save(o["code"], o["name"], place_id=place, status=status, match_distance_m=m["distance"],
-                          matched_at=now, error=None, **({"data": None, "fetched_at": None} if not place else {}))
-                    stats["matched"] += bool(place)
-                if not place:
-                    stats["missing"] += status == "missing"
-                    continue
-                _save(o["code"], o["name"], data=details(place), fetched_at=datetime.now(WIB), error=None)
-                stats["refreshed"] += 1
+                job()
+                return True
             except PlacesError as e:
                 logger.warning("%s %s: %s", o["code"], o["name"], e)
                 _save(o["code"], o["name"], error=str(e)[:300])
                 stats["failed"] += 1
                 if " 403 " in f" {e} " or "API key" in str(e):  # the key itself is refused: stop, every call would fail
-                    break
+                    raise
+                return False
+
+        try:
+            # 1. outlets without a place (all of them with --rematch)
+            for o in todo:
+                row = known.get(o["code"]) or {}
+                status, place = row.get("status"), row.get("place_id")
+                stale = row.get("matched_at") is None or (now - row["matched_at"]).days >= RETRY_MISSING_DAYS
+                if status not in ("manual", "none") and (not place or rematch) and (status != "missing" or stale or rematch):
+                    guarded(o, lambda o=o: matched(o))
+            # 2. one place, one outlet: the others search again without the places already taken
+            owners: dict[str, list[dict]] = {}
+            for r in _rows().values():
+                if r.get("place_id"):
+                    owners.setdefault(r["place_id"], []).append(r)
+            taken = frozenset(owners)
+            for group in owners.values():
+                for loser in sorted(group, key=_rank)[1:]:
+                    o = by_code.get(loser["branch_code"])
+                    if o and loser.get("status") != "manual":
+                        guarded(o, lambda o=o: matched(o, taken))
+            # 3. refresh every place
+            for code, r in _rows(list(by_code)).items():
+                if r.get("place_id") and code in by_code:
+                    o = by_code[code]
+                    if guarded(o, lambda o=o, r=r: _save(o["code"], o["name"], data=details(r["place_id"]),
+                                                       fetched_at=datetime.now(WIB), error=None)):
+                        stats["refreshed"] += 1
+        except PlacesError:
+            pass  # the key is refused: logged, the rest waits for the next run
+        stats["missing"] = sum(1 for r in _rows(list(by_code)).values() if r.get("status") == "missing")
         return stats
     finally:
         _lock.release()

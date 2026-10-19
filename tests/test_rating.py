@@ -68,8 +68,11 @@ def test_match_near_outlet_or_flag_for_review(places):
     m = gmaps.match(places["outlets"][0])
     assert m["place_id"] == "near" and m["status"] == "auto" and m["distance"] < 100
     places["search"] = [place("far", "Kopi Calf Kemang", -6.27, 106.81)]
-    assert gmaps.match(places["outlets"][0])["status"] == "review"  # ~1.1 km away
-    assert gmaps.match(places["outlets"][1]) == {"place_id": "far", "status": "review", "distance": None}  # no coordinates
+    assert gmaps.match(places["outlets"][0])["status"] == "review"  # ~1.1 km away, same name
+    assert gmaps.match(places["outlets"][0], frozenset({"far"}))["status"] == "missing"  # taken by another outlet
+    assert gmaps.match(places["outlets"][1])["status"] == "missing"  # no coordinates and another name
+    places["search"] = [place("jw", "Kopi Calf To Go Jatiwaringin", -6.27, 106.9)]
+    assert gmaps.match(places["outlets"][1]) == {"place_id": "jw", "status": "review", "distance": None}
     places["search"] = [place("other", "Kopi Kenangan Kemang", -6.26, 106.81)]
     assert gmaps.match(places["outlets"][0])["status"] == "missing"
 
@@ -78,7 +81,8 @@ def test_sync_matches_once_then_refreshes(places):
     places["search"] = [place("p1", "Kopi Calf Kemang", -6.26, 106.81)]
     places["details"] = {"p1": {"id": "p1", "rating": 4.7, "userRatingCount": 619}}
     stats = gmaps.sync()
-    assert stats["refreshed"] == 2 and places["rows"]["CCI01"]["data"]["rating"] == 4.7
+    assert stats["refreshed"] == 1 and places["rows"]["CCI01"]["data"]["rating"] == 4.7
+    assert places["rows"]["CCI02"]["status"] == "missing"
     places["calls"].clear()
     gmaps.sync()
     assert "places:searchText" not in places["calls"]  # matched places are not searched again
@@ -99,3 +103,14 @@ def test_open_now_from_regular_hours():
     assert gmaps.is_open(None, monday_9) is None
     week = [f"{d}: 07.00–22.00" for d in ("Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu")]
     assert gmaps.today_hours(week, monday_9) == "07.00–22.00"
+
+
+def test_one_place_one_outlet(places):
+    """Two outlets on one place: the nearer one with the same name keeps it, the other searches again without it."""
+    places["outlets"] = [{"code": "A", "name": "Kopi Calf To Go Depok Beji", "latitude": -6.37, "longitude": 106.82},
+                         {"code": "B", "name": "Kopi Calf To Go Sawangan Depok", "latitude": -6.40, "longitude": 106.78}]
+    places["search"] = [place("beji", "Kopi Calf To Go Depok Beji", -6.3705, 106.8201)]
+    places["details"] = {"beji": {"id": "beji", "displayName": {"text": "Kopi Calf To Go Depok Beji"}}}
+    gmaps.sync()
+    assert places["rows"]["A"]["place_id"] == "beji" and places["rows"]["A"]["status"] == "auto"
+    assert places["rows"]["B"]["place_id"] is None and places["rows"]["B"]["status"] == "missing"

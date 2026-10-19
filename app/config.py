@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     google_service_account_json_b64: str = ""
     google_share_role: str = "writer"  # access of the exporting user: writer | reader
     google_share_link: str = "view"  # anyone with the link: view | edit | none (no request for access)
+    # Rating & Review → Google Maps (app/gmaps.py): Places API (New) key, restricted to that API and the VPS IP;
+    # empty = the page shows that the sync is not set up
+    google_places_api_key: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:

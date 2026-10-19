@@ -21,3 +21,6 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # and after the daytime valuation syncs (13:15 / 18:15 WIB, ~5 min): 13:30 and 18:30 WIB
 30 6,11 * * * root bash /opt/integrated-portal-be/repo/scripts/cost_control.sh --recent-days 10 >> /var/log/integrated-portal-cost-control.log 2>&1
 0 23 * * 6 root bash /opt/integrated-portal-be/repo/scripts/cost_control.sh --recent-days 40 >> /var/log/integrated-portal-cost-control.log 2>&1
+
+# Rating & Review -> Google Maps (Places API): match new outlets, refresh rating / reviews / hours, 06:10 WIB
+10 23 * * * root docker exec integrated-portal-be python -m app.gmaps >> /var/log/integrated-portal-gmaps.log 2>&1

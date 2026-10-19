@@ -29,6 +29,7 @@ from app.routes.stock_opname import router as stock_opname_router
 from app.routes.waste import router as waste_router
 from app.routes.pic_checkin import router as pic_checkin_router
 from app.routes.monitoring import router as monitoring_router
+from app.routes.rating import router as rating_router
 from app.scope import branch_scope
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -114,6 +115,7 @@ app.include_router(stock_opname_router, dependencies=signed_in)  # stock opname 
 app.include_router(waste_router)  # waste (skeleton): pages waste, cc.waste-monitor, cc.waste-review
 app.include_router(pic_checkin_router)  # PIC Check In: before the generic form routes
 app.include_router(monitoring_router)  # forms & monitoring (skeleton): pages form.*, mon.*
+app.include_router(rating_router)  # Rating & Review (skeleton): pages rating.*
 app.include_router(access_router)  # pages of roles & users, job titles, departments
 app.include_router(activity_router)  # superadmin reads; any signed-in user reports page views
 app.include_router(realtime_router)

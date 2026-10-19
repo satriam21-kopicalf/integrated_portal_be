@@ -50,6 +50,10 @@ PAGES: list[tuple[str, str, str]] = [
     ("mon.outlet", "Monitoring Outlet", "Monitoring"),
     ("mon.product", "Monitoring Product", "Monitoring"),
     ("mon.tools", "Tools & Heavy Tools", "Monitoring"),
+    ("rating.google-maps", "Google Maps", "Rating & Review"),
+    ("rating.shopeefood", "ShopeeFood", "Rating & Review"),
+    ("rating.gofood", "GoFood", "Rating & Review"),
+    ("rating.grabfood", "GrabFood", "Rating & Review"),
 ]
 PAGE_KEYS = tuple(p[0] for p in PAGES)
 CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))

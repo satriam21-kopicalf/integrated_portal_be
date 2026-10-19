@@ -16,7 +16,7 @@ from app import database as db
 logger = logging.getLogger("activity")
 
 T = "integration_portal.activity_log"
-CATEGORIES = ("auth", "page", "filter", "transaction", "export", "user", "profile", "access", "system")
+CATEGORIES = ("auth", "page", "filter", "transaction", "export", "user", "profile", "access", "form", "system")
 MAX_DETAILS = 8000  # characters of JSON per entry
 
 

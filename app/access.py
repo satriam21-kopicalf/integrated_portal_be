@@ -59,7 +59,7 @@ PAGE_KEYS = tuple(p[0] for p in PAGES)
 CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))
 EDITABLE_ROLES = ("cost_control", "user")
 DEFAULT_ROLE_PAGES = {
-    "user": ["overview", "sales", "stock-opname", "guide", "form.pic-check-in"],
+    "user": ["overview", "sales", "stock-opname", "guide", "form.pic-check-in", "form.outlet", "form.product"],
     "cost_control": ["overview", "sales", "stock-opname", "waste", "guide", *CC_PAGES],
 }
 

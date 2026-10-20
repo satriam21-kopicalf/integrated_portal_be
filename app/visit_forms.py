@@ -1,0 +1,370 @@
+"""Form → Monitoring Product / Monitoring Outlet and their Monitoring pages (2026-10-20), from the workbook
+"Form Visit" (integrated_portal docs): Monitoring Product = AVAILIBILITY to KUALITAS PRODUK, Monitoring Outlet =
+KEBERSIHAN DAN RATING OUTLET to KENYAMANAN OUTLET (Administrasi & Finance, overall performance and the signatures of
+the workbook are not part of these forms).
+
+A PIC visits one outlet at a time: the visit is a draft (saved as it is filled, continued later) for the signed-in
+account and the branch picked (a PIC with several branches fills one visit per branch), then submitted. Every item is
+rated UNDER / MEET / EXCEED with a note and camera photos (stamped in the browser with the time, the branch and the
+position; the server keeps the position and its distance to the outlet). An item rated UNDER needs a note and at least
+one photo (user decision 2026-10-20). Tables integration_portal.visit_form and visit_form_photo (migration 023).
+"""
+import json
+from datetime import date, datetime, timezone
+from typing import Any, Optional
+
+from app import database as db
+from app.pic_checkin import CheckInError, branch_options, judge, locations, parse_photo
+
+T = "integration_portal.visit_form"
+TP = "integration_portal.visit_form_photo"
+RATINGS = ("UNDER", "MEET", "EXCEED")
+MAX_PHOTOS_PER_ITEM = 3
+
+
+class VisitError(CheckInError):
+    """A visit refused with a message for the PIC (HTTP 422)."""
+
+
+def _items(prefix: str, labels: list[str]) -> list[dict]:
+    return [{"key": f"{prefix}.{i}", "no": i, "label": label, "kind": "rating"} for i, label in enumerate(labels, start=1)]
+
+
+PREMIX = ["Premix Premium", "Premix Regular", "Premix Premium Oat", "Premix Smooth", "Premix Magic", "Premix Jefferson",
+          "Premix Coklat", "Premix Tea Series", "Premix Matcha", "Premix Taro", "Premix Dirty & Ice White", "Colbrew Liquid",
+          "Cream Based", "Creamer Liquid", "Dimsum", "Roti Kukus", "Puding", "Side Dish Lainnya", "Maincourse"]
+
+DEFINITIONS: dict[str, dict] = {
+    "product": {
+        "title": "Monitoring Product",
+        "groups": [
+            {"key": "availability", "title": "Availability", "subtitle": "Ketersediaan dan Kesesuaian Produk", "sections": [
+                {"key": "stok-preparation", "title": "Stok Preparation", "items": _items("stok-preparation", [f"Ketersediaan Stok {x}" for x in PREMIX])},
+                {"key": "shelf-life", "title": "Shelf Life Label", "items": _items("shelf-life", [f"Shelf Life Label {x}" for x in PREMIX])},
+                {"key": "espresso-beans", "title": "Espresso dan Beans", "items": _items("espresso-beans", [
+                    "Ketersediaan Stok Espresso Premium", "Ketersediaan Stok Espresso Regular", "Ketersediaan Stok Beans Premium",
+                    "Ketersediaan Stok Beans Regular", "Ketersediaan Stok Beans Cold Brew", "Ketersediaan Stok Beans Specialty"])},
+                {"key": "bahan-penolong", "title": "Bahan Penolong", "items": _items("bahan-penolong", [
+                    "Ketersediaan Cup Es", "Ketersediaan Cup Frosted", "Ketersediaan Cup Jefferson", "Ketersediaan Paper Cup",
+                    "Ketersediaan Es Batu", "Ketersediaan Es Batu dalam Klip", "Ketersediaan Can Dan Tutup Can (Sudah Stiker)",
+                    "Ketersediaan Botol Dan Tutup Botol (Sudah Stiker)", "Ketersediaan Straw 5mm", "Ketersediaan Straw 6mm",
+                    "Ketersediaan Lunch Box S", "Ketersediaan Lunch Box M", "Ketersediaan Set Spork", "Ketersediaan Greeting Card",
+                    "Ketersediaan Beans Card Specialty", "Ketersediaan Plastik Take Away"])},
+                {"key": "bahan-baku", "title": "Bahan Baku", "items": _items("bahan-baku", [
+                    "Kesesuaian Form Request Bahan Baku", "Kesesuaian Form Request FM, Oat Milk, Ice Cream, Brookfarm",
+                    "Kesesuaian Form Request Ice Hot, Rich Gold", "Kesesuaian Form Request Bahan Baku Maincourse",
+                    "Kesesuaian Form Request Bahan Baku Side Dishes"])},
+            ]},
+            {"key": "kualitas-produk", "title": "Kualitas Produk", "subtitle": "5 Senses - Taste", "sections": [
+                {"key": "kualitas-produk", "title": "Kualitas Produk", "items": _items("kualitas-produk", [
+                    "Cupping Premium", "Cupping Regular", "Cupping All Premix", "Cupping All Cream & Foam", "Cupping Menu Specialty",
+                    "Test Food WIP Side Dish & Main Course", "Test Food Menu Side Dish", "Test Food Menu Main Course",
+                    "Handling & Treatment Product"])},
+            ]},
+        ],
+    },
+    "outlet": {
+        "title": "Monitoring Outlet",
+        "groups": [
+            {"key": "kebersihan-rating", "title": "Kebersihan dan Rating Outlet", "subtitle": "5 Senses - Eye", "sections": [
+                {"key": "kebersihan", "title": "Kebersihan Outlet", "items": _items("kebersihan", [
+                    "Kebersihan Area Bar Bersih", "Kebersihan Area Bar Kotor", "Kebersihan Area Kitchen", "Kebersihan Tools",
+                    "Kebersihan Area Facade / Halaman Depan", "Kebersihan Area Indoor", "Kebersihan Area Outdoor",
+                    "Kebersihan Area Toilet & Musholla", "Kebersihan Area Warehouse", "Kebersihan Area Mess"])},
+                {"key": "rating", "title": "Rating Outlet", "items": _items("rating", [
+                    "Rating Google", "Rating Gofood", "Rating Grabfood", "Rating Shopeefood", "Complain Customer"])},
+            ]},
+            {"key": "barista-flow", "title": "Barista + Flow Bar", "subtitle": "Memastikan Role and Responsibilities di dalam Bar", "sections": [
+                {"key": "barista", "title": "Barista", "items": [
+                    {"key": "barista.1", "no": 1, "label": "Grooming Barista", "kind": "rating"},
+                    {"key": "barista.2", "no": 2, "label": "Kedisiplinan Barista", "kind": "rating"},
+                    {"key": "barista.3", "no": 3, "label": "Nama Barista Telat", "kind": "text"},
+                    {"key": "barista.4", "no": 4, "label": "Update Rekap Absen Barista", "kind": "rating"}]},
+                {"key": "flow-bar", "title": "Flow Bar", "items": _items("flow-bar", [
+                    "Speed Of Service", "Kesesuaian Role Barista", "Kesesuaian Flow Bar"])},
+            ]},
+            {"key": "hospitality", "title": "Hospitality", "subtitle": "5 Senses - Ear - Produk Knowledge", "sections": [
+                {"key": "hospitality", "title": "Hospitality", "items": _items("hospitality", [
+                    "Product Knowledge Barista", "Greetings Barista", "Offering Product Barista", "Music"])},
+            ]},
+            {"key": "smell", "title": "Smell", "subtitle": "5 Senses - Wangi Outlet - Alat alat Kebersihan", "sections": [
+                {"key": "alat-kebersihan", "title": "Kelengkapan Alat Kebersihan", "items": _items("alat-kebersihan", [
+                    "Sapu", "Pengki", "Pel Area Bar", "Pel Area Customer", "Wipper", "Pel Karet", "Sikat Mesin Kopi & Grinder",
+                    "Lap Area Bar Depan", "Lap Area Kitchen & Bar Belakang", "Lap Area Customer", "Lap Gelas", "Lap Tools",
+                    "Lap Mesin Kopi", "Lap Steam Milk", "Lap Basket Porta"])},
+                {"key": "chemical", "title": "Kelengkapan Chemical", "items": _items("chemical", [
+                    "Sabun Kaca", "Sabun Cuci Piring", "Sabun Cuci Tangan", "Sabun Lantai", "Sabun Toilet", "Pengharum AC",
+                    "Pengharum Ruangan", "Pengharum Mushola & Toilet"])},
+            ]},
+            {"key": "kenyamanan", "title": "Kenyamanan Outlet", "subtitle": "5 Senses - Suhu Ruangan & Kenyamanan Outlet", "sections": [
+                {"key": "kenyamanan", "title": "Kenyamanan Outlet", "items": _items("kenyamanan", [
+                    "Kondisi Ruangan", "Kondisi Furniture (Sofa, Meja, Karpet, Kursi)", "Kondisi Internet Customer",
+                    "Kondisi Merchandise"])},
+            ]},
+        ],
+    },
+}
+
+
+def all_items(form: str) -> list[dict]:
+    """Every item of a form with its group and section."""
+    out = []
+    for g in DEFINITIONS[form]["groups"]:
+        for s in g["sections"]:
+            for it in s["items"]:
+                out.append({**it, "group": g["key"], "section": s["key"], "section_title": s["title"]})
+    return out
+
+
+def _counts(form: str, answers: dict) -> dict:
+    rated = [answers.get(it["key"], {}).get("rating") for it in all_items(form) if it["kind"] == "rating"]
+    c = {r: sum(1 for x in rated if x == r) for r in RATINGS}
+    done = sum(c.values())
+    return {"under": c["UNDER"], "meet": c["MEET"], "exceed": c["EXCEED"], "rated": done, "total": len(rated),
+            "score": round((c["MEET"] + c["EXCEED"]) * 100 / done, 1) if done else None}
+
+
+# ---------------------------------------------------------------- visits
+
+COLS = """v.id::text, v.form, v.status, v.user_id::text, v.username, v.full_name, v.branch_code, v.branch_name, v.started_at,
+    v.updated_at, v.submitted_at, v.answers, v.counts, v.score, v.latitude, v.longitude, v.accuracy_m, v.outlet_latitude,
+    v.outlet_longitude, v.radius_m, v.distance_m, v.outside_radius, v.low_accuracy"""
+
+
+def _num(v: Any) -> Optional[float]:
+    return float(v) if v is not None else None
+
+
+def photos_of(visit_id: str) -> list[dict]:
+    rows = db.fetch(f"""SELECT id::text, item_key, taken_at, uploaded_at, latitude, longitude, distance_m, outside_radius
+                        FROM {TP} WHERE visit_id::text = %s ORDER BY uploaded_at""", (visit_id,))
+    return [{"id": r["id"], "item": r["item_key"], "takenAt": r["taken_at"].isoformat() if r["taken_at"] else None,
+             "uploadedAt": r["uploaded_at"].isoformat(), "latitude": _num(r["latitude"]), "longitude": _num(r["longitude"]),
+             "distanceM": r["distance_m"], "outsideRadius": r["outside_radius"]} for r in rows]
+
+
+def _view(r: dict, photos: Optional[list] = None) -> dict:
+    out = {
+        "id": r["id"], "form": r["form"], "status": r["status"], "userId": r["user_id"], "username": r["username"],
+        "name": r["full_name"] or r["username"], "branchCode": r["branch_code"], "branchName": r["branch_name"],
+        "startedAt": r["started_at"].isoformat(), "updatedAt": r["updated_at"].isoformat(),
+        "submittedAt": r["submitted_at"].isoformat() if r["submitted_at"] else None,
+        "counts": r["counts"] or _counts(r["form"], r["answers"] or {}), "score": _num(r["score"]),
+        "latitude": _num(r["latitude"]), "longitude": _num(r["longitude"]), "accuracyM": _num(r["accuracy_m"]),
+        "outletLatitude": _num(r["outlet_latitude"]), "outletLongitude": _num(r["outlet_longitude"]), "radiusM": r["radius_m"],
+        "distanceM": r["distance_m"], "outsideRadius": r["outside_radius"], "lowAccuracy": r["low_accuracy"],
+    }
+    if photos is not None:
+        out["answers"] = r["answers"] or {}
+        out["photos"] = photos
+    return out
+
+
+def get_visit(visit_id: str) -> Optional[dict]:
+    return db.fetchrow(f"SELECT {COLS} FROM {T} v WHERE v.id::text = %s", (visit_id,))
+
+
+def full(visit_id: str) -> dict:
+    row = get_visit(visit_id)
+    return _view(row, photos_of(visit_id))
+
+
+def form_state(form: str, user: dict) -> dict:
+    """What the form page needs: the account, its branches, its drafts and its latest visits."""
+    branches = branch_options(user)
+    drafts = db.fetch(f"SELECT {COLS} FROM {T} v WHERE v.form = %s AND v.user_id::text = %s AND v.status = 'DRAFT' ORDER BY v.updated_at DESC",
+                      (form, str(user["id"])))
+    recent = db.fetch(f"""SELECT {COLS} FROM {T} v WHERE v.form = %s AND v.user_id::text = %s AND v.status = 'SUBMITTED'
+                         ORDER BY v.submitted_at DESC LIMIT 10""", (form, str(user["id"])))
+    return {"definition": DEFINITIONS[form], "user": {"id": str(user["id"]), "username": user["username"],
+            "name": user.get("full_name") or user["username"]}, "branches": branches,
+            "drafts": [_view(r) for r in drafts], "recent": [_view(r) for r in recent]}
+
+
+def open_visit(form: str, user: dict, branch_code: str) -> dict:
+    """The user's draft for the branch, started when there is none."""
+    branch = next((b for b in branch_options(user) if b["code"] == branch_code), None)
+    if branch is None:
+        raise VisitError("Cabang tidak tersedia untuk akun Anda")
+    row = db.fetchrow(f"""SELECT id::text FROM {T} WHERE form = %s AND user_id::text = %s AND branch_code = %s AND status = 'DRAFT'""",
+                      (form, str(user["id"]), branch["code"]))
+    if row is None:
+        row = db.fetchrow(
+            f"""INSERT INTO {T} (form, user_id, username, full_name, role, branch_code, branch_name)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (form, user_id, branch_code) WHERE status = 'DRAFT' DO UPDATE SET updated_at = now()
+                RETURNING id::text""",
+            (form, user["id"], user["username"], user.get("full_name"), user["role"], branch["code"], branch["name"]))
+    return full(row["id"])
+
+
+def own_draft(form: str, user: dict, visit_id: str) -> dict:
+    row = get_visit(visit_id)
+    if row is None or row["form"] != form or row["user_id"] != str(user["id"]):
+        raise LookupError("Kunjungan tidak ditemukan")
+    if row["status"] != "DRAFT":
+        raise VisitError("Kunjungan ini sudah dikirim")
+    return row
+
+
+def save_answers(form: str, user: dict, visit_id: str, patch: dict) -> dict:
+    """Merges {item: {rating?, note?}} into the draft's answers."""
+    row = own_draft(form, user, visit_id)
+    known = {it["key"]: it for it in all_items(form)}
+    answers = dict(row["answers"] or {})
+    for key, value in patch.items():
+        if key not in known or not isinstance(value, dict):
+            raise VisitError(f"Butir tidak dikenal: {key}")
+        cur = dict(answers.get(key) or {})
+        if "rating" in value:
+            rating = value["rating"]
+            if rating is not None and (known[key]["kind"] != "rating" or rating not in RATINGS):
+                raise VisitError("Penilaian harus UNDER, MEET atau EXCEED")
+            cur["rating"] = rating
+        if "note" in value:
+            cur["note"] = (str(value["note"] or "")).strip()[:1000] or None
+        answers[key] = {k: v for k, v in cur.items() if v is not None}
+    answers = {k: v for k, v in answers.items() if v}
+    counts = _counts(form, answers)
+    db.fetchrow(f"""UPDATE {T} SET answers = %s::jsonb, counts = %s::jsonb, score = %s, updated_at = now()
+                    WHERE id::text = %s RETURNING id""", (json.dumps(answers), json.dumps(counts), counts["score"], visit_id))
+    return {"answers": answers, "counts": counts}
+
+
+def _outlet(branch_code: str) -> Optional[dict]:
+    return locations([branch_code]).get(branch_code)
+
+
+def add_photo(form: str, user: dict, visit_id: str, item: str, photo: str, lat: Optional[float], lng: Optional[float],
+              taken_at: Optional[datetime]) -> dict:
+    row = own_draft(form, user, visit_id)
+    if item not in {it["key"] for it in all_items(form)}:
+        raise VisitError(f"Butir tidak dikenal: {item}")
+    n = db.fetchrow(f"SELECT count(*)::int AS n FROM {TP} WHERE visit_id::text = %s AND item_key = %s", (visit_id, item))["n"]
+    if n >= MAX_PHOTOS_PER_ITEM:
+        raise VisitError(f"Maksimal {MAX_PHOTOS_PER_ITEM} foto per butir; hapus satu dulu")
+    photo_type, data = parse_photo(photo)
+    j = judge(lat, lng, None, _outlet(row["branch_code"])) if lat is not None and lng is not None else {"distance_m": None, "outside_radius": False}
+    db.fetchrow(
+        f"""INSERT INTO {TP} (visit_id, item_key, photo, photo_type, taken_at, latitude, longitude, distance_m, outside_radius, uploaded_by)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+        (visit_id, item, data, photo_type, taken_at, lat, lng, j["distance_m"], j["outside_radius"], user["id"]))
+    db.fetchrow(f"UPDATE {T} SET updated_at = now() WHERE id::text = %s RETURNING id", (visit_id,))
+    return {"photos": photos_of(visit_id)}
+
+
+def delete_photo(form: str, user: dict, visit_id: str, photo_id: str) -> dict:
+    own_draft(form, user, visit_id)
+    db.fetchrow(f"DELETE FROM {TP} WHERE id::text = %s AND visit_id::text = %s RETURNING id", (photo_id, visit_id))
+    return {"photos": photos_of(visit_id)}
+
+
+def missing(form: str, answers: dict, photos: list[dict]) -> list[dict]:
+    """What blocks the submit: unrated items, and UNDER items without a note or a photo."""
+    with_photo = {p["item"] for p in photos}
+    out = []
+    for it in all_items(form):
+        if it["kind"] != "rating":
+            continue
+        a = answers.get(it["key"]) or {}
+        if not a.get("rating"):
+            out.append({"key": it["key"], "label": it["label"], "need": "rating"})
+        elif a["rating"] == "UNDER":
+            need = [x for x, ok in (("note", bool(a.get("note"))), ("photo", it["key"] in with_photo)) if not ok]
+            if need:
+                out.append({"key": it["key"], "label": it["label"], "need": "+".join(need)})
+    return out
+
+
+def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Optional[float], accuracy: Optional[float],
+           device: Optional[str], ip: Optional[str]) -> dict:
+    row = own_draft(form, user, visit_id)
+    photos = photos_of(visit_id)
+    todo = missing(form, row["answers"] or {}, photos)
+    if todo:
+        rating = sum(1 for t in todo if t["need"] == "rating")
+        under = len(todo) - rating
+        parts = ([f"{rating} butir belum dinilai"] if rating else []) + ([f"{under} butir UNDER belum lengkap catatan/foto"] if under else [])
+        raise VisitError("Belum bisa dikirim: " + ", ".join(parts))
+    outlet = _outlet(row["branch_code"]) or {}
+    j = judge(lat, lng, accuracy, outlet) if lat is not None and lng is not None else {"distance_m": None, "outside_radius": False, "low_accuracy": False}
+    counts = _counts(form, row["answers"] or {})
+    db.fetchrow(
+        f"""UPDATE {T} SET status = 'SUBMITTED', submitted_at = now(), updated_at = now(), counts = %s::jsonb, score = %s,
+                latitude = %s, longitude = %s, accuracy_m = %s, outlet_latitude = %s, outlet_longitude = %s, radius_m = %s,
+                distance_m = %s, outside_radius = %s, low_accuracy = %s, device = %s, ip = %s
+            WHERE id::text = %s RETURNING id""",
+        (json.dumps(counts), counts["score"], lat, lng, accuracy, outlet.get("latitude"), outlet.get("longitude"),
+         outlet.get("radius_m"), j["distance_m"], j["outside_radius"], j.get("low_accuracy", False), (device or "")[:300] or None,
+         ip, visit_id))
+    return full(visit_id)
+
+
+def discard(form: str, user: dict, visit_id: str) -> None:
+    own_draft(form, user, visit_id)
+    db.fetchrow(f"DELETE FROM {T} WHERE id::text = %s AND status = 'DRAFT' RETURNING id", (visit_id,))
+
+
+# ---------------------------------------------------------------- monitoring
+
+def monitor(form: str, date_from: date, date_to: date, branches: Optional[list[str]], user_id: Optional[str] = None,
+            limit: int = 1000) -> dict:
+    """Submitted visits of a period (WIB days) with the figures, the performance per section and the most frequent
+    findings (items rated UNDER)."""
+    where = ["v.form = %(f)s", "v.status = 'SUBMITTED'", "(v.submitted_at AT TIME ZONE 'Asia/Jakarta')::date BETWEEN %(a)s AND %(b)s"]
+    params: dict[str, Any] = {"f": form, "a": date_from, "b": date_to, "lim": limit}
+    if branches is not None:
+        where.append("v.branch_code = ANY(%(br)s)")
+        params["br"] = branches
+    if user_id:
+        where.append("v.user_id::text = %(u)s")
+        params["u"] = user_id
+    cond = " AND ".join(where)
+    rows = db.fetch(f"""SELECT {COLS}, (SELECT count(*)::int FROM {TP} p WHERE p.visit_id = v.id) AS photo_count
+                        FROM {T} v WHERE {cond} ORDER BY v.submitted_at DESC LIMIT %(lim)s""", params)
+    items = all_items(form)
+    sections: dict[str, dict] = {}
+    findings: dict[str, dict] = {}
+    for r in rows:
+        answers = r["answers"] or {}
+        for it in items:
+            rating = (answers.get(it["key"]) or {}).get("rating")
+            if it["kind"] != "rating" or not rating:
+                continue
+            s = sections.setdefault(it["section"], {"key": it["section"], "title": it["section_title"], "group": it["group"],
+                                                    "under": 0, "meet": 0, "exceed": 0})
+            s[rating.lower()] += 1
+            if rating == "UNDER":
+                f = findings.setdefault(it["key"], {"key": it["key"], "label": it["label"], "section": it["section_title"],
+                                                    "count": 0, "branches": set()})
+                f["count"] += 1
+                f["branches"].add(r["branch_name"])
+    data = []
+    for r in rows:
+        v = _view(r)
+        v["photoCount"] = r["photo_count"]
+        data.append(v)
+    scores = [v["score"] for v in data if v["score"] is not None]
+    summary = {"visits": len(data), "branches": len({v["branchCode"] for v in data}), "pics": len({v["userId"] for v in data}),
+               "under": sum(v["counts"]["under"] for v in data), "meet": sum(v["counts"]["meet"] for v in data),
+               "exceed": sum(v["counts"]["exceed"] for v in data),
+               "score": round(sum(scores) / len(scores), 1) if scores else None,
+               "outside": sum(1 for v in data if v["outsideRadius"])}
+    order = {s["key"]: i for i, s in enumerate(s for g in DEFINITIONS[form]["groups"] for s in g["sections"])}
+    top = sorted(findings.values(), key=lambda f: (-f["count"], f["label"]))[:15]
+    pics = {}
+    for v in data:
+        pics.setdefault(v["userId"], {"id": v["userId"], "name": v["name"], "n": 0})["n"] += 1
+    return {"definition": DEFINITIONS[form], "data": data, "summary": summary,
+            "sections": sorted(sections.values(), key=lambda s: order.get(s["key"], 99)),
+            "findings": [{**f, "branches": sorted(f["branches"])} for f in top],
+            "pics": sorted(pics.values(), key=lambda p: -p["n"]), "truncated": len(rows) >= limit}
+
+
+def photo(photo_id: str) -> Optional[dict]:
+    return db.fetchrow(f"""SELECT p.photo, p.photo_type, v.user_id::text, v.branch_code, v.form, v.status
+                           FROM {TP} p JOIN {T} v ON v.id = p.visit_id WHERE p.id::text = %s""", (photo_id,))
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)

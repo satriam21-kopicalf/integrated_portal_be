@@ -29,6 +29,7 @@ from app.routes.stock_opname import router as stock_opname_router
 from app.routes.waste import router as waste_router
 from app.routes.pic_checkin import router as pic_checkin_router
 from app.routes.monitoring import router as monitoring_router
+from app.routes.visit_forms import router as visit_forms_router
 from app.routes.rating import router as rating_router
 from app.scope import branch_scope
 
@@ -114,6 +115,7 @@ app.include_router(cost_control_router, dependencies=[Depends(require_page("cc.c
 app.include_router(stock_opname_router, dependencies=signed_in)  # stock opname through the kopicalf gateway (pages per path)
 app.include_router(waste_router)  # waste (skeleton): pages waste, cc.waste-monitor, cc.waste-review
 app.include_router(pic_checkin_router)  # PIC Check In: before the generic form routes
+app.include_router(visit_forms_router)  # Monitoring Product / Outlet forms and monitoring: before the generic routes
 app.include_router(monitoring_router)  # forms & monitoring (skeleton): pages form.*, mon.*
 app.include_router(rating_router)  # Rating & Review (skeleton): pages rating.*
 app.include_router(access_router)  # pages of roles & users, job titles, departments

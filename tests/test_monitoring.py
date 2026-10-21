@@ -10,7 +10,7 @@ def test_pages_in_the_catalog_and_off_by_default():
     for f in FORMS:
         assert f"form.{f}" in keys and f"mon.{f}" in keys
     # PIC Check In, Monitoring Outlet and Product are ready: role user fills them in; Tools and every monitoring page stay off
-    assert [p for p in access.DEFAULT_ROLE_PAGES["user"] if p.startswith(("form.", "mon."))] == ["form.pic-check-in", "form.outlet", "form.product"]
+    assert [p for p in access.DEFAULT_ROLE_PAGES["user"] if p.startswith(("form.", "mon."))] == ["form.pic-check-in", "form.product", "form.outlet"]
     assert not any(p.startswith(("form.", "mon.")) for p in access.DEFAULT_ROLE_PAGES["cost_control"])
     assert not any(p.startswith(("form.", "mon.")) for p in access.CC_PAGES)
 

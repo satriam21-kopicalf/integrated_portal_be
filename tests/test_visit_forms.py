@@ -7,11 +7,11 @@ from tests.test_auth import anon, login, store  # noqa: F401 (fixtures)
 def test_items_follow_the_form_visit_workbook():
     product, outlet = vf.all_items("product"), vf.all_items("outlet")
     assert len(product) == 19 + 19 + 6 + 16 + 5 + 9 == 74
-    assert len(outlet) == 10 + 5 + 4 + 3 + 4 + 15 + 8 + 4 == 53
+    assert len(outlet) == 10 + 5 + 4 + 3 + 4 + 15 + 8 + 4 + 7 == 60  # + Administrasi & Finance (2026-10-21)
     assert [g["title"] for g in vf.DEFINITIONS["product"]["groups"]] == ["Availability", "Kualitas Produk"]
     assert [g["title"] for g in vf.DEFINITIONS["outlet"]["groups"]][0] == "Kebersihan dan Rating Outlet"
-    assert vf.DEFINITIONS["outlet"]["groups"][-1]["title"] == "Kenyamanan Outlet"
-    assert len({i["key"] for i in product}) == 74 and len({i["key"] for i in outlet}) == 53
+    assert [g["title"] for g in vf.DEFINITIONS["outlet"]["groups"]][-2:] == ["Kenyamanan Outlet", "Administrasi & Finance"]
+    assert len({i["key"] for i in product}) == 74 and len({i["key"] for i in outlet}) == 60
     late = next(i for i in outlet if i["label"] == "Nama Barista Telat")
     assert late["kind"] == "text"  # a name, not a rating
 
@@ -22,13 +22,14 @@ def test_counts_and_what_blocks_the_submit():
     answers[items[0]["key"]] = {"rating": "UNDER"}
     answers[items[1]["key"]] = {"rating": "EXCEED"}
     c = vf._counts("outlet", answers)
-    assert (c["under"], c["exceed"], c["rated"], c["total"]) == (1, 1, 52, 52) and c["score"] == round(51 * 100 / 52, 1)
+    assert (c["under"], c["exceed"], c["rated"], c["total"]) == (1, 1, 59, 59) and c["score"] == round(58 * 100 / 59, 1)
     todo = vf.missing("outlet", answers, [])
     assert todo == [{"key": items[0]["key"], "label": items[0]["label"], "need": "note+photo"}]
     answers[items[0]["key"]]["note"] = "Lantai bar basah"
     assert vf.missing("outlet", answers, [{"item": items[0]["key"]}]) == []
     del answers[items[5]["key"]]
-    assert vf.missing("outlet", answers, [{"item": items[0]["key"]}])[0]["need"] == "rating"
+    assert vf.missing("outlet", answers, [{"item": items[0]["key"]}]) == []  # unrated items do not block (2026-10-21)
+    assert vf.unrated("outlet", answers) == 1
 
 
 def test_answers_are_checked_and_merged(monkeypatch):
@@ -64,7 +65,7 @@ def test_endpoints_follow_their_pages(anon, store, page_access, monkeypatch):
 def test_signature_is_optional_and_needs_a_name(monkeypatch):
     from tests.test_pic_checkin import _jpeg
     saved = {}
-    monkeypatch.setattr(vf, "own_draft", lambda form, user, vid: {"answers": {}, "branch_code": "CCI01"})
+    monkeypatch.setattr(vf, "own_draft", lambda form, user, vid: {"answers": {"rating.1": {"rating": "MEET"}}, "branch_code": "CCI01"})
     monkeypatch.setattr(vf, "photos_of", lambda vid: [])
     monkeypatch.setattr(vf, "missing", lambda form, answers, photos: [])
     monkeypatch.setattr(vf, "_outlet", lambda code: None)

@@ -28,8 +28,8 @@ PAGES: list[tuple[str, str, str]] = [
     ("waste", "Waste (input)", "Main menu"),
     ("guide", "Guide", "Main menu"),
     ("form.pic-check-in", "PIC Check In (form)", "Form"),
-    ("form.outlet", "Monitoring Outlet (form)", "Form"),
     ("form.product", "Monitoring Product (form)", "Form"),
+    ("form.outlet", "Monitoring Outlet (form)", "Form"),
     ("form.tools", "Tools & Heavy Tools (form)", "Form"),
     ("cc.monitor", "Monitor", "Cost Control · Stock opname"),
     ("cc.reviews", "Review", "Cost Control · Stock opname"),
@@ -46,10 +46,12 @@ PAGES: list[tuple[str, str, str]] = [
     ("cc.waste-review", "Waste review", "Cost Control · Waste"),
     ("cc.ratio", "Outlet ratio", "Cost Control · Analytics"),
     ("cc.cogs", "COGS & usage", "Cost Control · Analytics"),
+    ("mon.overview", "Overview", "Monitoring"),
     ("mon.pic-check-in", "PIC Check In", "Monitoring"),
-    ("mon.outlet", "Monitoring Outlet", "Monitoring"),
     ("mon.product", "Monitoring Product", "Monitoring"),
+    ("mon.outlet", "Monitoring Outlet", "Monitoring"),
     ("mon.tools", "Tools & Heavy Tools", "Monitoring"),
+    ("mon.branch-groups", "Branch groups", "Monitoring"),
     ("rating.google-maps", "Google Maps", "Rating & Review"),
     ("rating.shopeefood", "ShopeeFood", "Rating & Review"),
     ("rating.gofood", "GoFood", "Rating & Review"),
@@ -59,7 +61,7 @@ PAGE_KEYS = tuple(p[0] for p in PAGES)
 CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))
 EDITABLE_ROLES = ("cost_control", "user")
 DEFAULT_ROLE_PAGES = {
-    "user": ["overview", "sales", "stock-opname", "guide", "form.pic-check-in", "form.outlet", "form.product"],
+    "user": ["overview", "sales", "stock-opname", "guide", "form.pic-check-in", "form.product", "form.outlet"],
     "cost_control": ["overview", "sales", "stock-opname", "waste", "guide", *CC_PAGES],
 }
 

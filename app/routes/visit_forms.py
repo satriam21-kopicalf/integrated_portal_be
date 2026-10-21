@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from app import activity, visit_forms as vf
+from app import activity, branch_groups, visit_forms as vf
 from app.pic_checkin import CheckInError
 from app.access import deny, has_page
 from app.activity import client_ip
@@ -152,7 +152,8 @@ def _mon_page(form: str, request: Request, user: dict) -> None:
 
 @router.get("/api/monitoring/{form}")
 def monitoring(form: str, request: Request, dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None),
-               branch: Optional[str] = None, userId: Optional[str] = None, user: dict = Depends(current_user)) -> dict:
+               branch: Optional[str] = None, userId: Optional[str] = None, group: Optional[str] = Query(None, max_length=60),
+               user: dict = Depends(current_user)) -> dict:
     if form not in FORMS:
         return skeleton.monitoring(form, request, user)
     _mon_page(form, request, user)
@@ -164,6 +165,7 @@ def monitoring(form: str, request: Request, dateFrom: Optional[date] = Query(Non
         raise HTTPException(422, detail="Maksimal 1 tahun sekali tampil")
     scoped = scoped_branch(branch)
     branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
+    branches = branch_groups.narrow(branches, group)  # Monitoring → Branch groups (CCI, CTG, CTGP …)
     return {"period": {"from": start.isoformat(), "to": end.isoformat()}, **vf.monitor(form, start, end, branches, userId)}
 
 

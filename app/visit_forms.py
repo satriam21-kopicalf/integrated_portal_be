@@ -1,13 +1,14 @@
 """Form → Monitoring Product / Monitoring Outlet and their Monitoring pages (2026-10-20), from the workbook
 "Form Visit" (integrated_portal docs): Monitoring Product = AVAILIBILITY to KUALITAS PRODUK, Monitoring Outlet =
-KEBERSIHAN DAN RATING OUTLET to KENYAMANAN OUTLET (Administrasi & Finance, overall performance and the signatures of
-the workbook are not part of these forms).
+KEBERSIHAN DAN RATING OUTLET to KENYAMANAN OUTLET, plus ADMINISTRASI & FINANCE (added 2026-10-21); the overall
+performance and the signatures of the workbook are not part of these forms.
 
 A PIC visits one outlet at a time: the visit is a draft (saved as it is filled, continued later) for the signed-in
 account and the branch picked (a PIC with several branches fills one visit per branch), then submitted. Every item is
 rated UNDER / MEET / EXCEED with a note and camera photos (stamped in the browser with the time, the branch and the
 position; the server keeps the position and its distance to the outlet). An item rated UNDER needs a note and at least
-one photo (user decision 2026-10-20). Tables integration_portal.visit_form and visit_form_photo (migration 023).
+one photo (user decision 2026-10-20); items left unrated do not block the sending (2026-10-21: at least one rated).
+Tables integration_portal.visit_form and visit_form_photo (migration 023).
 """
 import json
 from datetime import date, datetime, timezone
@@ -100,6 +101,12 @@ DEFINITIONS: dict[str, dict] = {
                 {"key": "kenyamanan", "title": "Kenyamanan Outlet", "items": _items("kenyamanan", [
                     "Kondisi Ruangan", "Kondisi Furniture (Sofa, Meja, Karpet, Kursi)", "Kondisi Internet Customer",
                     "Kondisi Merchandise"])},
+            ]},
+            # added 2026-10-21 (user request): the workbook's ADMINISTRASI & FINANCE
+            {"key": "administrasi-finance", "title": "Administrasi & Finance", "subtitle": "Administrasi & Finance Outlet", "sections": [
+                {"key": "administrasi-finance", "title": "Administrasi & Finance", "items": _items("administrasi-finance", [
+                    "SO Packaging", "SO Weekly / Monthly", "Daily Cupping", "Dokumentasi Surat Jalan", "Form Selfpickup",
+                    "Penggunaan Pitty Cash Terkontrol", "Setoran Uang Pembelian Menggunakan Cash"])},
             ]},
         ],
     },
@@ -262,17 +269,19 @@ def delete_photo(form: str, user: dict, visit_id: str, photo_id: str) -> dict:
     return {"photos": photos_of(visit_id)}
 
 
+def unrated(form: str, answers: dict) -> int:
+    return sum(1 for it in all_items(form) if it["kind"] == "rating" and not (answers.get(it["key"]) or {}).get("rating"))
+
+
 def missing(form: str, answers: dict, photos: list[dict]) -> list[dict]:
-    """What blocks the submit: unrated items, and UNDER items without a note or a photo."""
+    """What blocks the submit: UNDER items without a note or a photo (unrated items are allowed, 2026-10-21)."""
     with_photo = {p["item"] for p in photos}
     out = []
     for it in all_items(form):
         if it["kind"] != "rating":
             continue
         a = answers.get(it["key"]) or {}
-        if not a.get("rating"):
-            out.append({"key": it["key"], "label": it["label"], "need": "rating"})
-        elif a["rating"] == "UNDER":
+        if a.get("rating") == "UNDER":
             need = [x for x, ok in (("note", bool(a.get("note"))), ("photo", it["key"] in with_photo)) if not ok]
             if need:
                 out.append({"key": it["key"], "label": it["label"], "need": "+".join(need)})
@@ -285,10 +294,9 @@ def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Opti
     photos = photos_of(visit_id)
     todo = missing(form, row["answers"] or {}, photos)
     if todo:
-        rating = sum(1 for t in todo if t["need"] == "rating")
-        under = len(todo) - rating
-        parts = ([f"{rating} butir belum dinilai"] if rating else []) + ([f"{under} butir UNDER belum lengkap catatan/foto"] if under else [])
-        raise VisitError("Belum bisa dikirim: " + ", ".join(parts))
+        raise VisitError(f"Belum bisa dikirim: {len(todo)} butir UNDER belum lengkap catatan/foto")
+    if unrated(form, row["answers"] or {}) == len([i for i in all_items(form) if i["kind"] == "rating"]):
+        raise VisitError("Belum ada butir yang dinilai")
     # the signature is optional (like the stock opname); a name goes with it
     sig_type, sig = parse_photo(signature) if signature else (None, None)
     signed_name = " ".join((signed_name or "").split())[:120] or None

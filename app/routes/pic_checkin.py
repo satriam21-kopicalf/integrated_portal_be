@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from app import activity, pic_checkin
+from app import activity, branch_groups, pic_checkin
 from app.access import deny, has_page, require_page
 from app.activity import client_ip
 from app.routes.auth import current_user
@@ -113,7 +113,8 @@ def check_in(body: CheckInIn, request: Request, user: dict = Depends(require_pag
 
 @router.get("/api/monitoring/pic-check-in")
 def monitoring(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
-               userId: Optional[str] = None, location: str = "", _user: dict = Depends(require_page(MON))) -> dict:
+               userId: Optional[str] = None, location: str = "", group: Optional[str] = Query(None, max_length=60),
+               _user: dict = Depends(require_page(MON))) -> dict:
     end = dateTo or today()
     start = dateFrom or end - timedelta(days=6)
     if start > end:
@@ -122,6 +123,7 @@ def monitoring(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = 
         raise HTTPException(422, detail="Maksimal 3 bulan sekali tampil")
     scoped = scoped_branch(branch)
     branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
+    branches = branch_groups.narrow(branches, group)  # Monitoring → Branch groups (CCI, CTG, CTGP …)
     return {"period": {"from": start.isoformat(), "to": end.isoformat()},
             **pic_checkin.monitor(start, end, branches, userId, location)}
 

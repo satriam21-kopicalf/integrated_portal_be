@@ -46,6 +46,31 @@ def test_answers_are_checked_and_merged(monkeypatch):
             pass
 
 
+def test_platform_stars_manual_and_google_automatic(monkeypatch):
+    import json
+    platforms = {it["key"]: it.get("platform") for it in vf.all_items("outlet") if it["section"] == "rating"}
+    assert platforms == {"rating.1": "google", "rating.2": "gofood", "rating.3": "grabfood", "rating.4": "shopeefood", "rating.5": None}
+    monkeypatch.setattr(vf, "own_draft", lambda form, user, vid: {"answers": {"rating.1": {"rating": "MEET", "stars": 1.0}}, "branch_code": "CTG54"})
+    saved = {}
+    monkeypatch.setattr(vf.db, "fetchrow", lambda q, p=None: saved.update(q=q, p=p) or {"id": "x"})
+    out = vf.save_answers("outlet", {"id": "u"}, "v", {"rating.2": {"stars": "4.56", "rating": "MEET"}})
+    assert out["answers"]["rating.2"] == {"stars": 4.6, "source": "manual", "rating": "MEET"}
+    assert "rating.3" not in vf.save_answers("outlet", {"id": "u"}, "v", {"rating.3": {"stars": None}})["answers"]
+    for bad in ({"rating.2": {"stars": 6}}, {"rating.2": {"stars": "x"}}, {"rating.1": {"stars": 4.5}}, {"rating.5": {"stars": 4}}):
+        try:
+            vf.save_answers("outlet", {"id": "u"}, "v", bad)
+            raise AssertionError(bad)
+        except vf.VisitError:
+            pass
+    # sending keeps the Google rating of that moment (a stale figure in the draft is replaced)
+    monkeypatch.setattr(vf, "photos_of", lambda vid: [])
+    monkeypatch.setattr(vf, "_outlet", lambda code: None)
+    monkeypatch.setattr(vf, "full", lambda vid: {"id": vid})
+    monkeypatch.setattr(vf, "google_rating", lambda code: {"stars": 4.7, "reviews": 812, "source": "google", "fetchedAt": "2026-10-21T06:00:00+07:00", "mapsUri": "u"})
+    vf.submit("outlet", {"id": "u"}, "v", None, None, None, None, None)
+    assert json.loads(saved["p"][0])["rating.1"] == {"rating": "MEET", "stars": 4.7, "reviews": 812, "source": "google", "fetchedAt": "2026-10-21T06:00:00+07:00"}
+
+
 def test_endpoints_follow_their_pages(anon, store, page_access, monkeypatch):
     monkeypatch.setattr(vf, "form_state", lambda form, user: {"definition": vf.DEFINITIONS[form], "branches": [], "drafts": [], "recent": []})
     monkeypatch.setattr(vf, "monitor", lambda *a, **k: {"data": [], "summary": {}})

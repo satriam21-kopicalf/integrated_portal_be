@@ -72,8 +72,12 @@ DEFINITIONS: dict[str, dict] = {
                     "Kebersihan Area Bar Bersih", "Kebersihan Area Bar Kotor", "Kebersihan Area Kitchen", "Kebersihan Tools",
                     "Kebersihan Area Facade / Halaman Depan", "Kebersihan Area Indoor", "Kebersihan Area Outdoor",
                     "Kebersihan Area Toilet & Musholla", "Kebersihan Area Warehouse", "Kebersihan Area Mess"])},
-                {"key": "rating", "title": "Rating Outlet", "items": _items("rating", [
-                    "Rating Google", "Rating Gofood", "Rating Grabfood", "Rating Shopeefood", "Complain Customer"])},
+                # platform = the stars of the outlet on that platform go with the item (2026-10-21): Google from
+                # Rating & Review → Google Maps (automatic), the delivery apps typed by the PIC (no API yet)
+                {"key": "rating", "title": "Rating Outlet", "items": [
+                    {**it, **({"platform": p} if p else {})} for it, p in zip(_items("rating", [
+                        "Rating Google", "Rating Gofood", "Rating Grabfood", "Rating Shopeefood", "Complain Customer"]),
+                        ("google", "gofood", "grabfood", "shopeefood", None))]},
             ]},
             {"key": "barista-flow", "title": "Barista + Flow Bar", "subtitle": "Memastikan Role and Responsibilities di dalam Bar", "sections": [
                 {"key": "barista", "title": "Barista", "items": [
@@ -174,9 +178,29 @@ def get_visit(visit_id: str) -> Optional[dict]:
     return db.fetchrow(f"SELECT {COLS} FROM {T} v WHERE v.id::text = %s", (visit_id,))
 
 
+def google_rating(branch_code: str) -> Optional[dict]:
+    """The outlet's latest Google Maps rating (Rating & Review → Google Maps, app/gmaps.py); None when not on Google."""
+    r = db.fetchrow("SELECT data, fetched_at FROM integration_portal.gmaps_place WHERE branch_code = %s AND place_id IS NOT NULL",
+                    (branch_code,))
+    d = (r or {}).get("data") or {}
+    if d.get("rating") is None:
+        return None
+    return {"stars": float(d["rating"]), "reviews": d.get("userRatingCount"), "source": "google",
+            "fetchedAt": r["fetched_at"].isoformat() if r.get("fetched_at") else None, "mapsUri": d.get("googleMapsUri")}
+
+
+def _auto_items(form: str) -> list[dict]:
+    return [it for it in all_items(form) if it.get("platform") == "google"]
+
+
 def full(visit_id: str) -> dict:
     row = get_visit(visit_id)
-    return _view(row, photos_of(visit_id))
+    out = _view(row, photos_of(visit_id))
+    if row["status"] == "DRAFT" and _auto_items(row["form"]):
+        # a draft shows the current figure; it is kept in the answers at sending
+        g = google_rating(row["branch_code"])
+        out["auto"] = {it["key"]: g for it in _auto_items(row["form"])} if g else {}
+    return out
 
 
 def form_state(form: str, user: dict) -> dict:
@@ -233,6 +257,20 @@ def save_answers(form: str, user: dict, visit_id: str, patch: dict) -> dict:
             cur["rating"] = rating
         if "note" in value:
             cur["note"] = (str(value["note"] or "")).strip()[:1000] or None
+        if "stars" in value:
+            # typed by the PIC for the delivery apps; Google comes from Google Maps
+            if not known[key].get("platform") or known[key]["platform"] == "google":
+                raise VisitError("Rating bintang hanya untuk GoFood, GrabFood dan ShopeeFood")
+            stars = value["stars"]
+            if stars is not None:
+                try:
+                    stars = round(float(stars), 1)
+                except (TypeError, ValueError):
+                    raise VisitError("Rating harus angka 1,0 sampai 5,0") from None
+                if not 1 <= stars <= 5:
+                    raise VisitError("Rating harus angka 1,0 sampai 5,0")
+            cur["stars"] = stars
+            cur["source"] = "manual" if stars is not None else None
         answers[key] = {k: v for k, v in cur.items() if v is not None}
     answers = {k: v for k, v in answers.items() if v}
     counts = _counts(form, answers)
@@ -304,14 +342,23 @@ def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Opti
         raise VisitError("Tulis nama penanda tangan di bawah tanda tangan")
     outlet = _outlet(row["branch_code"]) or {}
     j = judge(lat, lng, accuracy, outlet) if lat is not None and lng is not None else {"distance_m": None, "outside_radius": False, "low_accuracy": False}
-    counts = _counts(form, row["answers"] or {})
+    answers = dict(row["answers"] or {})
+    auto = _auto_items(form)
+    g = google_rating(row["branch_code"]) if auto else None
+    for it in auto:
+        # the Google rating of the moment of sending stays with the visit
+        cur = {k: v for k, v in (answers.get(it["key"]) or {}).items() if k not in ("stars", "reviews", "source", "fetchedAt")}
+        answers[it["key"]] = {**cur, **({k: g[k] for k in ("stars", "reviews", "source", "fetchedAt")} if g else {})}
+        if not answers[it["key"]]:
+            answers.pop(it["key"])
+    counts = _counts(form, answers)
     db.fetchrow(
-        f"""UPDATE {T} SET status = 'SUBMITTED', submitted_at = now(), updated_at = now(), counts = %s::jsonb, score = %s,
+        f"""UPDATE {T} SET status = 'SUBMITTED', submitted_at = now(), updated_at = now(), answers = %s::jsonb, counts = %s::jsonb, score = %s,
                 latitude = %s, longitude = %s, accuracy_m = %s, outlet_latitude = %s, outlet_longitude = %s, radius_m = %s,
                 distance_m = %s, outside_radius = %s, low_accuracy = %s, device = %s, ip = %s,
                 signature = %s, signature_type = %s, signed_name = %s, signed_at = CASE WHEN %s THEN now() END
             WHERE id::text = %s RETURNING id""",
-        (json.dumps(counts), counts["score"], lat, lng, accuracy, outlet.get("latitude"), outlet.get("longitude"),
+        (json.dumps(answers), json.dumps(counts), counts["score"], lat, lng, accuracy, outlet.get("latitude"), outlet.get("longitude"),
          outlet.get("radius_m"), j["distance_m"], j["outside_radius"], j.get("low_accuracy", False), (device or "")[:300] or None,
          ip, sig, sig_type, signed_name if sig is not None else None, sig is not None, visit_id))
     return full(visit_id)
@@ -372,7 +419,14 @@ def monitor(form: str, date_from: date, date_to: date, branches: Optional[list[s
     pics = {}
     for v in data:
         pics.setdefault(v["userId"], {"id": v["userId"], "name": v["name"], "n": 0})["n"] += 1
-    return {"definition": DEFINITIONS[form], "data": data, "summary": summary,
+    # stars per platform (Rating Outlet): average of the visits that carry one
+    platforms = []
+    for it in items:
+        if it.get("platform"):
+            vals = [float(a["stars"]) for r in rows if (a := (r["answers"] or {}).get(it["key"]) or {}).get("stars") is not None]
+            platforms.append({"key": it["key"], "platform": it["platform"], "label": it["label"],
+                              "stars": round(sum(vals) / len(vals), 2) if vals else None, "visits": len(vals)})
+    return {"definition": DEFINITIONS[form], "data": data, "summary": summary, "platforms": platforms,
             "sections": sorted(sections.values(), key=lambda s: order.get(s["key"], 99)),
             "findings": [{**f, "branches": sorted(f["branches"])} for f in top],
             "pics": sorted(pics.values(), key=lambda p: -p["n"]), "truncated": len(rows) >= limit}

@@ -56,14 +56,9 @@ class Settings(BaseSettings):
     # Daily housekeeping (app/maintenance.py); 0 = keep forever
     activity_retention_days: int = 90
     gsheet_retention_days: int = 30
-    # Export to Google Sheets (app/gsheets.py); empty = option disabled
+    # Export to Google Sheets through an Apps Script web app (app/gsheets.py); empty = option disabled
     google_apps_script_url: str = ""
     google_apps_script_key: str = ""
-    google_drive_folder_id: str = ""
-    google_oauth_client_id: str = ""
-    google_oauth_client_secret: str = ""
-    google_oauth_refresh_token: str = ""
-    google_service_account_json_b64: str = ""
     google_share_role: str = "writer"  # access of the exporting user: writer | reader
     google_share_link: str = "view"  # anyone with the link: view | edit | none (no request for access)
     # Rating & Review → Google Maps (app/gmaps.py): Places API (New) key, restricted to that API and the VPS IP;

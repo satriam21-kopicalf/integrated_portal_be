@@ -11,7 +11,7 @@ one photo (user decision 2026-10-20); items left unrated do not block the sendin
 Tables integration_portal.visit_form and visit_form_photo (migration 023).
 """
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Any, Optional
 
 from app import database as db
@@ -440,7 +440,3 @@ def signature_of(visit_id: str) -> Optional[dict]:
 def photo(photo_id: str) -> Optional[dict]:
     return db.fetchrow(f"""SELECT p.photo, p.photo_type, v.user_id::text, v.branch_code, v.form, v.status
                            FROM {TP} p JOIN {T} v ON v.id = p.visit_id WHERE p.id::text = %s""", (photo_id,))
-
-
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)

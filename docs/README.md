@@ -31,7 +31,7 @@ Browser ── portal.kopicalf.co.id (Vercel, Next.js) ── /api/* proxy ─�
 
 - Baris laporan dibangun dari `raw_data` (`app/esb_report.py`): 1 baris per menu + baris `(PACKAGE)` / `(EXTRA)`; bill discount dibagi proporsional subtotal.
 - **Baris menu yang dibatalkan** (`statusName` *Print Cancelled*, `statusID` 19) tidak dihitung di mana pun (export, dashboard, agregat, live) — subtotal transaksi memang tidak memasukkannya.
-- Nama/brand/city cabang dari `master_branches` + `master_branch_attributes`; Waiter dari `master_pos_users`. Keduanya bisa dilengkapi dari export ESB: `python -m app.reference_import <file ESB.xlsx> [--apply]`.
+- Nama/brand/city cabang dari `master_branches` + `master_branch_attributes`; Waiter dari `master_pos_users`. Keduanya bisa dilengkapi dari export ESB: `python -m scripts.reference_import <file ESB.xlsx> [--apply]`.
 - Validasi terhadap export ESB (1–2 Okt 2026): jumlah transaksi, baris dan semua kolom nilai identik; City & Waiter 100%. Tidak bisa direproduksi dari API: *Custom Menu Name* (±4%), *Order Time* baris package (selisih 1 detik, ±0,7%).
 
 ## 3. Schema `integration_portal`
@@ -45,14 +45,10 @@ Browser ── portal.kopicalf.co.id (Vercel, Next.js) ── /api/* proxy ─�
 | `user_account` | akun login dashboard (lihat §8) |
 | `user_session` | sesi login (hash token, kedaluwarsa, dicabut) |
 | `user_avatar` | foto profil (webp/jpeg/png, maks. 512 KB) |
-| `agg_cost_period` | Cost Control per cabang × periode opname: penjualan, nilai stok awal/akhir, pembelian, COGS teoretis & aktual, pemakaian lain, selisih opname (diposting & tertunda), jumlah opname |
-| `agg_cost_item_period` | idem per item (qty & nilai) |
-| `cost_settings` | ambang status (COGS, usage, gap, waste) & parameter forecast |
 | `schema_migrations` | migration yang sudah dijalankan (`app/migrations/*.sql`, otomatis setelah deploy) |
 
 Agregat dibangun ulang per tanggal oleh `app/aggregates.py` dan direkonsiliasi dengan data mentah. Cron VPS `/etc/cron.d/integrated-portal-aggregates`: tiap jam menit :20 (hari ini + kemarin) dan 02:50 WIB (8 hari).
 
-Agregat Cost Control dibangun oleh `app/cost_control.py` (`scripts/cost_control.sh --recent-days 10` tiap 05:10 WIB setelah sinkron inventory valuation ESB, `--recent-days 40` Minggu 06:00 WIB). Sumber (`integration_esb`, engine `integrated-esbapi`): `inventory_valuation` (stok awal/akhir, pembelian, pemakaian penjualan × BOM = COGS teoretis, item journal, opname yang diposting), dokumen `stock_opname` yang belum diposting (selisih = Σ(qty fisik − qty sistem) × HPP), dan `agg_sales_daily`. **COGS aktual = teoretis + pemakaian lain + manufacturing − selisih opname** (selisih negatif = kehilangan).
 
 ## 4. Endpoint
 
@@ -65,8 +61,6 @@ Agregat Cost Control dibangun oleh `app/cost_control.py` (`scripts/cost_control.
 | `GET /api/overview/*` | 11 endpoint Overview (meta, kpis, trend, channels, branches, hourly, menus, deductions, monthly, payments, basket); filter `dateFrom`, `dateTo`, `branch` (satu kode atau beberapa dipisah koma), `channel`. `monthly` menampilkan bulan-bulan di dalam periode terpilih |
 | `GET /api/live` | hari ini: total, per jam, per channel, vs kemarin di jam yang sama (sales, bills, nett), total & per jam kemarin, batch sinkron terakhir, transaksi terbaru (`limit`, `branch`, `channel`) |
 | `POST /api/exports`, `GET /api/exports/{id}`, `/download` | export Excel (proses terpisah per job, maks. `EXPORT_MAX_CONCURRENT`) |
-| `GET /api/cost-control/meta`, `/summary`, `/trend`, `/items`, `/forecast` | Cost Control: rasio pada net sales & subtotal, status per ambang, median outlet; tren per periode/bulan; item (usage ratio, selisih); estimasi belanja 7/14/30 hari (pemakaian 28 hari terakhir × tren penjualan ±20% + safety stock 2 hari − stok buku, harga HPP). Filter `dateFrom`, `dateTo`, `branch` |
-| `PUT /api/cost-control/settings` | (superadmin) ambang status & parameter forecast |
 | `WS /ws`, `GET /api/realtime/version` | realtime (lihat §5) |
 | `/api/auth/*`, `/api/users/*`, `/api/avatars/*` | login, akun & foto profil (lihat §8) |
 
@@ -102,7 +96,7 @@ Agregat Cost Control dibangun oleh `app/cost_control.py` (`scripts/cost_control.
 
 - **Deploy**: push ke `main` → VPS (`scripts/auto-deploy.sh`, cron 5 menit): test → build → restart → `/health` (rollback bila gagal) → migration → pasang cron agregat.
 - **Traefik**: `/docker/traefik-gexn/api-router.yml` di-mount sebagai file tunggal — edit *in-place*. Router `api-kopicalf` → `http://127.0.0.1:8002`.
-- **Log**: `docker logs integrated-portal-be`, `/var/log/integrated-portal-be-deploy.log`, `/var/log/integrated-portal-aggregates.log`, `/var/log/integrated-portal-cost-control.log`.
+- **Log**: `docker logs integrated-portal-be`, `/var/log/integrated-portal-be-deploy.log`, `/var/log/integrated-portal-aggregates.log`.
 - **Filter cabang**: semua endpoint menerima `branch=CCI01,CCI04` (dinormalisasi: trim, unik, urut; SQL `branch_code = ANY(...)`).
 - **Cek realtime**: `curl https://api.kopicalf.co.id/api/realtime/version`; handshake WebSocket harus `101` untuk origin yang diizinkan.
 

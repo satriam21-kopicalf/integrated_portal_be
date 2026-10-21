@@ -26,7 +26,6 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | GET | `/api/overview/meta` | Opsi filter channel, periode default, cakupan & kesegaran data |
 | GET | `/api/overview/kpis` | Sales, Nett Sales, Bills, Avg Ticket + Δ% vs periode sebelumnya + nilai harian |
 | GET | `/api/overview/trend` | Seri Sales per `granularity` (`hour`/`day`/`week`/`month`; default otomatis, `hour` untuk rentang 1 hari = day vs day) + periode pembanding + nilai per channel per bucket |
-| GET | `/api/overview/health` | Kesehatan perusahaan (tidak terfilter): KPI coffee chain 28 hari terakhir vs minggu yang sama tahun lalu (pertumbuhan, SSSG, traffic, avg ticket, outlet lemah, diskon, void, porsi online, food attach, konsentrasi menu & jam puncak) + skor + tren bulanan sejak Agu 2025 (`app/health.py`) |
 | GET | `/api/overview/channels` | Per channel: bills, sales, share, avg ticket, diskon %, growth + mix per periode |
 | GET | `/api/overview/branches` | Leaderboard cabang: sales, bills, avg ticket, growth, void rate, sparkline |
 | GET | `/api/overview/hourly` | Hari-dalam-minggu × jam: rata-rata bills & sales per hari |
@@ -55,10 +54,8 @@ Format request/response sama persis dengan Next.js API routes lama, sehingga kom
 | GET | `/api/avatars/{id}` | Foto profil (URL berversi, cache 1 tahun) |
 | ANY | `/api/so/{path}` | **Stock opname** (menu Cost Control): diteruskan ke API stock count kopicalf-platform (`SO_GATEWAY_URL`, warehouse-backend `/portal`) dengan identitas bertanda tangan HMAC (`SO_GATEWAY_SECRET`). Role `user` mengisi SO di cabangnya (outlet, HUB WH, HUB CK); `cost_control`/`superadmin` monitor, review, pengaturan daftar & jadwal, ekspor ESB |
 | GET | `/api/so-sites` | (superadmin) lokasi SO tanpa kode cabang ESB (HUB WH, HUB CK, gudang, kitchen) untuk ditugaskan di User Accounts |
-| GET | `/api/cost-control/{meta,summary,trend,items,forecast}` | Cost Control: COGS ratio (net sales & subtotal), usage ratio, selisih stok, waste, estimasi belanja 1/2/4 minggu per outlet (lihat docs) — halaman `cc.cogs` |
 | GET / PUT | `/api/cost-control/ratio`, `/ratio/export`, `/ratio/so-override`, `/ratio/mdr` | **Rasio Outlet** (`app/ratio.py`, migration 013): kolom workbook *CALF – Rasio Outlet* (gross, nett/Pendapatan, pembelian BB/espresso/dimsum per pemasok, COGS & usage ratio, SO awal/akhir, non sales, item journal), koreksi SO & MDR, ekspor Excel — halaman `cc.ratio` |
 | GET / PUT / POST / PATCH | `/api/access/{pages,roles/{role},users/{id},masters/{kind}}` | (superadmin) halaman per role, pengecualian halaman per user, daftar jabatan & departemen (`app/access.py`, migration 012); `GET masters` untuk semua user (form profil) |
-| PUT | `/api/cost-control/settings` | (superadmin) ambang status & parameter forecast |
 | GET | `/api/activity`, `/api/activity/summary` | (superadmin) Activity log: `dateFrom`, `dateTo`, `user`, `category` (auth, page, filter, transaction, export, user, profile, access), `status` (ok/failed/denied), `role`, `search`, `limit`, `offset` |
 | POST | `/api/activity/events` | Dashboard melaporkan `page.view` / `filter.change` (aktivitas lain dicatat backend sendiri) |
 | DELETE | `/api/activity` | (superadmin) Reset log sekarang: `{"confirm": "RESET", "before": "YYYY-MM-DD" \| null}` (null = semua); reset tercatat sebagai entri `system.logs_reset` |
@@ -71,7 +68,7 @@ Semua endpoint `/api/overview/*` menerima `compareFrom` & `compareTo` (opsional)
 
 **Halaman** (migration 012, `app/access.py`): katalog `overview`, `sales`, `stock-opname`, `cc.monitor`, `cc.reviews`, `cc.esb-export`, `cc.esb-compare`, `cc.lists`, `cc.groups`, `cc.types`, `cc.premix`, `cc.ratio`, `cc.cogs`. Halaman tiap role diatur superadmin (`role_page`), satu user bisa ditambah/dicabut halaman (`user_page`); superadmin selalu semua. `/api/auth/me` mengembalikan `pages`; setiap router dan setiap path `/api/so/*` memeriksa halamannya. User Accounts & Activity Logs khusus superadmin. Role `user` yang diberi halaman Cost Control: assertion SO sebagai cost_control (path tetap dibatasi halaman), laporan portal tetap hanya cabangnya.
 
-**Semua endpoint data membutuhkan login** (cookie `portal_session`, atau `Authorization: Bearer <token>`); `/api/users`, `/api/access/*` (kecuali `GET masters`) dan `GET /api/activity*` hanya untuk role `superadmin`; `/api/cost-control/*` untuk halaman `cc.cogs` / `cc.ratio`. Terbuka: `/health`, `/api/auth/login|logout`, WebSocket `/ws`.
+**Semua endpoint data membutuhkan login** (cookie `portal_session`, atau `Authorization: Bearer <token>`); `/api/users`, `/api/access/*` (kecuali `GET masters`) dan `GET /api/activity*` hanya untuk role `superadmin`; `/api/cost-control/ratio*` untuk halaman `cc.ratio`. Terbuka: `/health`, `/api/auth/login|logout`, WebSocket `/ws`.
 
 ### Akses cabang (role user, anti-fraud)
 
@@ -104,8 +101,8 @@ Baris menu yang dibatalkan di bill (status `Print Cancelled`) tidak dihitung, sa
 **Master referensi dari export ESB.** API ESB tidak menyediakan nama user POS (kolom Waiter) maupun City cabang. Keduanya dapat dipelajari dari file export ESB "Sales Recapitulation Detail Report":
 
 ```bash
-python -m app.reference_import "docs/ESB_Sales Recapitulation Detail Report_01 Oktober 2026.xlsx" [file lain ...]           # dry run
-python -m app.reference_import "docs/ESB_Sales Recapitulation Detail Report_01 Oktober 2026.xlsx" [file lain ...] --apply   # tulis
+python -m scripts.reference_import "docs/ESB_Sales Recapitulation Detail Report_01 Oktober 2026.xlsx" [file lain ...]           # dry run
+python -m scripts.reference_import "docs/ESB_Sales Recapitulation Detail Report_01 Oktober 2026.xlsx" [file lain ...] --apply   # tulis
 ```
 
 Tool ini mencocokkan baris export ESB dengan transaksi kita lewat Sales Number, lalu mengisi/memperbarui `master_pos_users` dan `master_branch_attributes` (brand, city, area). Jalankan bila ada outlet atau kasir baru.
@@ -122,13 +119,10 @@ Validasi (Sep 2026): Subtotal Sales per hari = ERP ESB 30/30 hari; export Sales 
 
 ### Export Google Sheets (`format=gsheet`)
 
-- File `.xlsx` yang sama di-upload ke Google Drive dan dikonversi menjadi Google Sheet (`app/gsheets.py`), disimpan di folder `GOOGLE_DRIVE_FOLDER_ID` dan dibagikan ke email user yang melakukan export (`GOOGLE_SHARE_ROLE`, default `writer`). File `.xlsx` tetap bisa diunduh.
+- File `.xlsx` yang sama di-upload ke Google Drive dan dikonversi menjadi Google Sheet (`app/gsheets.py`), disimpan di folder milik Apps Script dan dibagikan ke email user yang melakukan export (`GOOGLE_SHARE_ROLE`, default `writer`). File `.xlsx` tetap bisa diunduh.
 - Batas Google Sheets 10 juta sel (detail 46 kolom ≈ 217 rb baris ≈ 3 hari seluruh outlet): report detail ditulis per **bagian** (`PART_TARGET_ROWS` 150 rb baris, dipotong di pergantian hari; `PART_MAX_ROWS` 200 rb di dalam satu hari bila perlu). Tiap bagian di-upload begitu selesai (aman untuk batas Apps Script 36 MB / 6 menit); lebih dari satu bagian → satu folder Drive bernama export tsb + link per bagian di kartu export (tanpa .xlsx tunggal; gunakan export Excel untuk satu file). 1 bulan seluruh outlet ≈ 10 bagian.
 - Akses: sheet (dan foldernya) dibagikan ke email user + **siapa pun yang punya link** (`GOOGLE_SHARE_LINK` = `view` default / `edit` / `none`), sehingga tidak perlu request access. Butuh versi `scripts/google_apps_script.gs` terbaru (deploy versi baru).
-- Opsi aktif di dashboard bila kredensial terpasang (salah satu):
-  - **Apps Script (paling mudah, tanpa Google Cloud project)**: di akun Google pemilik file buka script.google.com → New project → paste `scripts/google_apps_script.gs` → Services (+) → *Drive API* → Add → jalankan fungsi `authorize` sekali → Deploy → *Web app* (Execute as: Me, Who has access: Anyone). Di server: `GOOGLE_APPS_SCRIPT_URL` = URL web app, `GOOGLE_APPS_SCRIPT_KEY` = kunci acak (`python -c "import secrets; print(secrets.token_urlsafe(32))"`), recreate container, lalu pasangkan: `docker exec integrated-portal-be python -c "from app import gsheets; print(gsheets.pair())"` (script hanya menerima kunci pertama; hapus Script property `PORTAL_KEY_SHA256` untuk memasangkan ulang). Batas Apps Script: file ≤ 36 MB, 6 menit per export.
-  - **Akun Google (Gmail biasa)**: Google Cloud project → aktifkan *Google Drive API* → OAuth consent screen *External*, status **In production** (mode *Testing* membuat token kedaluwarsa 7 hari) → Credentials → OAuth client *Desktop app* → unduh JSON → jalankan di komputer sendiri `python scripts/google_oauth_setup.py client_secret.json` → salin 4 baris yang dicetak ke `.env` server.
-  - **Service account**: `GOOGLE_SERVICE_ACCOUNT_JSON_B64` (key JSON di-base64) + folder di **Shared Drive** (Google Workspace) dengan service account sebagai anggota; service account tidak punya kuota Drive sendiri.
+- Opsi aktif di dashboard bila Apps Script terpasang (tanpa Google Cloud project): di akun Google pemilik file buka script.google.com → New project → paste `scripts/google_apps_script.gs` → Services (+) → *Drive API* → Add → jalankan fungsi `authorize` sekali → Deploy → *Web app* (Execute as: Me, Who has access: Anyone). Di server: `GOOGLE_APPS_SCRIPT_URL` = URL web app, `GOOGLE_APPS_SCRIPT_KEY` = kunci acak (`python -c "import secrets; print(secrets.token_urlsafe(32))"`), recreate container, lalu pasangkan: `docker exec integrated-portal-be python -c "from app import gsheets; print(gsheets.pair())"` (script hanya menerima kunci pertama; hapus Script property `PORTAL_KEY_SHA256` untuk memasangkan ulang). Batas Apps Script: file ≤ 36 MB, 6 menit per export.
 
 ### Overview (schema `integration_portal`)
 
@@ -168,14 +162,11 @@ Lihat [.env.example](.env.example). Kredensial database sama dengan yang dipakai
 | `CORS_ORIGINS` | `*` | Hanya relevan jika browser memanggil backend langsung |
 | `WS_ALLOWED_ORIGINS` | portal, preview Vercel, localhost:3002 | Origin yang boleh membuka WebSocket `/ws` |
 | `PUBLIC_BASE_URL` | kosong | Basis URL absolut untuk link unduhan export |
-| `EXPORT_TTL_HOURS` | 24 | Lama file export disimpan |
+| `EXPORT_TTL_HOURS` | 24 | Lama file export disimpan (dibersihkan saat export baru dimulai dan tiap hari 03:30 WIB) |
 | `EXPORT_MAX_CONCURRENT` | 2 | Job export bersamaan (seluruh container) |
 | `ACTIVITY_RETENTION_DAYS` | 90 | Activity log lebih lama dari ini dihapus tiap hari 03:30 WIB (`app/maintenance.py`; 0 = simpan selamanya) |
 | `GSHEET_RETENTION_DAYS` | 30 | Google Sheet hasil export lebih lama dari ini dipindah ke Trash Drive (bisa dipulihkan 30 hari; 0 = simpan) |
-| `GOOGLE_APPS_SCRIPT_URL` / `_KEY` | kosong | Web app Apps Script + kunci acak server (cara paling mudah) |
-| `GOOGLE_DRIVE_FOLDER_ID` | kosong | Folder Drive tujuan export Google Sheets (kosong = opsi nonaktif) |
-| `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` / `_REFRESH_TOKEN` | kosong | Akun Google pemilik file (dari `scripts/google_oauth_setup.py`) |
-| `GOOGLE_SERVICE_ACCOUNT_JSON_B64` | kosong | Alternatif: service account + Shared Drive |
+| `GOOGLE_APPS_SCRIPT_URL` / `_KEY` | kosong | Web app Apps Script + kunci acak server (kosong = export Google Sheets nonaktif) |
 | `GOOGLE_SHARE_ROLE` | `writer` | Akses user pembuat export ke sheet (`writer`/`reader`) |
 | `GOOGLE_SHARE_LINK` | `view` | Akses siapa pun yang punya link sheet/folder export (`view`/`edit`/`none`) |
 | `GOOGLE_PLACES_API_KEY` | kosong | Key Places API (New) untuk Rating & Review → Google Maps; batasi ke Places API (New) + IP VPS |
@@ -202,14 +193,7 @@ pytest -q
 
 **Otomatis:** setiap push ke `main` di-deploy oleh VPS dalam ≤ 5 menit (`scripts/auto-deploy.sh`, dijalankan cron `/etc/cron.d/integrated-portal-be-deploy`): test → build → restart → cek `/health` (rollback otomatis bila gagal) → migration `integration_portal` → pasang cron agregat. Log: `/var/log/integrated-portal-be-deploy.log`.
 
-**Manual** (dari komputer lokal):
-
-```bash
-bash scripts/deploy.sh
-```
-
-Script ini mengirim source ke `/opt/integrated-portal-be` lewat SSH, lalu menjalankan `docker compose up -d --build` dan menunggu `/health`.
-Pada deploy pertama, `.env` di server dibuat dari kredensial `DB_*` di `/opt/esb-integration/.env`. Deploy berikutnya tidak menimpa `.env` tersebut.
+**Pemasangan pertama** (sekali, di VPS): clone repo ke `/opt/integrated-portal-be/repo`, buat `/opt/integrated-portal-be/.env` (lihat `.env.example`; kredensial `DB_*` sama dengan `/opt/esb-integration/.env`, `chmod 600`), lalu pasang `scripts/auto-deploy.cron` ke `/etc/cron.d/integrated-portal-be-deploy` (lihat kepala `scripts/auto-deploy.sh`). Deploy berikutnya tidak pernah menimpa `.env`.
 
 Operasional di VPS:
 

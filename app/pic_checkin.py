@@ -328,9 +328,6 @@ def photo_of(checkin_id: str) -> Optional[dict]:
     return db.fetchrow(f"SELECT user_id::text, branch_code, photo, photo_type FROM {T} WHERE id::text = %s", (checkin_id,))
 
 
-REVIEW_STATUSES = ("valid", "invalid")
-
-
 def review(checkin_id: str, status: str, note: Optional[str], user: dict, branches: Optional[tuple]) -> Optional[dict]:
     """A manager's verdict on a flagged check-in (valid / invalid); None when not found or out of scope."""
     row = db.fetchrow(

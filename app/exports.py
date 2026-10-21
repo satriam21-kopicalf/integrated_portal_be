@@ -128,16 +128,20 @@ def read_job(job_id: str) -> Optional[dict]:
     return job
 
 
-def cleanup_old_exports() -> None:
+def cleanup_old_exports() -> int:
+    """Delete export files older than EXPORT_TTL_HOURS (when a job starts and in the daily maintenance)."""
     cutoff = datetime.now().timestamp() - get_settings().export_ttl_hours * 3600
+    removed = 0
     for path in _export_dir().iterdir():
         if path.name.startswith("."):  # slot lock files
             continue
         try:
             if path.stat().st_mtime < cutoff:
                 path.unlink()
+                removed += 1
         except FileNotFoundError:
             pass
+    return removed
 
 
 # report kinds: ESB report title, file name prefix

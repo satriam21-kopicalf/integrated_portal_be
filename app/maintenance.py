@@ -1,6 +1,7 @@
-"""Daily housekeeping (scripts/maintenance.sh, cron 03:30 WIB).
+"""Daily housekeeping (cron 03:30 WIB in scripts/aggregates.cron).
 
 - Activity log entries older than ACTIVITY_RETENTION_DAYS (default 90) are deleted.
+- Excel export files older than EXPORT_TTL_HOURS (default 24) are deleted, also when nobody starts a new export.
 - Google Sheets exports older than GSHEET_RETENTION_DAYS (default 30) are moved to the
   Drive trash of the account that owns them (Drive empties its trash after 30 days, so a
   sheet can still be restored there). 0 disables either clean-up.
@@ -11,7 +12,7 @@ import logging
 import sys
 
 from app import database as db
-from app import gsheets
+from app import exports, gsheets
 from app.activity import T as ACTIVITY_TABLE
 from app.config import get_settings
 
@@ -37,7 +38,8 @@ def purge_sheets() -> int:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     failed = False
-    for name, job in (("activity log", purge_activity), ("google sheets", purge_sheets)):
+    for name, job in (("activity log", purge_activity), ("export files", exports.cleanup_old_exports),
+                      ("google sheets", purge_sheets)):
         try:
             logger.info("%s: %s removed", name, job())
         except Exception:  # noqa: BLE001 - one failing clean-up must not stop the other

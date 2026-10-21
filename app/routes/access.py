@@ -2,8 +2,6 @@
 
     GET    /api/access/pages                     catalog + pages per role (superadmin)
     PUT    /api/access/roles/{role}              {"pages": [...]} (superadmin; role cost_control or user)
-    GET    /api/access/users/{id}                {"overrides": {page: bool}, "pages": [...]} (superadmin)
-    PUT    /api/access/users/{id}                {"overrides": {page: bool}} (superadmin)
     GET    /api/access/masters/{kind}            kind = jobTitle | department (any signed-in user: profile form)
     POST   /api/access/masters/{kind}            {"name": "..."} add (superadmin)
     PATCH  /api/access/masters/{kind}/{id}       {"name"?, "isActive"?} rename / (de)activate (superadmin)
@@ -14,7 +12,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app import access, accounts, activity
+from app import access, activity
 from app.routes.auth import current_user, forget_sessions, require_superadmin
 
 router = APIRouter(prefix="/api/access", tags=["access"])
@@ -48,35 +46,6 @@ def put_role(role: str, body: RolePages, request: Request, user: dict = Depends(
     activity.record("access.role_pages", user=user, request=request, summary=f"Halaman role {role} diubah",
                     details={"role": role, "before": before, "after": body.pages})
     return {"roles": access.role_pages()}
-
-
-class UserPages(BaseModel):
-    overrides: dict[str, bool]
-
-
-@router.get("/users/{user_id}")
-def get_user_pages(user_id: UUID, _user: dict = Depends(require_superadmin)) -> dict:
-    target = accounts.get_user(str(user_id))
-    if not target:
-        raise HTTPException(404, detail="User tidak ditemukan")
-    return {"overrides": access.user_overrides(str(user_id)), "pages": access.pages_for(target)}
-
-
-@router.put("/users/{user_id}")
-def put_user_pages(user_id: UUID, body: UserPages, request: Request, user: dict = Depends(require_superadmin)) -> dict:
-    target = accounts.get_user(str(user_id))
-    if not target:
-        raise HTTPException(404, detail="User tidak ditemukan")
-    try:
-        overrides = access.clean_overrides(target["role"], body.overrides)
-    except ValueError as exc:
-        raise HTTPException(422, detail=str(exc)) from None
-    access.set_user_overrides(str(user_id), overrides, str(user["id"]))
-    forget_sessions()
-    activity.record("access.user_pages", user=user, request=request,
-                    summary=f"Akses halaman {target['username']} diubah",
-                    details={"targetId": str(user_id), "targetUsername": target["username"], "overrides": overrides})
-    return {"overrides": overrides, "pages": access.pages_for(target)}
 
 
 @router.get("/masters/{kind}")

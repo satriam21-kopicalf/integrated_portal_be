@@ -42,6 +42,5 @@ def test_ratio_page_needs_its_page(anon, store, page_access, monkeypatch):
     page_access.overrides[str(store.user["id"])] = {"cc.ratio": True}
     r = anon.get("/api/cost-control/ratio?branch=TGP17,CCI01")
     assert r.status_code == 200 and r.json()["codes"] == ["CCI01"]  # role user: its own branches only
-    assert anon.get("/api/cost-control/summary").status_code == 403  # COGS & usage is another page
     login(anon, "superadmin", "Admin1234")
     assert anon.get("/api/cost-control/ratio?dateFrom=2026-01-01&dateTo=2026-09-30").status_code == 400  # > 3 months

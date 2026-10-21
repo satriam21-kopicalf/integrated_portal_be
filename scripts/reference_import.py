@@ -8,7 +8,9 @@ our transactions by Sales Number and updates
 * integration_esb.master_pos_users        (user_name -> display_name)
 * integration_esb.master_branch_attributes (brand, city, area per branch_code)
 
-    python -m app.reference_import "docs/ESB_Sales Recapitulation Detail Report_01 Oktober 2026.xlsx" [more.xlsx] [--apply]
+    python -m scripts.reference_import "docs/ESB_Sales Recapitulation Detail Report_01 Oktober 2026.xlsx" [more.xlsx] [--apply]
+
+A local tool (needs openpyxl from requirements-dev.txt and the .env database credentials); not in the image.
 
 Without --apply it only prints what would change. The ESB export is the
 reference, so differing values are overwritten; empty ESB values never erase ours.

@@ -13,22 +13,21 @@ def test_me_lists_pages_of_the_role(anon, store):
 
 def test_user_exceptions_open_and_close_pages(anon, store, page_access, gateway):
     login(anon, "kasir", "Kasir1234")
-    assert anon.get("/api/cost-control/meta").status_code == 403
+    assert anon.get("/api/cost-control/ratio").status_code == 403
     assert anon.get("/api/so/counts/monitor").status_code == 403
     assert anon.post("/api/so/counts/x/review", json={}).status_code == 403
 
-    # the superadmin adds COGS and Monitor, and takes Sales away
+    # the superadmin adds Outlet ratio and Monitor, and takes Sales away (User Accounts form: PATCH /api/users/{id})
     login(anon, "superadmin", "Admin1234")
     uid = store.user["id"]
-    r = anon.put(f"/api/access/users/{uid}", json={"overrides": {"cc.cogs": True, "cc.monitor": True, "sales": False,
-                                                                   "overview": True}})
+    r = anon.patch(f"/api/users/{uid}", json={"pageOverrides": {"cc.ratio": True, "cc.monitor": True, "sales": False,
+                                                                 "overview": True}})
     assert r.status_code == 200
-    assert r.json()["overrides"] == {"cc.cogs": True, "cc.monitor": True, "sales": False}  # overview: already the role's
-    assert anon.put(f"/api/access/users/{uid}", json={"overrides": {"nope": True}}).status_code == 422
+    assert r.json()["user"]["pageOverrides"] == {"cc.ratio": True, "cc.monitor": True, "sales": False}  # overview: the role's
+    assert anon.patch(f"/api/users/{uid}", json={"pageOverrides": {"nope": True}}).status_code == 422
 
     login(anon, "kasir", "Kasir1234")
-    assert anon.get("/api/auth/me").json()["user"]["pages"] == ["overview", "stock-opname", "guide", "form.pic-check-in", "form.product", "form.outlet", "cc.monitor", "cc.cogs"]
-    assert anon.get("/api/cost-control/meta").status_code != 403
+    assert anon.get("/api/auth/me").json()["user"]["pages"] == ["overview", "stock-opname", "guide", "form.pic-check-in", "form.product", "form.outlet", "cc.monitor", "cc.ratio"]
     assert anon.get("/api/transactions?dateFrom=2026-09-29&dateTo=2026-09-30").status_code == 403
     assert anon.get("/api/so/counts/monitor").status_code == 200
     assert payload(gateway[-1]["headers"])["role"] == "cost_control"  # Cost Control pages: Cost Control in kopicalf

@@ -51,7 +51,6 @@ TIMEOUT = 20
 SEARCH_FIELDS = "places.id,places.displayName,places.formattedAddress,places.location"
 DETAIL_FIELDS = ("id,displayName,formattedAddress,location,rating,userRatingCount,businessStatus,"
                  "regularOpeningHours.periods,regularOpeningHours.weekdayDescriptions,googleMapsUri,reviews")
-STATUSES = ("auto", "review", "missing", "manual", "none")
 
 _lock = threading.Lock()
 

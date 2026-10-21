@@ -1311,13 +1311,6 @@ def get_meta():
     return respond("meta", None, "", build)
 
 
-@router.get("/health")
-def get_health():
-    """Company health over the whole ESB history (network level, not filtered): app/health.py."""
-    from app.health import build_health
-    return respond("health", None, today().isoformat(), lambda: build_health(today(), data_start()))
-
-
 @router.get("/kpis")
 def get_kpis(dateFrom: Optional[str] = None, dateTo: Optional[str] = None,
              branch: Optional[str] = None, channel: Optional[str] = None):

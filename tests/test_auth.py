@@ -378,7 +378,7 @@ def test_admin_creates_login_only_and_user_completes_profile(anon, store, monkey
 
 def test_user_sees_only_assigned_branches(anon, store, fake_db):
     login(anon, "kasir", "Kasir1234")  # assigned to CCI01 only
-    assert anon.get("/api/cost-control/meta").status_code == 403  # Cost Control: superadmin only
+    assert anon.get("/api/cost-control/ratio").status_code == 403  # Cost Control: not a page of the role
     assert [b["branch_code"] for b in anon.get("/api/branches").json()] == ["CCI01"]
 
     rows = anon.get("/api/transactions?dateFrom=2026-09-29&dateTo=2026-09-30&type=all").json()["data"]

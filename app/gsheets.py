@@ -1,25 +1,13 @@
 """Google Sheets delivery of export jobs (app/exports.py, format "gsheet").
 
-The export is built as the usual ESB-layout .xlsx, then uploaded to Google Drive with
-conversion to a Google Sheet (Drive keeps the sheets, dates and number formats), placed in
-GOOGLE_DRIVE_FOLDER_ID and shared with the exporting user's email.
-
-Credentials live in the server .env only, one of:
-  - an Apps Script web app in the Google account that owns the files (simplest, no Google
-    Cloud project): GOOGLE_APPS_SCRIPT_URL + GOOGLE_APPS_SCRIPT_KEY (random, made on the
-    server). The script (scripts/google_apps_script.gs) keeps the files in its own folder and
-    accepts only the key it was paired with (pair() on first contact). Apps Script takes
-    requests up to ~50 MB and 6 minutes, so the .xlsx may be at most APPS_SCRIPT_MAX_BYTES.
-  - OAuth of a Google account (works with a personal Gmail): GOOGLE_OAUTH_CLIENT_ID,
-    GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_OAUTH_REFRESH_TOKEN and GOOGLE_DRIVE_FOLDER_ID, all
-    printed by scripts/google_oauth_setup.py (scope drive.file: the portal only sees the
-    files it creates).
-  - a service account: GOOGLE_SERVICE_ACCOUNT_JSON_B64 (the key file, base64) and
-    GOOGLE_DRIVE_FOLDER_ID of a folder on a Shared Drive the service account is a member of
-    (service accounts have no Drive storage of their own).
+The export is built as the usual ESB-layout .xlsx, then handed to an Apps Script web app in the Google account that
+owns the files (scripts/google_apps_script.gs, no Google Cloud project needed): it converts the file to a Google Sheet
+(Drive keeps the sheets, dates and number formats), keeps it in its own folder and shares it with the exporting user's
+email. Credentials live in the server .env only: GOOGLE_APPS_SCRIPT_URL + GOOGLE_APPS_SCRIPT_KEY (random, made on the
+server); the script accepts only the key it was paired with (pair() on first contact). Apps Script takes requests up
+to ~50 MB and 6 minutes, so the .xlsx may be at most APPS_SCRIPT_MAX_BYTES.
 """
 import base64
-import json
 import logging
 import os
 from typing import Callable, Optional
@@ -28,15 +16,6 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Google Sheets holds at most 10 million cells per spreadsheet
-MAX_CELLS = 10_000_000
-XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-SHEET_MIME = "application/vnd.google-apps.spreadsheet"
-DRIVE = "https://www.googleapis.com/drive/v3"
-DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
-TOKEN_URI = "https://oauth2.googleapis.com/token"
-CHUNK = 8 * 1024 * 1024  # resumable upload chunk, a multiple of 256 KiB
-RETRIES = 5
 # base64 adds a third: ~48 MB request, under the Apps Script web app limit
 APPS_SCRIPT_MAX_BYTES = 36 * 1024 * 1024
 
@@ -47,125 +26,28 @@ class SheetsError(Exception):
 
 def enabled() -> bool:
     s = get_settings()
-    if s.google_apps_script_url and s.google_apps_script_key:
-        return True
-    oauth = s.google_oauth_client_id and s.google_oauth_client_secret and s.google_oauth_refresh_token
-    return bool(s.google_drive_folder_id and (oauth or s.google_service_account_json_b64))
-
-
-def _session():
-    from google.auth.transport.requests import AuthorizedSession  # local import: only export jobs need it
-
-    s = get_settings()
-    if s.google_service_account_json_b64:
-        from google.oauth2 import service_account
-
-        info = json.loads(base64.b64decode(s.google_service_account_json_b64))
-        creds = service_account.Credentials.from_service_account_info(
-            info, scopes=["https://www.googleapis.com/auth/drive"])
-    else:
-        from google.oauth2.credentials import Credentials
-
-        creds = Credentials(None, refresh_token=s.google_oauth_refresh_token, token_uri=TOKEN_URI,
-                            client_id=s.google_oauth_client_id, client_secret=s.google_oauth_client_secret,
-                            scopes=["https://www.googleapis.com/auth/drive.file"])
-    return AuthorizedSession(creds)
-
-
-def _fail(r, what: str):
-    try:
-        reason = r.json()["error"]["message"]
-    except Exception:  # noqa: BLE001
-        reason = r.text[:200]
-    logger.error("Google Drive %s failed: HTTP %s %s", what, r.status_code, reason)
-    raise SheetsError(f"Google Drive menolak {what} (HTTP {r.status_code}): {reason}")
+    return bool(s.google_apps_script_url and s.google_apps_script_key)
 
 
 def upload_as_sheet(path: str, title: str, share_with: Optional[str],
                     progress: Callable[[float], None] = lambda pct: None, folder: Optional[str] = None) -> dict:
-    """Upload the .xlsx as a Google Sheet, shared with `share_with` and (GOOGLE_SHARE_LINK) with
-    anyone who has the link; `folder` = a sub-folder for the parts of one export (Apps Script).
-    Returns {id, url, sharedWith, linkAccess, folderUrl}."""
-    import requests
-
-    s = get_settings()
-    if s.google_apps_script_url and s.google_apps_script_key:
-        return _apps_script_upload(path, title, share_with, progress, folder)
-    session = _session()
+    """Upload the .xlsx as a Google Sheet, shared with `share_with` and (GOOGLE_SHARE_LINK) with anyone who has the
+    link; `folder` = a sub-folder for the parts of one export. Returns {id, url, sharedWith, linkAccess, folderUrl}."""
     size = os.path.getsize(path)
-    params = {"uploadType": "resumable", "supportsAllDrives": "true", "fields": "id,webViewLink"}
-    r = session.post(DRIVE_UPLOAD, params=params, timeout=60,
-                     json={"name": title, "mimeType": SHEET_MIME, "parents": [s.google_drive_folder_id]},
-                     headers={"X-Upload-Content-Type": XLSX_MIME, "X-Upload-Content-Length": str(size)})
-    if not r.ok:
-        _fail(r, "upload")
-    session_url = r.headers["Location"]
-
-    offset, tries, result, error = 0, 0, None, None
+    if size > APPS_SCRIPT_MAX_BYTES:
+        raise SheetsError(f"File export {size / 1048576:.0f} MB melebihi batas Google Apps Script "
+                          f"({APPS_SCRIPT_MAX_BYTES // 1048576} MB). Perkecil periode atau cabang, atau export ke Excel.")
     with open(path, "rb") as f:
-        while result is None:
-            f.seek(offset)
-            chunk = f.read(CHUNK)
-            end = offset + len(chunk) - 1
-            try:
-                # the last chunk also waits for the conversion to a Google Sheet
-                r = session.put(session_url, data=chunk, timeout=1800,
-                                headers={"Content-Range": f"bytes {offset}-{end}/{size}"})
-            except requests.RequestException as exc:
-                r, error = None, exc
-            if r is not None and r.ok:
-                result = r.json()
-            elif r is not None and r.status_code == 308:  # chunk stored, more to send
-                offset = int(r.headers["Range"].split("-")[1]) + 1 if "Range" in r.headers else 0
-                tries = 0
-                progress(offset / size)
-            elif r is not None and r.status_code < 500 and r.status_code != 429:
-                _fail(r, "upload")
-            else:  # 5xx / 429 / network: ask Drive what it has and resume from there
-                tries += 1
-                if tries > RETRIES:
-                    if r is not None:
-                        _fail(r, "upload")
-                    raise SheetsError(f"Upload ke Google Drive gagal: {error}")
-                status = session.put(session_url, headers={"Content-Range": f"bytes */{size}"}, timeout=60)
-                if status.ok:
-                    result = status.json()
-                elif status.status_code == 308:
-                    offset = int(status.headers["Range"].split("-")[1]) + 1 if "Range" in status.headers else 0
-
-    shared = _share(session, result["id"], share_with) if share_with else None
-    link = _share_link(session, result["id"])
-    return {"id": result["id"], "url": result.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{result['id']}",
-            "sharedWith": shared, "linkAccess": link, "folderUrl": None}
-
-
-LINK_ROLES = {"view": "reader", "edit": "writer"}
-
-
-def _share_link(session, file_id: str) -> Optional[str]:
-    """Anyone with the link can open the sheet (GOOGLE_SHARE_LINK = view | edit | none)."""
-    access = get_settings().google_share_link
-    if access not in LINK_ROLES:
-        return None
-    r = session.post(f"{DRIVE}/files/{file_id}/permissions", params={"supportsAllDrives": "true"}, timeout=60,
-                     json={"type": "anyone", "role": LINK_ROLES[access], "allowFileDiscovery": False})
-    if r.ok:
-        return access
-    logger.warning("Google Sheet %s not shared by link: HTTP %s %s", file_id, r.status_code, r.text[:200])
-    return None
-
-
-def _share(session, file_id: str, email: str) -> Optional[str]:
-    """Give the exporting user access; a failure leaves the sheet in the folder only."""
-    url = f"{DRIVE}/files/{file_id}/permissions"
-    body = {"type": "user", "role": get_settings().google_share_role, "emailAddress": email}
-    # without a notification first; an address that is not a Google account needs the e-mail invite
-    for notify in ("false", "true"):
-        r = session.post(url, params={"supportsAllDrives": "true", "sendNotificationEmail": notify}, json=body, timeout=60)
-        if r.ok:
-            return email
-    logger.warning("Google Sheet %s not shared with %s: HTTP %s %s", file_id, email, r.status_code, r.text[:200])
-    return None
+        data = base64.b64encode(f.read()).decode()
+    progress(0.1)
+    # the conversion runs inside the call (Apps Script stops at 6 minutes)
+    s = get_settings()
+    out = _apps_script_call({"action": "upload", "name": title, "data": data, "shareWith": share_with,
+                             "role": s.google_share_role, "folder": folder, "linkAccess": s.google_share_link},
+                            timeout=420)
+    # an older script ignores folder / linkAccess: it answers without "linkAccess"
+    return {"id": out["id"], "url": out["url"], "sharedWith": out.get("sharedWith"),
+            "linkAccess": out.get("linkAccess"), "folderUrl": out.get("folderUrl")}
 
 
 def _apps_script_call(body: dict, timeout: int) -> dict:
@@ -191,52 +73,10 @@ def _apps_script_call(body: dict, timeout: int) -> dict:
 
 def cleanup(days: int) -> int:
     """Move Google Sheets exports older than `days` to the Drive trash; returns how many."""
-    s = get_settings()
-    if s.google_apps_script_url and s.google_apps_script_key:
-        return int(_apps_script_call({"action": "cleanup", "days": days}, timeout=360).get("trashed", 0))
-    from datetime import datetime, timedelta, timezone
-
-    session = _session()
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
-    query = (f"'{s.google_drive_folder_id}' in parents and trashed = false and mimeType = '{SHEET_MIME}' "
-             f"and createdTime < '{cutoff}'")
-    trashed, token = 0, None
-    while True:
-        r = session.get(f"{DRIVE}/files", timeout=60, params={
-            "q": query, "fields": "nextPageToken,files(id)", "pageSize": 1000, "pageToken": token,
-            "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"})
-        if not r.ok:
-            _fail(r, "daftar file")
-        body = r.json()
-        for f in body.get("files", []):
-            u = session.patch(f"{DRIVE}/files/{f['id']}", params={"supportsAllDrives": "true"}, json={"trashed": True}, timeout=60)
-            if not u.ok:
-                _fail(u, "hapus file")
-            trashed += 1
-        token = body.get("nextPageToken")
-        if not token:
-            return trashed
+    return int(_apps_script_call({"action": "cleanup", "days": days}, timeout=360).get("trashed", 0))
 
 
 def pair() -> dict:
-    """Register this server's key with the Apps Script (first contact wins; idempotent)."""
+    """Register this server's key with the Apps Script (first contact wins; idempotent). Run once on the server after
+    setting the key: docker exec integrated-portal-be python -c "from app import gsheets; print(gsheets.pair())" """
     return _apps_script_call({"action": "pair"}, timeout=120)
-
-
-def _apps_script_upload(path: str, title: str, share_with: Optional[str], progress: Callable[[float], None],
-                        folder: Optional[str] = None) -> dict:
-    size = os.path.getsize(path)
-    if size > APPS_SCRIPT_MAX_BYTES:
-        raise SheetsError(f"File export {size / 1048576:.0f} MB melebihi batas Google Apps Script "
-                          f"({APPS_SCRIPT_MAX_BYTES // 1048576} MB). Perkecil periode atau cabang, atau export ke Excel.")
-    with open(path, "rb") as f:
-        data = base64.b64encode(f.read()).decode()
-    progress(0.1)
-    # the conversion runs inside the call (Apps Script stops at 6 minutes)
-    s = get_settings()
-    out = _apps_script_call({"action": "upload", "name": title, "data": data, "shareWith": share_with,
-                             "role": s.google_share_role, "folder": folder, "linkAccess": s.google_share_link},
-                            timeout=420)
-    # an older script ignores folder / linkAccess: it answers without "linkAccess"
-    return {"id": out["id"], "url": out["url"], "sharedWith": out.get("sharedWith"),
-            "linkAccess": out.get("linkAccess"), "folderUrl": out.get("folderUrl")}

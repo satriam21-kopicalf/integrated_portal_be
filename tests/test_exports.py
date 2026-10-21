@@ -174,9 +174,8 @@ def test_run_job_records_its_pid(client, monkeypatch):
 
 def _google_configured(monkeypatch, uploads):
     s = get_settings()
-    for key, value in (("google_drive_folder_id", "folder1"), ("google_oauth_client_id", "cid"),
-                       ("google_oauth_client_secret", "secret"), ("google_oauth_refresh_token", "refresh")):
-        monkeypatch.setattr(s, key, value)
+    monkeypatch.setattr(s, "google_apps_script_url", "https://script.google.com/macros/s/x/exec")
+    monkeypatch.setattr(s, "google_apps_script_key", "k" * 43)
 
     def upload(path, title, share_with, progress=lambda pct: None, folder=None):
         wb = openpyxl.load_workbook(path)

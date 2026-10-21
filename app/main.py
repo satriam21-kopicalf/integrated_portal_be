@@ -18,13 +18,13 @@ from app import database as db
 from app.config import get_settings
 from app.utils import data_version
 from app.routes.activity import router as activity_router
-from app.routes import (auth_router, avatars_router, branches_router, cost_control_router, exports_router, live_router,
+from app.routes import (auth_router, avatars_router, branches_router, exports_router, live_router,
                         overview_router, realtime_router,
                         summary_router, transactions_router, users_router)
 from app.access import require_page
 from app.routes.access import router as access_router
 from app.routes.ratio import router as ratio_router
-from app.routes.auth import current_user, require_superadmin, session_lookup
+from app.routes.auth import current_user, session_lookup
 from app.routes.stock_opname import router as stock_opname_router
 from app.routes.waste import router as waste_router
 from app.routes.pic_checkin import router as pic_checkin_router
@@ -111,8 +111,7 @@ app.include_router(branches_router, dependencies=signed_in)
 app.include_router(exports_router, dependencies=[Depends(require_page("sales"))])
 app.include_router(overview_router, dependencies=[Depends(require_page("overview"))])
 app.include_router(live_router, dependencies=[Depends(require_page("overview"))])
-app.include_router(ratio_router)  # /api/cost-control/ratio (page cc.ratio), before the COGS routes
-app.include_router(cost_control_router, dependencies=[Depends(require_page("cc.cogs"))])
+app.include_router(ratio_router)  # /api/cost-control/ratio (page cc.ratio)
 app.include_router(stock_opname_router, dependencies=signed_in)  # stock opname through the kopicalf gateway (pages per path)
 app.include_router(waste_router)  # waste (skeleton): pages waste, cc.waste-monitor, cc.waste-review
 app.include_router(branch_groups_router)  # Monitoring → Branch groups / Overview: before /api/monitoring/{form}

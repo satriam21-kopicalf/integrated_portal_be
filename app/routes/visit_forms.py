@@ -12,6 +12,7 @@ and before app/routes/monitoring.py, whose generic routes keep serving the form 
     GET    /api/monitoring/{form}                         page mon.<form>: ?dateFrom&dateTo&branch&userId
     GET    /api/monitoring/{form}/visits/{id}             page mon.<form>: one submitted visit (branches in scope)
     GET    /api/visit-photos/{photo}                      the photo: the PIC's own visit or monitoring (scope)
+    GET    /api/visit-signatures/{id}                     the visit's signature: same access as its photos
 
 {form} = product | outlet; the other forms go on to the generic routes.
 """
@@ -23,6 +24,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app import activity, visit_forms as vf
+from app.pic_checkin import CheckInError
 from app.access import deny, has_page
 from app.activity import client_ip
 from app.routes import monitoring as skeleton
@@ -54,6 +56,8 @@ class SubmitIn(BaseModel):
     latitude: Optional[float] = Field(None, ge=-90, le=90)
     longitude: Optional[float] = Field(None, ge=-180, le=180)
     accuracyM: Optional[float] = Field(None, ge=0, le=100_000)
+    signature: Optional[str] = Field(None, min_length=20, max_length=5_000_000)  # optional: JPEG on white, drawn in the browser
+    signedName: Optional[str] = Field(None, max_length=120)
 
 
 def _form_page(form: str, request: Request, user: dict) -> None:
@@ -68,7 +72,7 @@ def _run(fn, *args):
         return fn(*args)
     except LookupError as e:
         raise HTTPException(404, detail=str(e)) from None
-    except vf.VisitError as e:
+    except CheckInError as e:  # VisitError, or a photo / signature that cannot be read
         raise HTTPException(422, detail=str(e)) from None
 
 
@@ -118,10 +122,10 @@ def submit(form: str, visit_id: str, body: SubmitIn, request: Request, user: dic
     _form_page(form, request, user)
     try:
         out = vf.submit(form, user, visit_id, body.latitude, body.longitude, body.accuracyM,
-                        request.headers.get("user-agent"), client_ip(request))
+                        request.headers.get("user-agent"), client_ip(request), body.signature, body.signedName)
     except LookupError as e:
         raise HTTPException(404, detail=str(e)) from None
-    except vf.VisitError as e:
+    except CheckInError as e:  # VisitError, or a photo / signature that cannot be read
         activity.record(f"form.{form}_visit", user=user, request=request, status="failed", page=f"/forms/{form}",
                         summary=f"{vf.DEFINITIONS[form]['title']} ditolak: {e}", details={"id": visit_id})
         raise HTTPException(422, detail=str(e)) from None
@@ -175,9 +179,7 @@ def monitoring_visit(form: str, visit_id: str, request: Request, user: dict = De
     return {"definition": vf.DEFINITIONS[form], **vf.full(visit_id)}
 
 
-@router.get("/api/visit-photos/{photo_id}")
-def photo(photo_id: str, request: Request, user: dict = Depends(current_user)) -> Response:
-    row = vf.photo(photo_id)
+def _image(row: Optional[dict], request: Request, user: dict) -> Response:
     if row is None:
         raise HTTPException(404, detail="Foto tidak ditemukan")
     own = row["user_id"] == str(user["id"]) and has_page(user, f"form.{row['form']}")
@@ -186,3 +188,13 @@ def photo(photo_id: str, request: Request, user: dict = Depends(current_user)) -
     if not (own or monitor):
         deny(request, user)
     return Response(bytes(row["photo"]), media_type=row["photo_type"], headers={"Cache-Control": "private, max-age=86400"})
+
+
+@router.get("/api/visit-photos/{photo_id}")
+def photo(photo_id: str, request: Request, user: dict = Depends(current_user)) -> Response:
+    return _image(vf.photo(photo_id), request, user)
+
+
+@router.get("/api/visit-signatures/{visit_id}")
+def signature(visit_id: str, request: Request, user: dict = Depends(current_user)) -> Response:
+    return _image(vf.signature_of(visit_id), request, user)

@@ -128,7 +128,8 @@ def _counts(form: str, answers: dict) -> dict:
 
 COLS = """v.id::text, v.form, v.status, v.user_id::text, v.username, v.full_name, v.branch_code, v.branch_name, v.started_at,
     v.updated_at, v.submitted_at, v.answers, v.counts, v.score, v.latitude, v.longitude, v.accuracy_m, v.outlet_latitude,
-    v.outlet_longitude, v.radius_m, v.distance_m, v.outside_radius, v.low_accuracy"""
+    v.outlet_longitude, v.radius_m, v.distance_m, v.outside_radius, v.low_accuracy, v.signed_name, v.signed_at,
+    (v.signature IS NOT NULL) AS has_signature"""
 
 
 def _num(v: Any) -> Optional[float]:
@@ -153,6 +154,8 @@ def _view(r: dict, photos: Optional[list] = None) -> dict:
         "latitude": _num(r["latitude"]), "longitude": _num(r["longitude"]), "accuracyM": _num(r["accuracy_m"]),
         "outletLatitude": _num(r["outlet_latitude"]), "outletLongitude": _num(r["outlet_longitude"]), "radiusM": r["radius_m"],
         "distanceM": r["distance_m"], "outsideRadius": r["outside_radius"], "lowAccuracy": r["low_accuracy"],
+        "signature": {"name": r["signed_name"], "signedAt": r["signed_at"].isoformat() if r["signed_at"] else None}
+        if r["has_signature"] else None,
     }
     if photos is not None:
         out["answers"] = r["answers"] or {}
@@ -277,7 +280,7 @@ def missing(form: str, answers: dict, photos: list[dict]) -> list[dict]:
 
 
 def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Optional[float], accuracy: Optional[float],
-           device: Optional[str], ip: Optional[str]) -> dict:
+           device: Optional[str], ip: Optional[str], signature: Optional[str] = None, signed_name: Optional[str] = None) -> dict:
     row = own_draft(form, user, visit_id)
     photos = photos_of(visit_id)
     todo = missing(form, row["answers"] or {}, photos)
@@ -286,17 +289,23 @@ def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Opti
         under = len(todo) - rating
         parts = ([f"{rating} butir belum dinilai"] if rating else []) + ([f"{under} butir UNDER belum lengkap catatan/foto"] if under else [])
         raise VisitError("Belum bisa dikirim: " + ", ".join(parts))
+    # the signature is optional (like the stock opname); a name goes with it
+    sig_type, sig = parse_photo(signature) if signature else (None, None)
+    signed_name = " ".join((signed_name or "").split())[:120] or None
+    if sig is not None and not signed_name:
+        raise VisitError("Tulis nama penanda tangan di bawah tanda tangan")
     outlet = _outlet(row["branch_code"]) or {}
     j = judge(lat, lng, accuracy, outlet) if lat is not None and lng is not None else {"distance_m": None, "outside_radius": False, "low_accuracy": False}
     counts = _counts(form, row["answers"] or {})
     db.fetchrow(
         f"""UPDATE {T} SET status = 'SUBMITTED', submitted_at = now(), updated_at = now(), counts = %s::jsonb, score = %s,
                 latitude = %s, longitude = %s, accuracy_m = %s, outlet_latitude = %s, outlet_longitude = %s, radius_m = %s,
-                distance_m = %s, outside_radius = %s, low_accuracy = %s, device = %s, ip = %s
+                distance_m = %s, outside_radius = %s, low_accuracy = %s, device = %s, ip = %s,
+                signature = %s, signature_type = %s, signed_name = %s, signed_at = CASE WHEN %s THEN now() END
             WHERE id::text = %s RETURNING id""",
         (json.dumps(counts), counts["score"], lat, lng, accuracy, outlet.get("latitude"), outlet.get("longitude"),
          outlet.get("radius_m"), j["distance_m"], j["outside_radius"], j.get("low_accuracy", False), (device or "")[:300] or None,
-         ip, visit_id))
+         ip, sig, sig_type, signed_name if sig is not None else None, sig is not None, visit_id))
     return full(visit_id)
 
 
@@ -359,6 +368,11 @@ def monitor(form: str, date_from: date, date_to: date, branches: Optional[list[s
             "sections": sorted(sections.values(), key=lambda s: order.get(s["key"], 99)),
             "findings": [{**f, "branches": sorted(f["branches"])} for f in top],
             "pics": sorted(pics.values(), key=lambda p: -p["n"]), "truncated": len(rows) >= limit}
+
+
+def signature_of(visit_id: str) -> Optional[dict]:
+    return db.fetchrow(f"""SELECT signature AS photo, signature_type AS photo_type, user_id::text, branch_code, form, status
+                           FROM {T} WHERE id::text = %s AND signature IS NOT NULL""", (visit_id,))
 
 
 def photo(photo_id: str) -> Optional[dict]:

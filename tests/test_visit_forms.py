@@ -59,3 +59,34 @@ def test_endpoints_follow_their_pages(anon, store, page_access, monkeypatch):
     assert anon.get("/api/forms/product").status_code == 403
     assert anon.get("/api/monitoring/product").status_code == 200
     assert anon.get("/api/monitoring/outlet").status_code == 403  # one monitoring page does not open the other
+
+
+def test_signature_is_optional_and_needs_a_name(monkeypatch):
+    from tests.test_pic_checkin import _jpeg
+    saved = {}
+    monkeypatch.setattr(vf, "own_draft", lambda form, user, vid: {"answers": {}, "branch_code": "CCI01"})
+    monkeypatch.setattr(vf, "photos_of", lambda vid: [])
+    monkeypatch.setattr(vf, "missing", lambda form, answers, photos: [])
+    monkeypatch.setattr(vf, "_outlet", lambda code: None)
+    monkeypatch.setattr(vf, "full", lambda vid: {"id": vid})
+    monkeypatch.setattr(vf.db, "fetchrow", lambda q, p=None: saved.update(p=p) or {"id": "v"})
+    user = {"id": "u"}
+    vf.submit("outlet", user, "v", None, None, None, None, None)  # unsigned: fine
+    # params end with: signature, signature_type, signed_name, signed (bool), visit id
+    assert saved["p"][-5:-1] == (None, None, None, False)
+    try:
+        vf.submit("outlet", user, "v", None, None, None, None, None, _jpeg(), "  ")
+        raise AssertionError("a signature needs a name")
+    except vf.VisitError:
+        pass
+    vf.submit("outlet", user, "v", None, None, None, None, None, _jpeg(), "Budi  Santoso")
+    sig, kind, name, signed = saved["p"][-5:-1]
+    assert sig.startswith(b"\xff\xd8") and kind == "image/jpeg" and name == "Budi Santoso" and signed is True
+
+
+def test_unreadable_photo_is_refused_not_an_error(anon, store, monkeypatch):
+    monkeypatch.setattr(vf, "own_draft", lambda form, user, vid: {"answers": {}, "branch_code": "CCI01"})
+    monkeypatch.setattr(vf.db, "fetchrow", lambda q, p=None: {"n": 0})
+    login(anon, "kasir", "Kasir1234")
+    r = anon.post("/api/forms/outlet/visits/v/photos", json={"item": "rating.1", "photo": "data:image/png;base64,bm90LWFuLWltYWdlLWF0LWFsbA=="})
+    assert r.status_code == 422

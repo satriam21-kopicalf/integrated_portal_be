@@ -30,7 +30,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("form.pic-check-in", "PIC Check In (form)", "Form"),
     ("form.product", "Monitoring Product (form)", "Form"),
     ("form.outlet", "Monitoring Outlet (form)", "Form"),
-    ("form.tools", "Tools & Heavy Tools (form)", "Form"),
+    ("form.damaged-equipment", "Damaged Equipment (form)", "Form"),
     ("cc.monitor", "Monitor", "Cost Control · Stock opname"),
     ("cc.reviews", "Review", "Cost Control · Stock opname"),
     ("cc.entry", "Enter / import SO", "Cost Control · Stock opname"),
@@ -50,7 +50,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("mon.pic-check-in", "PIC Check In", "Monitoring"),
     ("mon.product", "Monitoring Product", "Monitoring"),
     ("mon.outlet", "Monitoring Outlet", "Monitoring"),
-    ("mon.tools", "Tools & Heavy Tools", "Monitoring"),
+    ("mon.damaged-equipment", "Damaged Equipment", "Monitoring"),
     ("mon.branch-groups", "Branch groups", "Monitoring"),
     ("rating.google-maps", "Google Maps", "Rating & Review"),
     ("rating.shopeefood", "ShopeeFood", "Rating & Review"),
@@ -61,7 +61,7 @@ PAGE_KEYS = tuple(p[0] for p in PAGES)
 CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))
 EDITABLE_ROLES = ("cost_control", "user")
 DEFAULT_ROLE_PAGES = {
-    "user": ["overview", "sales", "stock-opname", "guide", "form.pic-check-in", "form.product", "form.outlet"],
+    "user": ["overview", "sales", "stock-opname", "guide", "form.pic-check-in", "form.product", "form.outlet", "form.damaged-equipment"],
     "cost_control": ["overview", "sales", "stock-opname", "waste", "guide", *CC_PAGES],
 }
 

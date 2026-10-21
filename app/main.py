@@ -28,7 +28,7 @@ from app.routes.auth import current_user, session_lookup
 from app.routes.stock_opname import router as stock_opname_router
 from app.routes.waste import router as waste_router
 from app.routes.pic_checkin import router as pic_checkin_router
-from app.routes.monitoring import router as monitoring_router
+from app.routes.damaged_equipment import router as damaged_equipment_router
 from app.routes.visit_forms import router as visit_forms_router
 from app.routes.branch_groups import router as branch_groups_router
 from app.routes.rating import router as rating_router
@@ -117,7 +117,7 @@ app.include_router(waste_router)  # waste (skeleton): pages waste, cc.waste-moni
 app.include_router(branch_groups_router)  # Monitoring → Branch groups / Overview: before /api/monitoring/{form}
 app.include_router(pic_checkin_router)  # PIC Check In: before the generic form routes
 app.include_router(visit_forms_router)  # Monitoring Product / Outlet forms and monitoring: before the generic routes
-app.include_router(monitoring_router)  # forms & monitoring (skeleton): pages form.*, mon.*
+app.include_router(damaged_equipment_router)  # Form & Monitoring → Damaged Equipment; /api/public/de/* = share links (no sign-in)
 app.include_router(rating_router)  # Rating & Review (skeleton): pages rating.*
 app.include_router(access_router)  # pages of roles & users, job titles, departments
 app.include_router(activity_router)  # superadmin reads; any signed-in user reports page views

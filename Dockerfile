@@ -3,7 +3,8 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    EXPORT_DIR=/data/exports
+    EXPORT_DIR=/data/exports \
+    MEDIA_DIR=/data/media
 
 WORKDIR /app
 
@@ -13,7 +14,7 @@ RUN pip install -r requirements.txt
 COPY app ./app
 
 RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /data/exports \
+    && mkdir -p /data/exports /data/media \
     && chown -R appuser:appuser /data
 USER appuser
 

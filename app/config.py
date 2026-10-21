@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     # e.g. https://portal-api.kopicalf.co.id -> absolute download links that bypass the
     # Vercel proxy. Empty = relative /api/exports/{id}/download (served via the proxy).
     public_base_url: str = ""
+    # Damaged Equipment (app/damaged_equipment.py): photos / videos on the backend volume; share links valid for N days
+    media_dir: str = os.path.join(tempfile.gettempdir(), "portal-media")
+    share_link_days: int = 30
+    # the portal's address, for the share links printed on documents
+    portal_url: str = "https://portal.kopicalf.co.id"
     # Daily housekeeping (app/maintenance.py); 0 = keep forever
     activity_retention_days: int = 90
     gsheet_retention_days: int = 30

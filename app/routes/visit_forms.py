@@ -1,5 +1,5 @@
 """Form → Monitoring Product / Monitoring Outlet and their monitoring (app/visit_forms.py). Registered after PIC Check In
-and before app/routes/monitoring.py, whose generic routes keep serving the form still being built (Tools & Heavy Tools).
+(its /api/forms/pic-check-in and /api/monitoring/pic-check-in come first).
 
     GET    /api/forms/{form}                              page form.<form>: definition, account, branches, drafts, latest
     POST   /api/forms/{form}/visits                       page form.<form>: {"branchCode"} → the draft of that branch
@@ -14,7 +14,7 @@ and before app/routes/monitoring.py, whose generic routes keep serving the form 
     GET    /api/visit-photos/{photo}                      the photo: the PIC's own visit or monitoring (scope)
     GET    /api/visit-signatures/{id}                     the visit's signature: same access as its photos
 
-{form} = product | outlet; the other forms go on to the generic routes.
+{form} = product | outlet.
 """
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -27,7 +27,6 @@ from app import activity, branch_groups, visit_forms as vf
 from app.pic_checkin import CheckInError
 from app.access import deny, has_page
 from app.activity import client_ip
-from app.routes import monitoring as skeleton
 from app.routes.auth import current_user
 from app.scope import NO_BRANCH, allowed_branches, scoped_branch
 from app.utils import parse_branches, today
@@ -78,8 +77,6 @@ def _run(fn, *args):
 
 @router.get("/api/forms/{form}")
 def form_state(form: str, request: Request, user: dict = Depends(current_user)) -> dict:
-    if form not in FORMS:
-        return skeleton.form_entries(form, request, user)
     _form_page(form, request, user)
     return vf.form_state(form, user)
 
@@ -155,7 +152,7 @@ def monitoring(form: str, request: Request, dateFrom: Optional[date] = Query(Non
                branch: Optional[str] = None, userId: Optional[str] = None, group: Optional[str] = Query(None, max_length=60),
                user: dict = Depends(current_user)) -> dict:
     if form not in FORMS:
-        return skeleton.monitoring(form, request, user)
+        raise HTTPException(404, detail="Form tidak dikenal")
     _mon_page(form, request, user)
     end = dateTo or today()
     start = dateFrom or end - timedelta(days=29)

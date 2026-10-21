@@ -9,6 +9,8 @@ services:
     volumes:
       # Generated Excel exports (auto-deleted after EXPORT_TTL_HOURS)
       - exports:/data/exports
+      # Damaged Equipment photos & videos (app/damaged_equipment.py), kept for good
+      - media:/data/media
     restart: unless-stopped
     logging:
       driver: json-file
@@ -18,3 +20,4 @@ services:
 
 volumes:
   exports:
+  media:

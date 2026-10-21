@@ -142,6 +142,15 @@ Data dibaca dari tabel agregat (bukan `raw_data`), dibangun ulang per tanggal ol
 - Setiap tanggal di-rebuild dalam satu transaksi lalu direkonsiliasi: Σ subtotal Sales agregat harus sama dengan `transactions_pos_sales`.
 - **Backfill / rebuild manual** di VPS: `bash /opt/integrated-portal-be/repo/scripts/aggregates.sh --from 2025-06-09 --to 2026-10-03` (≈ 2 dtk per hari).
 
+### Form & Monitoring → Damaged Equipment (migration 027)
+
+`app/damaged_equipment.py` (+ `app/de_pdf.py`, `app/routes/damaged_equipment.py`): PIC mengajukan **Perbaikan** (Building & Tools) atau **Pengadaan** (Dekorasi & Tools) untuk salah satu cabangnya; tim Maintenance / Pengadaan menanganinya di Monitoring.
+
+- **Pengajuan** (halaman `form.damaged-equipment`, default role `user`): draf tersimpan otomatis — item (kategori master 6 kelompok, nama, qty, lokasi, urgensi), analisis / alasan, foto kamera ≤ 10 dan 1 video ≤ 10 MB (file di volume `MEDIA_DIR` = `/data/media`, bukan di database) → preview + tanda tangan PIC (wajib) → nomor `DE-YYMM-NNNN`, PDF (`reportlab`) dan link baca-saja tanpa login (`/share/de/{token}`, `SHARE_LINK_DAYS` 30). Form menampilkan pengajuan yang masih berjalan di cabang itu dan menandai item yang sudah diajukan (hindari double request).
+- **Alur** (halaman `mon.damaged-equipment`): Pending → Validasi → Review → Accept → Dikerjakan → Done; On hold (lanjut ke tahap semula) dan Reject wajib catatan; Dikerjakan butuh tukang, Done butuh foto hasil. Setiap langkah = event (`de_event`): timeline PIC + **time tracker** (waktu per tahap, on hold terpisah, target per urgensi: Kritis 24 jam, Tinggi 72 jam, Normal 7 hari, Rendah 14 hari).
+- **Tukang** (`de_technician`, `de_assignment`): penugasan (bisa lebih dari satu), lepas, dan **geser ke pengajuan prioritas** dengan alasan (tercatat di kedua pengajuan); beban kerja per tukang. Pengajuan ganda ditutup sebagai duplikat dengan tautan ke pengajuan aslinya.
+- Menggantikan halaman kerangka *Tools & Heavy Tools* (`form.tools` / `mon.tools`; akses lama dipindahkan oleh migration 027).
+
 ### Rating & Review → Google Maps (migration 020)
 
 `app/gmaps.py` membaca outlet Kopi Calf di Google Maps lewat **Places API (New)** resmi: nama, rating, jumlah ulasan, alamat, status bisnis, jam buka (buka/tutup dihitung saat dibaca, WIB) dan ulasan yang diberikan API (**maksimal 5 per outlet**, pilihan Google; seluruh ulasan hanya lewat Business Profile API).

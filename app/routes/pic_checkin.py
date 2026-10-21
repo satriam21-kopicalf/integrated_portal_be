@@ -1,5 +1,5 @@
-"""PIC Check In (app/pic_checkin.py). Registered before app/routes/monitoring.py, whose generic /api/forms/{form} and
-/api/monitoring/{form} keep serving the forms still being built.
+"""PIC Check In (app/pic_checkin.py). Registered before the Monitoring Product / Outlet routes (their
+/api/forms/{form} and /api/monitoring/{form} would match pic-check-in too).
 
     GET  /api/forms/pic-check-in               page form.pic-check-in: the account, its branches (with the outlet
                                                location) and its latest check-ins

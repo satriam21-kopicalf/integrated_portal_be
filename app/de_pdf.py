@@ -125,6 +125,7 @@ def build(request_id: str, share_url: Optional[str] = None) -> tuple[bytes, str]
         reader_img = None
         try:
             reader_img = Image(io.BytesIO(bytes(sig["signature"])), width=50 * mm, height=22 * mm, kind="proportional")
+            reader_img.hAlign = "LEFT"
         except Exception:  # noqa: BLE001
             reader_img = None
         story.append(KeepTogether([reader_img or Spacer(1, 1),

@@ -27,7 +27,8 @@ def test_pages_replace_the_tools_skeleton():
 
 def test_flow_and_resume_after_hold():
     assert de.allowed_next(_row(status="PENDING")) == ["VALIDATION", "ON_HOLD", "REJECTED"]
-    assert de.allowed_next(_row(status="IN_PROGRESS")) == ["DONE", "ON_HOLD"]
+    assert de.allowed_next(_row(status="IN_PROGRESS")) == ["HANDOVER", "ON_HOLD"]
+    assert de.allowed_next(_row(status="HANDOVER")) == ["DONE", "IN_PROGRESS", "ON_HOLD"]
     assert de.allowed_next(_row(status="ON_HOLD", hold_from="REVIEW")) == ["REVIEW", "REJECTED"]  # resumes where it stopped
     assert de.allowed_next(_row(status="DONE")) == []
 
@@ -60,7 +61,10 @@ def test_time_tracker_counts_hold_apart_and_sla():
     hours = {s["status"]: s["hours"] for s in t["stages"]}
     assert hours == {"PENDING": 2.0, "VALIDATION": 2.0, "ON_HOLD": 10.0, "REVIEW": 26.0}
     assert t["totalHours"] == 40 and t["holdHours"] == 10 and t["workHours"] == 30
-    assert t["slaHours"] == 24 and t["overdue"] is True and t["progress"] == 40  # critical: 24 h without the hold
+    assert t["slaHours"] == 24 and t["overdue"] is True and t["progress"] == 33  # critical: 24 h without the hold
+    assert t["dueAt"] == (T0 + timedelta(hours=34)).isoformat() and t["targetAdjusted"] is False
+    adj = de.tracker(_row(status="REVIEW", closed_at=T0 + timedelta(hours=40), target_at=T0 + timedelta(hours=60)), ev)
+    assert adj["overdue"] is False and adj["targetAdjusted"] is True and adj["slaHours"] == 50  # 60 h to the target minus 10 h hold
 
 
 def test_checks_before_sending_and_video_types():
@@ -165,3 +169,55 @@ def test_invoice_types_and_wages(monkeypatch):
             raise AssertionError(body)
         except de.DeError:
             pass
+
+
+def test_handover_and_vendor_rules(monkeypatch):
+    rows = {"r": _row(status="HANDOVER", mode="VENDOR", handover_at=None, actual_cost=None, est_cost=500000)}
+    monkeypatch.setattr(de, "get_row", lambda rid: rows["r"])
+    monkeypatch.setattr(de.db, "fetchrow", lambda q, p=None: {"n": 1})
+    u = {"id": "x", "username": "t"}
+    for row, why in ((rows["r"], "Serah terima dari PIC belum dikirim"),
+                     ({**rows["r"], "handover_at": T0}, "biaya aktual dan lampirkan invoice")):
+        rows["r"] = row
+        try:
+            de.change_status(u, "r", "DONE", None)
+            raise AssertionError(why)
+        except de.DeError as e:
+            assert why in str(e)
+    rows["r"] = _row(status="REVIEW", mode="VENDOR", est_cost=None)
+    try:
+        de.change_status(u, "r", "ACCEPTED", None)
+        raise AssertionError("vendor estimate")
+    except de.DeError as e:
+        assert "estimasi biaya vendor" in str(e)
+    rows["r"] = _row(status="IN_PROGRESS", mode="INTERNAL")
+    monkeypatch.setattr(de.db, "fetchrow", lambda q, p=None: {"n": 1 if "de_assignment" in q else 0})
+    try:
+        de.change_status(u, "r", "HANDOVER", None)
+        raise AssertionError("internal needs the technician's photos")
+    except de.DeError as e:
+        assert "Foto hasil pekerjaan dari tukang" in str(e)
+    # the PIC's handover: photos, both signatures for a vendor
+    monkeypatch.setattr(de, "own_sent", lambda user, rid: _row(status="HANDOVER", mode="VENDOR", handover_at=None))
+    monkeypatch.setattr(de.db, "fetchrow", lambda q, p=None: {"n": 0})
+    try:
+        de.submit_handover(u, "r", None, None, None, "data:x", "PIC", None, None, None)
+        raise AssertionError("photo")
+    except de.DeError as e:
+        assert "minimal 1 foto" in str(e)
+    monkeypatch.setattr(de.db, "fetchrow", lambda q, p=None: {"n": 2})
+    monkeypatch.setattr(de, "parse_photo", lambda v: ("image/png", b"x"))
+    try:
+        de.submit_handover(u, "r", None, None, None, "data:x", "PIC", None, None, None)
+        raise AssertionError("vendor signature")
+    except de.DeError as e:
+        assert "tanda tangan dan nama petugas vendor" in str(e)
+
+
+def test_target_needs_a_reason(monkeypatch):
+    monkeypatch.setattr(de, "get_row", lambda rid: _row(status="IN_PROGRESS"))
+    try:
+        de.set_target({"id": "x", "username": "t"}, "r", T0 + timedelta(days=2), " ")
+        raise AssertionError("reason")
+    except de.DeError as e:
+        assert "Alasan" in str(e)

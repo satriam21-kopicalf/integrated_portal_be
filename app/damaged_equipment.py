@@ -6,11 +6,14 @@ master of 6 groups, name, qty, location, urgency), an analysis, up to MAX_PHOTOS
 MAX_VIDEO_BYTES, a preview and the PIC's signature (required). Sending gives it a number (DE-YYMM-NNNN), a PDF and a
 share link (read-only, no login, SHARE days).
 
-The team moves it through FLOW: PENDING → VALIDATION → REVIEW → ACCEPTED → IN_PROGRESS → DONE, with ON_HOLD (resumes
-where it stopped) and REJECTED; a note is required to hold, reject, swap or mark a duplicate; IN_PROGRESS needs a
-technician, DONE a photo of the work done (AFTER). Technicians are assigned (several per request) and can be moved to
-a request that needs them first (a swap: released here with the reason, assigned there). Every step is an event: the
-timeline the PIC follows and the time tracker (time per stage, on hold apart, SLA per urgency).
+The team moves it through FLOW: PENDING → VALIDATION → REVIEW → ACCEPTED → IN_PROGRESS → HANDOVER → DONE, with
+ON_HOLD (resumes where it stopped) and REJECTED; a note is required to hold, reject, swap or mark a duplicate.
+Technicians are assigned (several per request, all INTERNAL or all VENDOR: the request's mode) and can be moved to a
+request that needs them first. INTERNAL: the technician sends the work photos through a link (AFTER) before the
+handover. VENDOR: an estimate before Accept / In progress, the actual cost and an invoice before Done. HANDOVER (migration
+030): the PIC confirms at the outlet with 1-5 camera photos, their signature and, for a vendor, the vendor's signature;
+then the team processes Done. The due time comes from the urgency and can be adjusted by the team (with a reason, shown
+to the PIC). Every step is an event: the timeline the PIC follows and the time tracker (time per stage, on hold apart).
 
 To avoid double requests the form shows the open requests of the branch, and an item already open there is flagged;
 the team can close a request as a duplicate of another one.
@@ -20,7 +23,7 @@ import json
 
 import secrets
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -33,6 +36,8 @@ P = "integration_portal"
 WIB = ZoneInfo("Asia/Jakarta")
 MAX_PHOTOS = 10
 MAX_AFTER = 10
+MAX_HANDOVER = 5           # PIC photos at the handover
+MAX_MONITOR = 10           # PIC photos while the work runs
 MAX_WORK_PHOTOS = 5        # photos per technician link
 WORK_LINK_MINUTES = 60    # a technician link is valid 1 hour
 MAX_INVOICES = 10
@@ -47,14 +52,16 @@ URGENCY_LABEL = {"CRITICAL": "Kritis", "HIGH": "Tinggi", "NORMAL": "Normal", "LO
 SLA_HOURS = {"CRITICAL": 24, "HIGH": 72, "NORMAL": 168, "LOW": 336}
 CAUSES = ("WEAR", "MISUSE", "AGE", "OTHER")
 STATUS_LABEL = {"DRAFT": "Draf", "PENDING": "Pending", "VALIDATION": "Validasi", "REVIEW": "Review", "ON_HOLD": "On hold",
-                "ACCEPTED": "Accept", "IN_PROGRESS": "Dikerjakan", "DONE": "Done", "REJECTED": "Reject"}
-OPEN = ("PENDING", "VALIDATION", "REVIEW", "ON_HOLD", "ACCEPTED", "IN_PROGRESS")
+                "ACCEPTED": "Accept", "IN_PROGRESS": "Dikerjakan", "HANDOVER": "Serah terima", "DONE": "Done", "REJECTED": "Reject"}
+OPEN = ("PENDING", "VALIDATION", "REVIEW", "ON_HOLD", "ACCEPTED", "IN_PROGRESS", "HANDOVER")
+STEPS = ("PENDING", "VALIDATION", "REVIEW", "ACCEPTED", "IN_PROGRESS", "HANDOVER", "DONE")
 FLOW = {
     "PENDING": ("VALIDATION", "ON_HOLD", "REJECTED"),
     "VALIDATION": ("REVIEW", "ON_HOLD", "REJECTED"),
     "REVIEW": ("ACCEPTED", "ON_HOLD", "REJECTED"),
     "ACCEPTED": ("IN_PROGRESS", "ON_HOLD", "REJECTED"),
-    "IN_PROGRESS": ("DONE", "ON_HOLD"),
+    "IN_PROGRESS": ("HANDOVER", "ON_HOLD"),
+    "HANDOVER": ("DONE", "IN_PROGRESS", "ON_HOLD"),  # back to In progress: the work is redone
     "ON_HOLD": ("REJECTED",),  # + resume to hold_from
 }
 NOTE_REQUIRED = ("ON_HOLD", "REJECTED")
@@ -251,7 +258,10 @@ def _video_type(data: bytes, file_name: str) -> tuple[str, str]:
 COLS = """r.id::text, r.number, r.kind, r.status, r.hold_from, r.user_id::text, r.username, r.full_name, r.branch_code, r.branch_name,
     r.analysis, r.cause, r.urgency, r.latitude, r.longitude, r.accuracy_m, r.distance_m, r.outside_radius, r.signed_name, r.signed_at,
     (r.signature IS NOT NULL) AS has_signature, r.share_token, r.share_expires_at, r.est_cost, r.actual_cost, r.vendor,
-    r.duplicate_of::text, r.created_at, r.updated_at, r.submitted_at, r.closed_at,
+    r.duplicate_of::text, r.created_at, r.updated_at, r.submitted_at, r.closed_at, r.target_at, r.target_note, r.target_by,
+    r.target_set_at, r.target_changes, r.mode, r.handover_requested_at, r.handover_at, r.handover_note, r.handover_distance_m,
+    r.handover_outside, r.pic_sign_name, (r.pic_sign IS NOT NULL) AS has_pic_sign, r.vendor_sign_name,
+    (r.vendor_sign IS NOT NULL) AS has_vendor_sign, r.approved_by,
     (SELECT number FROM integration_portal.de_request d WHERE d.id = r.duplicate_of) AS duplicate_number"""
 
 
@@ -290,10 +300,13 @@ def assignments_of(request_id: str) -> list[dict]:
 
 
 def tracker(row: dict, events: list[dict]) -> dict:
-    """Time per status from sending to now / closing; on hold kept apart; SLA by urgency (on hold not counted)."""
+    """Time per status from sending to now / closing, on hold kept apart. Due time: the team's adjusted target, else
+    sending + the urgency's hours + the time on hold."""
+    sla = SLA_HOURS.get(row["urgency"])
+    adjusted = row.get("target_at")
     if not row["submitted_at"]:
-        return {"stages": [], "totalHours": None, "holdHours": 0, "workHours": None, "slaHours": SLA_HOURS.get(row["urgency"]),
-                "overdue": False, "progress": 0}
+        return {"stages": [], "totalHours": None, "holdHours": 0, "workHours": None, "slaHours": sla, "dueAt": _iso(adjusted),
+                "targetAdjusted": adjusted is not None, "overdue": False, "progress": 0}
     marks = [(datetime.fromisoformat(e["at"]), e["to"]) for e in events if e["kind"] in ("SUBMIT", "STATUS") and e["to"]]
     end = row["closed_at"] or _now()
     stages: dict[str, float] = {}
@@ -303,13 +316,15 @@ def tracker(row: dict, events: list[dict]) -> dict:
     hold = stages.get("ON_HOLD", 0.0)
     for st in ("DONE", "REJECTED"):
         stages.pop(st, None)
-    sla = SLA_HOURS.get(row["urgency"])
-    order = ["PENDING", "VALIDATION", "REVIEW", "ACCEPTED", "IN_PROGRESS", "DONE"]
+    due = adjusted or (row["submitted_at"] + timedelta(hours=sla + hold) if sla else None)
+    target_h = None if due is None else max(0.0, (due - row["submitted_at"]).total_seconds() / 3600 - hold)
     current = row["hold_from"] if row["status"] == "ON_HOLD" else row["status"]
-    progress = 100 if row["status"] == "DONE" else (round(order.index(current) * 100 / (len(order) - 1)) if current in order else 0)
-    return {"stages": [{"status": s, "label": STATUS_LABEL[s], "hours": round(h, 2)} for s, h in stages.items()],
-            "totalHours": round(total, 2), "holdHours": round(hold, 2), "workHours": round(total - hold, 2), "slaHours": sla,
-            "overdue": bool(sla and row["status"] in OPEN and total - hold > sla), "progress": progress}
+    progress = 100 if row["status"] == "DONE" else (round(STEPS.index(current) * 100 / (len(STEPS) - 1)) if current in STEPS else 0)
+    late = due is not None and end > due
+    return {"stages": [{"status": s_, "label": STATUS_LABEL[s_], "hours": round(h, 2)} for s_, h in stages.items()],
+            "totalHours": round(total, 2), "holdHours": round(hold, 2), "workHours": round(total - hold, 2),
+            "slaHours": None if target_h is None else round(target_h, 2), "dueAt": _iso(due), "targetAdjusted": adjusted is not None,
+            "overdue": bool(late and row["status"] in OPEN), "late": bool(late and row["status"] == "DONE"), "progress": progress}
 
 
 def view(row: dict, full: bool = False) -> dict:
@@ -324,6 +339,14 @@ def view(row: dict, full: bool = False) -> dict:
         "duplicateOf": {"id": row["duplicate_of"], "number": row["duplicate_number"]} if row["duplicate_of"] else None,
         "createdAt": _iso(row["created_at"]), "updatedAt": _iso(row["updated_at"]), "submittedAt": _iso(row["submitted_at"]),
         "closedAt": _iso(row["closed_at"]),
+        "mode": row.get("mode"),
+        "target": {"at": _iso(row.get("target_at")), "note": row.get("target_note"), "by": row.get("target_by"),
+                   "setAt": _iso(row.get("target_set_at")), "changes": row.get("target_changes") or 0} if row.get("target_at") else None,
+        "handover": {"requestedAt": _iso(row.get("handover_requested_at")), "at": _iso(row.get("handover_at")), "note": row.get("handover_note"),
+                     "distanceM": row.get("handover_distance_m"), "outsideRadius": row.get("handover_outside"),
+                     "picName": row.get("pic_sign_name"), "hasPicSign": row.get("has_pic_sign"),
+                     "vendorName": row.get("vendor_sign_name"), "hasVendorSign": row.get("has_vendor_sign"),
+                     "approvedBy": row.get("approved_by")} if row.get("handover_requested_at") else None,
     }
     if full:
         events = events_of(row["id"])
@@ -586,14 +609,33 @@ def change_status(user: dict, request_id: str, to: str, note: Optional[str]) -> 
     if to in NOTE_REQUIRED and not note:
         raise DeError(f"Alasan wajib diisi untuk {STATUS_LABEL[to]}")
     active = db.fetchrow(f"SELECT count(*)::int AS n FROM {P}.de_assignment WHERE request_id::text = %s AND status = 'ACTIVE'", (request_id,))["n"]
-    if to == "IN_PROGRESS" and not active:
+    vendor = row.get("mode") == "VENDOR" and active > 0
+    count = lambda kind: db.fetchrow(f"SELECT count(*)::int AS n FROM {P}.de_media WHERE request_id::text = %s AND kind = %s",  # noqa: E731
+                                     (request_id, kind))["n"]
+    if to in ("IN_PROGRESS", "HANDOVER") and not active:
         raise DeError("Tugaskan tukang dulu sebelum mulai dikerjakan")
-    if to == "DONE" and not db.fetchrow(f"SELECT 1 AS x FROM {P}.de_media WHERE request_id::text = %s AND kind = 'AFTER'", (request_id,)):
-        raise DeError("Lampirkan minimal satu foto hasil pekerjaan sebelum Done")
+    if to in ("ACCEPTED", "IN_PROGRESS") and vendor and row["est_cost"] is None:
+        raise DeError("Isi estimasi biaya vendor dulu (Biaya & invoice)")
+    if to == "HANDOVER" and row.get("mode") == "INTERNAL" and not count("AFTER"):
+        raise DeError("Foto hasil pekerjaan dari tukang belum masuk: kirim link foto ke tukang dulu")
+    if to == "DONE":
+        if not row.get("handover_at"):
+            raise DeError("Serah terima dari PIC belum dikirim")
+        if row.get("mode") == "VENDOR" and (row["actual_cost"] is None or not count("INVOICE")):
+            raise DeError("Pekerjaan vendor: isi biaya aktual dan lampirkan invoice sebelum Done")
+    reopen = to == "IN_PROGRESS" and row["status"] == "HANDOVER"
     with db.transaction() as conn:
         conn.execute(f"""UPDATE {P}.de_request SET status = %s, hold_from = %s, updated_at = now(),
                          closed_at = CASE WHEN %s IN ('DONE', 'REJECTED') THEN now() END WHERE id::text = %s""",
                      (to, row["status"] if to == "ON_HOLD" else None, to, request_id))
+        if to == "HANDOVER" and row["status"] != "ON_HOLD":
+            conn.execute(f"UPDATE {P}.de_request SET handover_requested_at = now() WHERE id::text = %s", (request_id,))
+        if reopen:  # redo: a new handover is needed (the photos stay as history)
+            conn.execute(f"""UPDATE {P}.de_request SET handover_at = NULL, pic_sign = NULL, pic_sign_type = NULL, pic_sign_name = NULL,
+                             vendor_sign = NULL, vendor_sign_type = NULL, vendor_sign_name = NULL, handover_note = NULL WHERE id::text = %s""",
+                         (request_id,))
+        if to == "DONE":
+            conn.execute(f"UPDATE {P}.de_request SET approved_by = %s WHERE id::text = %s", (user.get("full_name") or user["username"], request_id))
         if row["status"] == "IN_PROGRESS" or to in ("DONE", "REJECTED"):  # the work stops: open technician links close
             conn.execute(f"""UPDATE {P}.de_work_link SET revoked_at = now() WHERE request_id::text = %s AND submitted_at IS NULL
                              AND revoked_at IS NULL""", (request_id,))
@@ -630,9 +672,14 @@ def assign(user: dict, request_id: str, technician_id: int, scheduled_for: Optio
     row = get_row(request_id)
     if row is None or row["status"] not in ("REVIEW", "ACCEPTED", "IN_PROGRESS", "ON_HOLD"):
         raise DeError("Tukang ditugaskan setelah pengajuan di-review (Review, Accept atau Dikerjakan)")
-    tech = db.fetchrow(f"SELECT id, name FROM {P}.de_technician WHERE id = %s AND is_active", (technician_id,))
+    tech = db.fetchrow(f"SELECT id, name, kind FROM {P}.de_technician WHERE id = %s AND is_active", (technician_id,))
     if tech is None:
         raise DeError("Tukang tidak ditemukan atau nonaktif")
+    other = db.fetchrow(f"""SELECT t.kind FROM {P}.de_assignment a JOIN {P}.de_technician t ON t.id = a.technician_id
+                            WHERE a.request_id::text = %s AND a.status = 'ACTIVE' AND t.kind <> %s LIMIT 1""", (request_id, tech["kind"]))
+    if other:
+        raise DeError("Satu pengajuan hanya untuk tukang internal atau vendor; lepas tukang " +
+                      ("internal" if other["kind"] == "INTERNAL" else "vendor") + " dulu")
     if db.fetchrow(f"SELECT 1 AS x FROM {P}.de_assignment WHERE request_id::text = %s AND technician_id = %s AND status = 'ACTIVE'",
                    (request_id, technician_id)):
         raise DeError(f"{tech['name']} sudah ditugaskan di pengajuan ini")
@@ -640,6 +687,7 @@ def assign(user: dict, request_id: str, technician_id: int, scheduled_for: Optio
         conn.execute(f"""INSERT INTO {P}.de_assignment (request_id, technician_id, scheduled_for, note, assigned_by)
                          VALUES (%s, %s, %s, %s, %s)""", (request_id, technician_id, scheduled_for, (note or "").strip()[:500] or None,
                                                           user.get("full_name") or user["username"]))
+        conn.execute(f"UPDATE {P}.de_request SET mode = %s WHERE id::text = %s", (tech["kind"], request_id))
         _event(conn, request_id, user, "ASSIGN", None, None, (note or "").strip()[:500] or None,
                {"technician": tech["name"], "scheduledFor": _iso(scheduled_for)})
     return team_full(request_id)
@@ -690,9 +738,15 @@ def swap(user: dict, assignment_id: int, to_request_id: str, scheduled_for: Opti
         raise DeError("Pengajuan tujuan sama dengan pengajuan asal")
     with db.transaction() as conn:
         _release(conn, user, a, note, "SWAP", {"to": target["number"]})
+        kind = conn.execute(f"SELECT kind FROM {P}.de_technician WHERE id = %s", (a["technician_id"],)).fetchone()["kind"]
+        clash = conn.execute(f"""SELECT 1 FROM {P}.de_assignment x JOIN {P}.de_technician t ON t.id = x.technician_id
+                                 WHERE x.request_id::text = %s AND x.status = 'ACTIVE' AND t.kind <> %s""", (to_request_id, kind)).fetchone()
+        if clash:
+            raise DeError("Pengajuan tujuan memakai jenis tukang lain (internal / vendor)")
         conn.execute(f"""INSERT INTO {P}.de_assignment (request_id, technician_id, scheduled_for, note, assigned_by)
                          VALUES (%s, %s, %s, %s, %s)""", (to_request_id, a["technician_id"], scheduled_for, note,
                                                           user.get("full_name") or user["username"]))
+        conn.execute(f"UPDATE {P}.de_request SET mode = %s WHERE id::text = %s", (kind, to_request_id))
         _event(conn, to_request_id, user, "SWAP", None, None, note,
                {"technician": a["name"], "from": a["number"], "scheduledFor": _iso(scheduled_for)})
     return team_full(to_request_id)
@@ -761,7 +815,9 @@ def create_work_link(user: dict, request_id: str, technician_id: Optional[int]) 
     if row is None or row["status"] != "IN_PROGRESS":
         raise DeError("Link foto untuk tukang dibuat saat pengajuan berstatus Dikerjakan")
     techs = db.fetch(f"""SELECT t.id, t.name FROM {P}.de_assignment a JOIN {P}.de_technician t ON t.id = a.technician_id
-                         WHERE a.request_id::text = %s AND a.status = 'ACTIVE' ORDER BY a.id""", (request_id,))
+                         WHERE a.request_id::text = %s AND a.status = 'ACTIVE' AND t.kind = 'INTERNAL' ORDER BY a.id""", (request_id,))
+    if row.get("mode") == "VENDOR":
+        raise DeError("Link foto untuk tukang internal; pekerjaan vendor difoto PIC saat serah terima")
     tech = next((t for t in techs if technician_id is None or t["id"] == technician_id), None)
     if tech is None:
         raise DeError("Pilih tukang yang ditugaskan di pengajuan ini")
@@ -848,3 +904,228 @@ def work_media(token: str, media_id: str) -> Optional[dict]:
     if not db.fetchrow(f"SELECT 1 AS x FROM {P}.de_media WHERE id::text = %s AND work_link_id = %s", (media_id, link["id"])):
         return None
     return media_file(media_id)
+
+
+# ---------------------------------------------------------------- target time (maintenance team)
+
+def set_target(user: dict, request_id: str, due_at: datetime, note: str) -> dict:
+    row = get_row(request_id)
+    if row is None or row["status"] not in OPEN:
+        raise DeError("Target waktu diubah selama pengajuan masih berjalan")
+    note = (note or "").strip()[:500]
+    if not note:
+        raise DeError("Alasan penyesuaian target wajib diisi")
+    if due_at.tzinfo is None:
+        due_at = due_at.replace(tzinfo=WIB)
+    if due_at <= row["submitted_at"]:
+        raise DeError("Target harus setelah waktu pengajuan dikirim")
+    before = tracker(row, events_of(request_id))["dueAt"]
+    with db.transaction() as conn:
+        conn.execute(f"""UPDATE {P}.de_request SET target_at = %s, target_note = %s, target_by = %s, target_set_at = now(),
+                         target_changes = target_changes + 1, updated_at = now() WHERE id::text = %s""",
+                     (due_at, note, user.get("full_name") or user["username"], request_id))
+        _event(conn, request_id, user, "TARGET", None, None, note, {"from": before, "to": _iso(due_at)})
+    return team_full(request_id)
+
+
+# ---------------------------------------------------------------- the PIC: photos while the work runs, handover
+
+def own_sent(user: dict, request_id: str) -> dict:
+    row = get_row(request_id)
+    if row is None or row["user_id"] != str(user["id"]) or row["status"] == "DRAFT":
+        raise LookupError("Pengajuan tidak ditemukan")
+    return row
+
+
+def pic_photo(user: dict, request_id: str, kind: str, photo: str, lat: Optional[float], lng: Optional[float], taken_at: Optional[datetime]) -> dict:
+    """MONITOR: while the technician works (In progress / Serah terima); HANDOVER: at the handover, before it is sent."""
+    row = own_sent(user, request_id)
+    if kind == "MONITOR" and row["status"] not in ("IN_PROGRESS", "HANDOVER"):
+        raise DeError("Foto pemantauan diambil saat pengajuan sedang dikerjakan")
+    if kind == "HANDOVER" and (row["status"] != "HANDOVER" or row["handover_at"]):
+        raise DeError("Foto serah terima diambil saat tim maintenance meminta serah terima")
+    limit = MAX_HANDOVER if kind == "HANDOVER" else MAX_MONITOR
+    n = db.fetchrow(f"SELECT count(*)::int AS n FROM {P}.de_media WHERE request_id::text = %s AND kind = %s", (request_id, kind))["n"]
+    if n >= limit:
+        raise DeError(f"Maksimal {limit} foto; hapus satu dulu")
+    mime, data = parse_photo(photo)
+    _store(request_id, kind, data, mime, {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}.get(mime, "jpg"), user,
+           taken_at=taken_at, lat=lat, lng=lng)
+    return full(request_id)
+
+
+def pic_delete_photo(user: dict, request_id: str, media_id: str) -> dict:
+    row = own_sent(user, request_id)
+    if row["handover_at"] or row["status"] not in ("IN_PROGRESS", "HANDOVER"):
+        raise DeError("Foto tidak bisa dihapus lagi")
+    delete_media(request_id, media_id, ("MONITOR", "HANDOVER"))
+    return full(request_id)
+
+
+def submit_handover(user: dict, request_id: str, lat: Optional[float], lng: Optional[float], accuracy: Optional[float],
+                    pic_signature: Optional[str], pic_name: Optional[str], vendor_signature: Optional[str], vendor_name: Optional[str],
+                    note: Optional[str]) -> dict:
+    row = own_sent(user, request_id)
+    if row["status"] != "HANDOVER" or row["handover_at"]:
+        raise DeError("Serah terima belum diminta tim maintenance atau sudah dikirim")
+    n = db.fetchrow(f"SELECT count(*)::int AS n FROM {P}.de_media WHERE request_id::text = %s AND kind = 'HANDOVER'", (request_id,))["n"]
+    if n < 1:
+        raise DeError("Ambil minimal 1 foto hasil pekerjaan di outlet")
+    pic_name = " ".join((pic_name or "").split())[:120]
+    if not pic_signature or not pic_name:
+        raise DeError("Tanda tangan dan nama PIC wajib")
+    pic_type, pic_sig = parse_photo(pic_signature)
+    v_type = v_sig = None
+    vendor_name = " ".join((vendor_name or "").split())[:120] or None
+    if row.get("mode") == "VENDOR":
+        if not vendor_signature or not vendor_name:
+            raise DeError("Pekerjaan vendor: tanda tangan dan nama petugas vendor wajib")
+        v_type, v_sig = parse_photo(vendor_signature)
+    outlet = locations([row["branch_code"]]).get(row["branch_code"]) or {}
+    j = judge(lat, lng, accuracy, outlet) if lat is not None and lng is not None else {"distance_m": None, "outside_radius": False}
+    with db.transaction() as conn:
+        conn.execute(f"""UPDATE {P}.de_request SET handover_at = now(), handover_note = %s, handover_latitude = %s, handover_longitude = %s,
+                         handover_distance_m = %s, handover_outside = %s, pic_sign = %s, pic_sign_type = %s, pic_sign_name = %s,
+                         vendor_sign = %s, vendor_sign_type = %s, vendor_sign_name = %s, updated_at = now() WHERE id::text = %s""",
+                     ((note or "").strip()[:1000] or None, lat, lng, j["distance_m"], j["outside_radius"], pic_sig, pic_type, pic_name,
+                      v_sig, v_type, vendor_name if v_sig else None, request_id))
+        _event(conn, request_id, user, "HANDOVER", None, None, (note or "").strip()[:1000] or None,
+               {"photos": n, "vendor": vendor_name if v_sig else None, "distanceM": j["distance_m"]})
+    return full(request_id)
+
+
+def handover_signature(request_id: str, who: str) -> Optional[dict]:
+    col = "pic_sign" if who == "pic" else "vendor_sign"
+    return db.fetchrow(f"SELECT {col} AS signature, {col}_type AS signature_type FROM {P}.de_request WHERE id::text = %s AND {col} IS NOT NULL",
+                       (request_id,))
+
+
+# ---------------------------------------------------------------- overview (analysis of every request)
+
+def overview(date_from: date, date_to: date, branches: Optional[list[str]]) -> dict:
+    """Requests sent in the period: KPIs, weekly trend, status, time per stage, category groups / categories, branches,
+    repeated damage, urgency vs target, internal vs vendor, reasons of reject / hold."""
+    where = ["r.status <> 'DRAFT'", "(r.submitted_at AT TIME ZONE 'Asia/Jakarta')::date BETWEEN %(a)s AND %(b)s"]
+    params: dict[str, Any] = {"a": date_from, "b": date_to}
+    if branches is not None:
+        where.append("r.branch_code = ANY(%(br)s)")
+        params["br"] = branches
+    rows = db.fetch(f"SELECT {COLS} FROM {P}.de_request r WHERE {' AND '.join(where)} ORDER BY r.submitted_at LIMIT 5000", params)
+    ids = [r["id"] for r in rows]
+    items = db.fetch(f"""SELECT i.request_id::text, c.grp, c.name AS category, i.name FROM {P}.de_item i
+                         JOIN {P}.de_category c ON c.id = i.category_id WHERE i.request_id::text = ANY(%s)""", (ids,))
+    events = db.fetch(f"""SELECT e.request_id::text, e.at, e.kind, e.to_status, e.note, r.number FROM {P}.de_event e
+                          JOIN {P}.de_request r ON r.id = e.request_id WHERE e.request_id::text = ANY(%s) ORDER BY e.at, e.id""", (ids,))
+    assign = db.fetch(f"""SELECT a.request_id::text, t.id, t.name, t.kind FROM {P}.de_assignment a JOIN {P}.de_technician t ON t.id = a.technician_id
+                          WHERE a.request_id::text = ANY(%s) AND a.status IN ('ACTIVE', 'DONE')""", (ids,))
+    it_by, ev_by, as_by = {}, {}, {}
+    for i in items:
+        it_by.setdefault(i["request_id"], []).append(i)
+    for e in events:
+        ev_by.setdefault(e["request_id"], []).append({"at": _iso(e["at"]), "kind": e["kind"], "to": e["to_status"], "note": e["note"], "number": e["number"]})
+    for a in assign:
+        as_by.setdefault(a["request_id"], []).append(a)
+
+    def cost(r):
+        return _num(r["actual_cost"]) if r["actual_cost"] is not None else (_num(r["est_cost"]) or 0)
+
+    reqs = []
+    for r in rows:
+        t = tracker(r, ev_by.get(r["id"], []))
+        reqs.append({"row": r, "t": t, "items": it_by.get(r["id"], []), "techs": as_by.get(r["id"], []), "cost": cost(r) or 0})
+    done = [x for x in reqs if x["row"]["status"] == "DONE"]
+    avg = lambda xs: round(sum(xs) / len(xs), 2) if xs else None  # noqa: E731
+
+    weeks: dict[str, dict] = {}
+    for x in reqs:
+        d = x["row"]["submitted_at"].astimezone(WIB).date()
+        wk = (d - timedelta(days=d.weekday())).isoformat()
+        weeks.setdefault(wk, {"week": wk, "in": 0, "done": 0})["in"] += 1
+    for x in done:
+        d = x["row"]["closed_at"].astimezone(WIB).date()
+        wk = (d - timedelta(days=d.weekday())).isoformat()
+        weeks.setdefault(wk, {"week": wk, "in": 0, "done": 0})["done"] += 1
+
+    stage_h: dict[str, list] = {}
+    for x in reqs:
+        for st in x["t"]["stages"]:
+            stage_h.setdefault(st["status"], []).append(st["hours"])
+
+    groups: dict[str, dict] = {}
+    cats: dict[str, dict] = {}
+    for x in reqs:
+        for key, bucket, field in ((None, groups, "grp"), (None, cats, "category")):
+            for name in {i[field] for i in x["items"]}:
+                g = bucket.setdefault(name, {"name": name, "count": 0, "open": 0, "hours": [], "cost": 0.0})
+                g["count"] += 1
+                g["open"] += x["row"]["status"] in OPEN
+                g["cost"] += x["cost"]
+                if x["row"]["status"] == "DONE":
+                    g["hours"].append(x["t"]["workHours"])
+
+    def finish(d):
+        return sorted(({**v, "avgHours": avg(v.pop("hours"))} for v in d.values()), key=lambda v: -v["count"])
+
+    branches_: dict[str, dict] = {}
+    for x in reqs:
+        b = branches_.setdefault(x["row"]["branch_code"], {"code": x["row"]["branch_code"], "name": x["row"]["branch_name"], "count": 0, "open": 0, "cost": 0.0})
+        b["count"] += 1
+        b["open"] += x["row"]["status"] in OPEN
+        b["cost"] += x["cost"]
+
+    seen: dict[tuple, list] = {}
+    for x in reqs:
+        for i in x["items"]:
+            seen.setdefault((x["row"]["branch_code"], i["category"], i["name"].strip().lower()), []).append((x["row"]["submitted_at"], x["row"]["number"], i["name"], x["row"]["branch_name"]))
+    repeats = []
+    for (code, cat, _), hits in seen.items():
+        hits.sort()
+        close = [h for k, h in enumerate(hits) if any(abs((h[0] - o[0]).days) <= 90 for m, o in enumerate(hits) if m != k)]
+        if len(close) >= 2:
+            repeats.append({"branchCode": code, "branchName": close[0][3], "category": cat, "item": close[-1][2], "count": len(close),
+                            "numbers": [h[1] for h in close]})
+    repeats.sort(key=lambda v: -v["count"])
+
+    urg = []
+    for u in URGENCY:
+        xs = [x for x in reqs if x["row"]["urgency"] == u]
+        dn = [x for x in xs if x["row"]["status"] == "DONE"]
+        on_time = [x for x in dn if not x["t"]["late"]]
+        urg.append({"urgency": u, "label": URGENCY_LABEL[u], "count": len(xs), "done": len(dn), "onTime": len(on_time),
+                    "pct": round(len(on_time) * 100 / len(dn)) if dn else None, "avgHours": avg([x["t"]["workHours"] for x in dn])})
+
+    modes = {}
+    for m in ("INTERNAL", "VENDOR"):
+        xs = [x for x in reqs if x["row"].get("mode") == m]
+        dn = [x for x in xs if x["row"]["status"] == "DONE"]
+        modes[m] = {"jobs": len(xs), "done": len(dn), "avgHours": avg([x["t"]["workHours"] for x in dn]), "cost": sum(x["cost"] for x in xs)}
+    tech: dict[int, dict] = {}
+    for x in reqs:
+        for a in {a["id"]: a for a in x["techs"]}.values():
+            v = tech.setdefault(a["id"], {"name": a["name"], "kind": a["kind"], "jobs": 0, "done": 0, "hours": []})
+            v["jobs"] += 1
+            if x["row"]["status"] == "DONE":
+                v["done"] += 1
+                v["hours"].append(x["t"]["workHours"])
+    techs = sorted(({**v, "avgHours": avg(v.pop("hours"))} for v in tech.values()), key=lambda v: -v["jobs"])
+
+    reasons = [{"number": e["number"], "status": e["to"], "note": e["note"], "at": e["at"]}
+               for x in reqs for e in ev_by.get(x["row"]["id"], []) if e["kind"] in ("STATUS", "DUPLICATE") and e["to"] in ("REJECTED", "ON_HOLD") and e["note"]]
+    reasons.sort(key=lambda v: v["at"], reverse=True)
+    status_counts = {st: sum(x["row"]["status"] == st for x in reqs) for st in STATUS_LABEL if st != "DRAFT"}
+    return {
+        "kpi": {"total": len(reqs), "open": sum(x["row"]["status"] in OPEN for x in reqs), "done": len(done),
+                "rejected": status_counts["REJECTED"], "onHold": status_counts["ON_HOLD"],
+                "avgHours": avg([x["t"]["workHours"] for x in done]),
+                "onTimePct": round(sum(not x["t"]["late"] for x in done) * 100 / len(done)) if done else None,
+                "overdue": sum(x["t"]["overdue"] for x in reqs), "cost": sum(x["cost"] for x in reqs),
+                "targetAdjusted": sum(x["row"].get("target_changes") or 0 for x in reqs),
+                "duplicates": sum(x["row"]["duplicate_of"] is not None for x in reqs),
+                "repair": sum(x["row"]["kind"] == "REPAIR" for x in reqs), "procurement": sum(x["row"]["kind"] == "PROCUREMENT" for x in reqs)},
+        "trend": sorted(weeks.values(), key=lambda v: v["week"]),
+        "status": [{"status": st, "label": STATUS_LABEL[st], "count": n} for st, n in status_counts.items()],
+        "stages": [{"status": st, "label": STATUS_LABEL[st], "avgHours": avg(stage_h.get(st, []))} for st in (*STEPS[:-1], "ON_HOLD") if stage_h.get(st)],
+        "groups": finish(groups), "categories": finish(cats)[:10],
+        "branches": sorted(branches_.values(), key=lambda v: -v["count"])[:10], "repeats": repeats[:10],
+        "urgency": urg, "modes": modes, "technicians": techs[:10], "reasons": reasons[:8],
+    }

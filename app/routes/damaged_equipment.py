@@ -11,9 +11,15 @@ PIC (form page; their own requests):
     DELETE /api/de/requests/{id}/media/{media}            draft
     POST   /api/de/requests/{id}/submit                   {"latitude", "longitude", "accuracyM", "signature", "signedName"}
     DELETE /api/de/requests/{id}                          discard the draft
+    POST   /api/de/requests/{id}/monitor-photos           photo while the work runs (In progress / Serah terima)
+    POST   /api/de/requests/{id}/handover-photos          photo at the handover (1-5); DELETE …/pic-media/{media}
+    POST   /api/de/requests/{id}/handover                 {"latitude", "longitude", "accuracyM", "picSignature", "picName",
+                                                          "vendorSignature"?, "vendorName"?, "note"?} (vendor: its signature required)
 Team (monitoring page; branches in scope):
     GET    /api/de/monitor?dateFrom&dateTo&branch&group   requests (open ones always) with progress, technicians
+    GET    /api/de/overview?dateFrom&dateTo&branch&group  analysis of every request sent in the period
     GET    /api/de/monitor/{id}                           one request + related requests of the branch / PIC + allowed steps
+    POST   /api/de/monitor/{id}/target                    {"dueAt", "note"}: adjusted due time (the PIC sees it)
     POST   /api/de/monitor/{id}/status                    {"to", "note"}
     POST   /api/de/monitor/{id}/notes                     {"note"}
     PUT    /api/de/monitor/{id}/cost                      {"estCost", "actualCost", "vendor"}
@@ -29,7 +35,8 @@ Team (monitoring page; branches in scope):
     GET|POST|PATCH /api/de/categories[/{id}]              master categories (GET: form or monitoring page)
     GET|POST|PATCH /api/de/technicians[/{id}]             technicians with their active jobs
 Both: GET /api/de/requests/{id}/pdf, POST /api/de/requests/{id}/share (renew the link), GET /api/de/media/{id},
-      GET /api/de/requests/{id}/signature
+      GET /api/de/requests/{id}/signature, GET /api/de/requests/{id}/handover-signature/{pic|vendor},
+      GET /api/de/requests/{id}/final (Done: the internal work report or the vendor's handover record)
 Public (share link, no sign-in): GET /api/public/de/{token}, …/pdf, …/media/{id}, …/signature
 Public (technician photo link, no sign-in, 1 hour): GET /api/public/de-work/{token}, POST …/photos, DELETE …/photos/{id},
     POST …/submit {"note"}, GET …/media/{id}
@@ -217,6 +224,63 @@ def discard(request_id: str, request: Request, user: dict = Depends(current_user
 
 # ---------------------------------------------------------------- both: document, link, media
 
+class HandoverIn(BaseModel):
+    latitude: Optional[float] = Field(None, ge=-90, le=90)
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+    accuracyM: Optional[float] = Field(None, ge=0, le=100_000)
+    picSignature: str = Field(min_length=20, max_length=5_000_000)
+    picName: str = Field(min_length=1, max_length=120)
+    vendorSignature: Optional[str] = Field(None, min_length=20, max_length=5_000_000)
+    vendorName: Optional[str] = Field(None, max_length=120)
+    note: Optional[str] = Field(None, max_length=1000)
+
+
+@router.post("/api/de/requests/{request_id}/monitor-photos", status_code=201)
+def pic_monitor_photo(request_id: str, body: PhotoIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _need(request, user, FORM)
+    return _run(de.pic_photo, user, request_id, "MONITOR", body.photo, body.latitude, body.longitude, body.takenAt)
+
+
+@router.post("/api/de/requests/{request_id}/handover-photos", status_code=201)
+def pic_handover_photo(request_id: str, body: PhotoIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _need(request, user, FORM)
+    return _run(de.pic_photo, user, request_id, "HANDOVER", body.photo, body.latitude, body.longitude, body.takenAt)
+
+
+@router.delete("/api/de/requests/{request_id}/pic-media/{media_id}")
+def pic_delete_media(request_id: str, media_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    _need(request, user, FORM)
+    return _run(de.pic_delete_photo, user, request_id, media_id)
+
+
+@router.post("/api/de/requests/{request_id}/handover")
+def pic_handover(request_id: str, body: HandoverIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _need(request, user, FORM)
+    out = _run(de.submit_handover, user, request_id, body.latitude, body.longitude, body.accuracyM, body.picSignature, body.picName,
+               body.vendorSignature, body.vendorName, body.note)
+    activity.record("de.request", user=user, request=request, page="/forms/damaged-equipment", summary=f"{out['number']}: serah terima dikirim",
+                    details={"id": request_id})
+    return out
+
+
+@router.get("/api/de/requests/{request_id}/handover-signature/{who}")
+def handover_signature(request_id: str, who: Literal["pic", "vendor"], request: Request, user: dict = Depends(current_user)) -> Response:
+    _readable(request, user, de.get_row(request_id))
+    s = de.handover_signature(request_id, who)
+    if s is None:
+        raise HTTPException(404, detail="Belum ditandatangani")
+    return Response(bytes(s["signature"]), media_type=s["signature_type"], headers={"Cache-Control": "private, max-age=3600"})
+
+
+@router.get("/api/de/requests/{request_id}/final")
+def final_document(request_id: str, request: Request, user: dict = Depends(current_user)) -> Response:
+    row = _readable(request, user, de.get_row(request_id))
+    if row["status"] != "DONE":
+        raise HTTPException(422, detail="Dokumen final tersedia setelah pengajuan Done")
+    data, name = de_pdf.build_final(request_id, _share_url(row["share_token"]))
+    return Response(data, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
 @router.get("/api/de/requests/{request_id}/pdf")
 def pdf(request_id: str, request: Request, user: dict = Depends(current_user)) -> Response:
     row = _readable(request, user, de.get_row(request_id))
@@ -306,6 +370,33 @@ def monitor(request: Request, dateFrom: Optional[date] = Query(None), dateTo: Op
     branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
     branches = branch_groups.narrow(branches, group)
     return {"period": {"from": start.isoformat(), "to": end.isoformat()}, **de.monitor(start, end, branches)}
+
+
+@router.get("/api/de/overview")
+def overview(request: Request, dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None),
+             branch: Optional[str] = None, group: Optional[str] = Query(None, max_length=60), user: dict = Depends(current_user)) -> dict:
+    _need(request, user, MON)
+    end = dateTo or today()
+    start = dateFrom or end - timedelta(days=89)
+    if start > end or (end - start).days > 366:
+        raise HTTPException(422, detail="Periode maksimal 1 tahun dan tanggal mulai sebelum tanggal akhir")
+    scoped = scoped_branch(branch)
+    branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
+    branches = branch_groups.narrow(branches, group)
+    return {"period": {"from": start.isoformat(), "to": end.isoformat()}, **de.overview(start, end, branches)}
+
+
+class TargetIn(BaseModel):
+    dueAt: datetime
+    note: str = Field(min_length=1, max_length=500)
+
+
+@router.post("/api/de/monitor/{request_id}/target")
+def team_target(request_id: str, body: TargetIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    row = _team_row(request, user, request_id)
+    out = _with_work_urls(_run(de.set_target, user, request_id, body.dueAt, body.note))
+    _record(request, user, f"{row['number']}: target waktu disesuaikan", request_id, dueAt=body.dueAt.isoformat(), note=body.note)
+    return out
 
 
 @router.get("/api/de/monitor/{request_id}")

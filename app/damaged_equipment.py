@@ -33,6 +33,9 @@ P = "integration_portal"
 WIB = ZoneInfo("Asia/Jakarta")
 MAX_PHOTOS = 10
 MAX_AFTER = 10
+MAX_INVOICES = 10
+MAX_INVOICE_BYTES = 10 * 1024 * 1024
+WAGE_TYPES = ("DAILY", "MONTHLY")
 MAX_VIDEO_BYTES = 10 * 1024 * 1024
 MAX_ITEMS = 50
 KINDS = {"REPAIR": "Perbaikan (Building & Tools)", "PROCUREMENT": "Pengadaan (Dekorasi & Tools)"}
@@ -116,6 +119,7 @@ def technicians(active_only: bool = False) -> list[dict]:
                                                       "urgency": j["urgency"], "status": j["status"], "scheduledFor": _iso(j["scheduled_for"])})
     return [{"id": r["id"], "name": r["name"], "kind": r["kind"], "company": r["company"], "skills": list(r["skills"] or []),
              "city": r["city"], "phone": r["phone"], "notes": r["notes"], "isActive": r["is_active"],
+             "wageType": r["wage_type"], "wageAmount": _num(r["wage_amount"]),
              "activeJobs": r["active"], "doneJobs": r["done"], "jobs": by.get(r["id"], [])} for r in rows]
 
 
@@ -125,15 +129,23 @@ def save_technician(technician_id: Optional[int], body: dict) -> dict:
     name = " ".join((body.get("name") or "").split())[:120]
     if not name:
         raise DeError("Nama tukang wajib diisi")
+    wage_type = body.get("wageType") or "DAILY"
+    if wage_type not in WAGE_TYPES:
+        raise DeError("Jenis gaji harus harian atau bulanan")
+    wage = body.get("wageAmount")
+    if wage is not None and (float(wage) < 0 or float(wage) > 1e12):
+        raise DeError("Nominal gaji tidak valid")
     params = (name, body["kind"], (body.get("company") or "").strip()[:120] or None,
               [s.strip()[:60] for s in body.get("skills") or [] if s and s.strip()][:20], (body.get("city") or "").strip()[:80] or None,
-              (body.get("phone") or "").strip()[:40] or None, (body.get("notes") or "").strip()[:500] or None, bool(body.get("isActive", True)))
+              (body.get("phone") or "").strip()[:40] or None, (body.get("notes") or "").strip()[:500] or None, bool(body.get("isActive", True)),
+              wage_type, wage)
     if technician_id is None:
-        row = db.fetchrow(f"""INSERT INTO {P}.de_technician (name, kind, company, skills, city, phone, notes, is_active)
-                              VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""", params)
+        row = db.fetchrow(f"""INSERT INTO {P}.de_technician (name, kind, company, skills, city, phone, notes, is_active, wage_type, wage_amount)
+                              VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""", params)
     else:
         row = db.fetchrow(f"""UPDATE {P}.de_technician SET name = %s, kind = %s, company = %s, skills = %s, city = %s, phone = %s,
-                              notes = %s, is_active = %s, updated_at = now() WHERE id = %s RETURNING id""", (*params, technician_id))
+                              notes = %s, is_active = %s, wage_type = %s, wage_amount = %s, updated_at = now() WHERE id = %s RETURNING id""",
+                          (*params, technician_id))
     if row is None:
         raise LookupError("Tukang tidak ditemukan")
     return next(t for t in technicians() if t["id"] == row["id"])
@@ -148,27 +160,59 @@ def media_root() -> Path:
 
 
 def _store(request_id: str, kind: str, data: bytes, mime: str, ext: str, user: dict, file_name: Optional[str] = None,
-           taken_at: Optional[datetime] = None, lat: Optional[float] = None, lng: Optional[float] = None) -> None:
+           taken_at: Optional[datetime] = None, lat: Optional[float] = None, lng: Optional[float] = None, note: Optional[str] = None) -> None:
     media_id = str(uuid.uuid4())
     rel = f"de/{_now():%Y/%m}/{media_id}.{ext}"
     path = media_root() / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     db.fetchrow(f"""INSERT INTO {P}.de_media (id, request_id, kind, storage_path, mime, bytes, sha256, file_name, taken_at, latitude,
-                    longitude, uploaded_by, uploaded_by_name) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                    longitude, uploaded_by, uploaded_by_name, note) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
                 (media_id, request_id, kind, rel, mime, len(data), hashlib.sha256(data).hexdigest(), file_name, taken_at, lat, lng,
-                 user["id"], user.get("full_name") or user["username"]))
+                 user["id"], user.get("full_name") or user["username"], note))
 
 
 def media_of(request_id: str) -> list[dict]:
-    rows = db.fetch(f"""SELECT id::text, kind, mime, bytes, file_name, taken_at, uploaded_at, uploaded_by_name, latitude, longitude
+    rows = db.fetch(f"""SELECT id::text, kind, mime, bytes, file_name, taken_at, uploaded_at, uploaded_by_name, latitude, longitude, note
                         FROM {P}.de_media WHERE request_id::text = %s ORDER BY uploaded_at""", (request_id,))
     return [{"id": r["id"], "kind": r["kind"], "mime": r["mime"], "bytes": r["bytes"], "fileName": r["file_name"],
-             "takenAt": _iso(r["taken_at"]), "uploadedAt": _iso(r["uploaded_at"]), "uploadedBy": r["uploaded_by_name"]} for r in rows]
+             "takenAt": _iso(r["taken_at"]), "uploadedAt": _iso(r["uploaded_at"]), "uploadedBy": r["uploaded_by_name"], "note": r["note"]} for r in rows]
+
+
+def _invoice_type(data: bytes) -> tuple[str, str]:
+    """Invoices / receipts: a PDF or a photo (scan); anything else is refused."""
+    if data[:5] == b"%PDF-":
+        return "application/pdf", "pdf"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg", "jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png", "png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp", "webp"
+    raise DeError("Invoice harus PDF atau foto (JPG, PNG, WebP)")
+
+
+def add_invoice(user: dict, request_id: str, data: bytes, file_name: str, note: Optional[str]) -> dict:
+    """An invoice / receipt of the cost, attached by the team while the request is handled (≤ MAX_INVOICES)."""
+    row = get_row(request_id)
+    if row is None or row["status"] in ("DRAFT", "REJECTED"):
+        raise DeError("Invoice dilampirkan pada pengajuan yang sedang ditangani")
+    if not data:
+        raise DeError("File kosong")
+    if len(data) > MAX_INVOICE_BYTES:
+        raise DeError(f"File invoice maksimal {MAX_INVOICE_BYTES // 1048576} MB")
+    n = db.fetchrow(f"SELECT count(*)::int AS n FROM {P}.de_media WHERE request_id::text = %s AND kind = 'INVOICE'", (request_id,))["n"]
+    if n >= MAX_INVOICES:
+        raise DeError(f"Maksimal {MAX_INVOICES} invoice; hapus satu dulu")
+    mime, ext = _invoice_type(data)
+    _store(request_id, "INVOICE", data, mime, ext, user, file_name=(file_name or "")[:160] or None, note=(note or "").strip()[:200] or None)
+    with db.transaction() as conn:
+        _event(conn, request_id, user, "COST", None, None, (note or "").strip()[:200] or None, {"invoice": (file_name or "")[:160]})
+    return {"media": media_of(request_id)}
 
 
 def media_file(media_id: str) -> Optional[dict]:
-    row = db.fetchrow(f"""SELECT m.storage_path, m.mime, m.file_name, m.request_id::text, r.user_id::text, r.branch_code, r.status
+    row = db.fetchrow(f"""SELECT m.storage_path, m.mime, m.file_name, m.kind, m.request_id::text, r.user_id::text, r.branch_code, r.status
                           FROM {P}.de_media m JOIN {P}.de_request r ON r.id = m.request_id WHERE m.id::text = %s""", (media_id,))
     if row:
         path = media_root() / row["storage_path"]

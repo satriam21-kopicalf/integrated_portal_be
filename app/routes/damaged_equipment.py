@@ -22,6 +22,8 @@ Team (monitoring page; branches in scope):
     POST   /api/de/assignments/{id}/swap                  {"toRequestId", "scheduledFor", "note"}
     POST   /api/de/monitor/{id}/duplicate                 {"ofId", "note"}
     POST   /api/de/monitor/{id}/after-photos              photo of the work done; DELETE …/after-photos/{media}
+    POST   /api/de/monitor/{id}/invoices?name=&note=      invoice / receipt of the cost (PDF or photo, raw body ≤ 10 MB);
+                                                          DELETE …/invoices/{media}
     GET|POST|PATCH /api/de/categories[/{id}]              master categories (GET: form or monitoring page)
     GET|POST|PATCH /api/de/technicians[/{id}]             technicians with their active jobs
 Both: GET /api/de/requests/{id}/pdf, POST /api/de/requests/{id}/share (renew the link), GET /api/de/media/{id},
@@ -373,6 +375,24 @@ def team_after_photo(request_id: str, body: PhotoIn, request: Request, user: dic
     return _run(de.add_photo, user, request_id, body.photo, body.latitude, body.longitude, body.takenAt, "AFTER")
 
 
+@router.post("/api/de/monitor/{request_id}/invoices", status_code=201)
+async def team_invoice(request_id: str, request: Request, name: str = Query("invoice", max_length=160), note: Optional[str] = Query(None, max_length=200),
+                       user: dict = Depends(current_user)) -> dict:
+    await run_in_threadpool(_team_row, request, user, request_id)
+    if int(request.headers.get("content-length") or 0) > de.MAX_INVOICE_BYTES + 1024:
+        raise HTTPException(422, detail=f"File invoice maksimal {de.MAX_INVOICE_BYTES // 1048576} MB")
+    data = await request.body()
+    return await run_in_threadpool(_run, de.add_invoice, user, request_id, data, name, note)
+
+
+@router.delete("/api/de/monitor/{request_id}/invoices/{media_id}")
+def team_delete_invoice(request_id: str, media_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    row = _team_row(request, user, request_id)
+    if row["status"] == "DONE":
+        raise HTTPException(422, detail="Pengajuan sudah Done")
+    return de.delete_media(request_id, media_id, ("INVOICE",))
+
+
 @router.delete("/api/de/monitor/{request_id}/after-photos/{media_id}")
 def team_delete_after(request_id: str, media_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
     row = _team_row(request, user, request_id)
@@ -401,6 +421,8 @@ class TechnicianIn(BaseModel):
     phone: Optional[str] = Field(None, max_length=40)
     notes: Optional[str] = Field(None, max_length=500)
     isActive: bool = True
+    wageType: Literal["DAILY", "MONTHLY"] = "DAILY"
+    wageAmount: Optional[float] = Field(None, ge=0, le=1e12)
 
 
 @router.get("/api/de/categories")
@@ -454,6 +476,7 @@ def public_view(token: str) -> dict:
     out = de.full(row["id"])
     out.pop("openInBranch", None)
     out.pop("userId", None)
+    out["media"] = [m for m in out["media"] if m["kind"] != "INVOICE"]  # cost documents stay with the team and the PIC
     out["shareExpiresAt"] = row["share_expires_at"].isoformat()
     return out
 
@@ -469,7 +492,7 @@ def public_pdf(token: str) -> Response:
 def public_media(token: str, media_id: str) -> FileResponse:
     row = _public(token)
     m = de.media_file(media_id)
-    if m is None or m["request_id"] != row["id"]:
+    if m is None or m["request_id"] != row["id"] or m["kind"] == "INVOICE":
         raise HTTPException(404, detail="File tidak ditemukan")
     return _file(m)
 

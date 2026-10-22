@@ -114,6 +114,11 @@ def build(request_id: str, share_url: Optional[str] = None) -> tuple[bytes, str]
             grid[-1] += [""] * (3 - len(grid[-1]))
             story.append(Table([[Table([[c[0]], [c[1]]]) if c else "" for c in row] for row in grid], colWidths=[width / 3] * 3,
                                style=TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")])))
+    invoices = [m for m in r["media"] if m["kind"] == "INVOICE"]
+    if invoices:
+        story.append(Paragraph("Invoice / bukti biaya", head))
+        story.append(Paragraph("<br/>".join(f"{_esc(m['fileName'] or 'invoice')}{' · ' + _esc(m['note']) if m.get('note') else ''} · "
+                                            f"{_wib(m['uploadedAt'])} · {_esc(m['uploadedBy'] or '-')}" for m in invoices), small))
     videos = [m for m in r["media"] if m["kind"] == "VIDEO"]
     if videos:
         story.append(Paragraph(f"Video: {_esc(videos[0]['fileName'] or 'video')} ({videos[0]['bytes'] / 1048576:.1f} MB)"

@@ -104,3 +104,26 @@ def test_pdf_document(monkeypatch, tmp_path):
     monkeypatch.setattr(de, "signature_of", lambda rid: None)
     data, name = de_pdf.build(r["id"], "https://portal.kopicalf.co.id/share/de/tok")
     assert name == "DE-2610-0001.pdf" and data.startswith(b"%PDF") and len(data) > 1500
+
+
+def test_invoice_types_and_wages(monkeypatch):
+    assert de._invoice_type(b"%PDF-1.7 rest") == ("application/pdf", "pdf")
+    assert de._invoice_type(b"\xff\xd8\xff\xe0 jpeg") == ("image/jpeg", "jpg")
+    for bad in (b"MZ\x90\x00", b"<html>"):
+        try:
+            de._invoice_type(bad)
+            raise AssertionError(bad)
+        except de.DeError:
+            pass
+    monkeypatch.setattr(de, "get_row", lambda rid: _row(status="REJECTED"))
+    try:
+        de.add_invoice({"id": "x", "username": "t"}, "r", b"%PDF-1", "a.pdf", None)
+        raise AssertionError("no invoice on a rejected request")
+    except de.DeError:
+        pass
+    for body in ({"name": "A", "kind": "INTERNAL", "wageType": "WEEKLY"}, {"name": "A", "kind": "INTERNAL", "wageAmount": -1}):
+        try:
+            de.save_technician(None, body)
+            raise AssertionError(body)
+        except de.DeError:
+            pass

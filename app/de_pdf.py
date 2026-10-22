@@ -48,8 +48,11 @@ def _image(path, max_w: float, max_h: float) -> Optional[Image]:
     return Image(str(path), width=w * scale, height=h * scale)
 
 
-def build(request_id: str, share_url: Optional[str] = None) -> tuple[bytes, str]:
+def build(request_id: str, share_url: Optional[str] = None, public: bool = False) -> tuple[bytes, str]:
+    """public = the share link's copy: without the invoices (cost documents stay with the team and the PIC)."""
     r = de.full(request_id)
+    if public:
+        r = de.without_invoices(r)
     styles = getSampleStyleSheet()
     body = ParagraphStyle("b", parent=styles["Normal"], fontName="Helvetica", fontSize=9, leading=12, textColor=INK)
     small = ParagraphStyle("s", parent=body, fontSize=7.5, leading=10, textColor=MUTED)

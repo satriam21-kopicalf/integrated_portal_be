@@ -121,6 +121,9 @@ def test_invoice_types_and_wages(monkeypatch):
         raise AssertionError("no invoice on a rejected request")
     except de.DeError:
         pass
+    shared = de.without_invoices({"media": [{"kind": "PHOTO"}, {"kind": "INVOICE"}],
+                                  "events": [{"kind": "COST", "details": {"invoice": "a.pdf"}}, {"kind": "COST", "details": {}}]})
+    assert shared["media"] == [{"kind": "PHOTO"}] and shared["events"] == [{"kind": "COST", "details": {}}]
     for body in ({"name": "A", "kind": "INTERNAL", "wageType": "WEEKLY"}, {"name": "A", "kind": "INTERNAL", "wageAmount": -1}):
         try:
             de.save_technician(None, body)

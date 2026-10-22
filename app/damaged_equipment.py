@@ -192,6 +192,12 @@ def _invoice_type(data: bytes) -> tuple[str, str]:
     raise DeError("Invoice harus PDF atau foto (JPG, PNG, WebP)")
 
 
+def without_invoices(r: dict) -> dict:
+    """The request without its invoices and the events naming them (the share link and its PDF)."""
+    return {**r, "media": [m for m in r.get("media", []) if m["kind"] != "INVOICE"],
+            "events": [e for e in r.get("events", []) if not (e.get("details") or {}).get("invoice")]}
+
+
 def add_invoice(user: dict, request_id: str, data: bytes, file_name: str, note: Optional[str]) -> dict:
     """An invoice / receipt of the cost, attached by the team while the request is handled (≤ MAX_INVOICES)."""
     row = get_row(request_id)

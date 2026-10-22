@@ -476,7 +476,7 @@ def public_view(token: str) -> dict:
     out = de.full(row["id"])
     out.pop("openInBranch", None)
     out.pop("userId", None)
-    out["media"] = [m for m in out["media"] if m["kind"] != "INVOICE"]  # cost documents stay with the team and the PIC
+    out = de.without_invoices(out)  # cost documents stay with the team and the PIC
     out["shareExpiresAt"] = row["share_expires_at"].isoformat()
     return out
 
@@ -484,7 +484,7 @@ def public_view(token: str) -> dict:
 @router.get("/api/public/de/{token}/pdf")
 def public_pdf(token: str) -> Response:
     row = _public(token)
-    data, name = de_pdf.build(row["id"], _share_url(token))
+    data, name = de_pdf.build(row["id"], _share_url(token), public=True)
     return Response(data, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 

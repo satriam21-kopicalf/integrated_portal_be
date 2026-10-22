@@ -106,6 +106,41 @@ def test_pdf_document(monkeypatch, tmp_path):
     assert name == "DE-2610-0001.pdf" and data.startswith(b"%PDF") and len(data) > 1500
 
 
+def test_work_link_rules(monkeypatch):
+    now = de._now()
+    base = {"submitted_at": None, "revoked_at": None, "expires_at": now + timedelta(minutes=30)}
+    assert de._link_state(base) == "OPEN"
+    assert de._link_state({**base, "expires_at": now - timedelta(minutes=1)}) == "EXPIRED"
+    assert de._link_state({**base, "revoked_at": now}) == "CLOSED"
+    assert de._link_state({**base, "submitted_at": now}) == "SENT"
+    monkeypatch.setattr(de, "get_row", lambda rid: _row(status="ACCEPTED"))
+    try:
+        de.create_work_link({"id": "x", "username": "t"}, "r", None)
+        raise AssertionError("only while in progress")
+    except de.DeError:
+        pass
+    link = {"id": 1, "revoked_at": None, "expires_at": now + timedelta(minutes=30), "submitted_at": None, "status": "IN_PROGRESS"}
+    monkeypatch.setattr(de.db, "fetchrow", lambda q, p=None: {**link, "n": 0} if "count" in q else link)
+    try:
+        de.work_submit("tok", None)
+        raise AssertionError("at least one photo")
+    except de.DeError as e:
+        assert "minimal 1 foto" in str(e)
+    monkeypatch.setattr(de.db, "fetchrow", lambda q, p=None: {**link, "expires_at": now - timedelta(seconds=1)})
+    try:
+        de.work_view("tok")
+        raise AssertionError("expired")
+    except LookupError:
+        pass
+
+
+def test_pdf_events_read_well():
+    from app import de_pdf
+    assert de_pdf._event_text({"kind": "WORK", "details": {"link": "sent", "photos": 3}}) == "Foto pengerjaan dikirim tukang · 3 foto"
+    assert de_pdf._event_text({"kind": "COST", "details": {"invoice": "a.pdf"}}) == "Invoice dilampirkan · a.pdf"
+    assert de_pdf._hours(0.5) == "30 menit"
+
+
 def test_invoice_types_and_wages(monkeypatch):
     assert de._invoice_type(b"%PDF-1.7 rest") == ("application/pdf", "pdf")
     assert de._invoice_type(b"\xff\xd8\xff\xe0 jpeg") == ("image/jpeg", "jpg")

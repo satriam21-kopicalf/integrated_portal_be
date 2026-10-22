@@ -24,11 +24,15 @@ Team (monitoring page; branches in scope):
     POST   /api/de/monitor/{id}/after-photos              photo of the work done; DELETE …/after-photos/{media}
     POST   /api/de/monitor/{id}/invoices?name=&note=      invoice / receipt of the cost (PDF or photo, raw body ≤ 10 MB);
                                                           DELETE …/invoices/{media}
+    POST   /api/de/monitor/{id}/work-links                {"technicianId"?} → photo link for the technician (In progress, 1 hour);
+                                                          DELETE …/work-links/{link} closes it
     GET|POST|PATCH /api/de/categories[/{id}]              master categories (GET: form or monitoring page)
     GET|POST|PATCH /api/de/technicians[/{id}]             technicians with their active jobs
 Both: GET /api/de/requests/{id}/pdf, POST /api/de/requests/{id}/share (renew the link), GET /api/de/media/{id},
       GET /api/de/requests/{id}/signature
 Public (share link, no sign-in): GET /api/public/de/{token}, …/pdf, …/media/{id}, …/signature
+Public (technician photo link, no sign-in, 1 hour): GET /api/public/de-work/{token}, POST …/photos, DELETE …/photos/{id},
+    POST …/submit {"note"}, GET …/media/{id}
 """
 from datetime import date, datetime, timedelta
 from typing import Literal, Optional
@@ -89,6 +93,12 @@ def _readable(request: Request, user: dict, row: Optional[dict]) -> dict:
 
 def _share_url(token: Optional[str]) -> Optional[str]:
     return f"{get_settings().portal_url.rstrip('/')}/share/de/{token}" if token else None
+
+
+def _with_work_urls(out: dict) -> dict:
+    for link in out.get("workLinks", []):
+        link["url"] = f"{get_settings().portal_url.rstrip('/')}/share/de-work/{link['token']}"
+    return out
 
 
 def _record(request: Request, user: dict, summary: str, row_id: str, **details) -> None:
@@ -301,7 +311,7 @@ def monitor(request: Request, dateFrom: Optional[date] = Query(None), dateTo: Op
 @router.get("/api/de/monitor/{request_id}")
 def team_get(request_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
     row = _team_row(request, user, request_id)
-    out = de.team_full(request_id)
+    out = _with_work_urls(de.team_full(request_id))
     out["shareUrl"] = _share_url(row["share_token"])
     return out
 
@@ -391,6 +401,24 @@ def team_delete_invoice(request_id: str, media_id: str, request: Request, user: 
     if row["status"] == "DONE":
         raise HTTPException(422, detail="Pengajuan sudah Done")
     return de.delete_media(request_id, media_id, ("INVOICE",))
+
+
+class WorkLinkIn(BaseModel):
+    technicianId: Optional[int] = None
+
+
+@router.post("/api/de/monitor/{request_id}/work-links", status_code=201)
+def team_work_link(request_id: str, body: WorkLinkIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    row = _team_row(request, user, request_id)
+    out = _with_work_urls(_run(de.create_work_link, user, request_id, body.technicianId))
+    _record(request, user, f"{row['number']}: link foto tukang dibuat", request_id, technicianId=body.technicianId)
+    return out
+
+
+@router.delete("/api/de/monitor/{request_id}/work-links/{link_id}")
+def team_close_work_link(request_id: str, link_id: int, request: Request, user: dict = Depends(current_user)) -> dict:
+    _team_row(request, user, request_id)
+    return _with_work_urls(de.revoke_work_link(user, request_id, link_id))
 
 
 @router.delete("/api/de/monitor/{request_id}/after-photos/{media_id}")
@@ -504,3 +532,34 @@ def public_signature(token: str) -> Response:
     if s is None:
         raise HTTPException(404, detail="Belum ditandatangani")
     return Response(bytes(s["signature"]), media_type=s["signature_type"], headers={"Cache-Control": "private, max-age=3600"})
+
+
+# ---------------------------------------------------------------- technician photo link (no sign-in, 1 hour)
+
+class WorkSubmitIn(BaseModel):
+    note: Optional[str] = Field(None, max_length=1000)
+
+
+@router.get("/api/public/de-work/{token}")
+def work_view(token: str) -> dict:
+    return _run(de.work_view, token)
+
+
+@router.post("/api/public/de-work/{token}/photos", status_code=201)
+def work_photo(token: str, body: PhotoIn) -> dict:
+    return _run(de.work_add_photo, token, body.photo, body.latitude, body.longitude, body.takenAt)
+
+
+@router.delete("/api/public/de-work/{token}/photos/{media_id}")
+def work_delete_photo(token: str, media_id: str) -> dict:
+    return _run(de.work_delete_photo, token, media_id)
+
+
+@router.post("/api/public/de-work/{token}/submit")
+def work_submit(token: str, body: WorkSubmitIn) -> dict:
+    return _run(de.work_submit, token, body.note)
+
+
+@router.get("/api/public/de-work/{token}/media/{media_id}")
+def work_media(token: str, media_id: str) -> FileResponse:
+    return _file(_run(de.work_media, token, media_id))

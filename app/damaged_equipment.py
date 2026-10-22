@@ -33,6 +33,8 @@ P = "integration_portal"
 WIB = ZoneInfo("Asia/Jakarta")
 MAX_PHOTOS = 10
 MAX_AFTER = 10
+MAX_WORK_PHOTOS = 5        # photos per technician link
+WORK_LINK_MINUTES = 60    # a technician link is valid 1 hour
 MAX_INVOICES = 10
 MAX_INVOICE_BYTES = 10 * 1024 * 1024
 WAGE_TYPES = ("DAILY", "MONTHLY")
@@ -159,24 +161,28 @@ def media_root() -> Path:
     return root
 
 
-def _store(request_id: str, kind: str, data: bytes, mime: str, ext: str, user: dict, file_name: Optional[str] = None,
-           taken_at: Optional[datetime] = None, lat: Optional[float] = None, lng: Optional[float] = None, note: Optional[str] = None) -> None:
+def _store(request_id: str, kind: str, data: bytes, mime: str, ext: str, user: Optional[dict], file_name: Optional[str] = None,
+           taken_at: Optional[datetime] = None, lat: Optional[float] = None, lng: Optional[float] = None, note: Optional[str] = None,
+           by_name: Optional[str] = None, work_link_id: Optional[int] = None) -> None:
+    """user = the portal user uploading; a technician's link has none (by_name + work_link_id instead)."""
     media_id = str(uuid.uuid4())
     rel = f"de/{_now():%Y/%m}/{media_id}.{ext}"
     path = media_root() / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     db.fetchrow(f"""INSERT INTO {P}.de_media (id, request_id, kind, storage_path, mime, bytes, sha256, file_name, taken_at, latitude,
-                    longitude, uploaded_by, uploaded_by_name, note) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                    longitude, uploaded_by, uploaded_by_name, note, work_link_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
                 (media_id, request_id, kind, rel, mime, len(data), hashlib.sha256(data).hexdigest(), file_name, taken_at, lat, lng,
-                 user["id"], user.get("full_name") or user["username"], note))
+                 user["id"] if user else None, by_name or ((user.get("full_name") or user["username"]) if user else None), note, work_link_id))
 
 
 def media_of(request_id: str) -> list[dict]:
-    rows = db.fetch(f"""SELECT id::text, kind, mime, bytes, file_name, taken_at, uploaded_at, uploaded_by_name, latitude, longitude, note
-                        FROM {P}.de_media WHERE request_id::text = %s ORDER BY uploaded_at""", (request_id,))
+    rows = db.fetch(f"""SELECT id::text, kind, mime, bytes, file_name, taken_at, uploaded_at, uploaded_by_name, latitude, longitude, note,
+                        work_link_id FROM {P}.de_media WHERE request_id::text = %s ORDER BY uploaded_at""", (request_id,))
     return [{"id": r["id"], "kind": r["kind"], "mime": r["mime"], "bytes": r["bytes"], "fileName": r["file_name"],
-             "takenAt": _iso(r["taken_at"]), "uploadedAt": _iso(r["uploaded_at"]), "uploadedBy": r["uploaded_by_name"], "note": r["note"]} for r in rows]
+             "takenAt": _iso(r["taken_at"]), "uploadedAt": _iso(r["uploaded_at"]), "uploadedBy": r["uploaded_by_name"], "note": r["note"],
+             "byTechnician": r["work_link_id"] is not None} for r in rows]
 
 
 def _invoice_type(data: bytes) -> tuple[str, str]:
@@ -560,6 +566,7 @@ def team_full(request_id: str) -> dict:
                     (request_id, row["branch_code"], row["user_id"], list(OPEN)))
     out["related"] = [{**view(r), "items": items_of(r["id"])} for r in rows]
     out["allowed"] = allowed_next(row)
+    out["workLinks"] = work_links(request_id)
     return out
 
 
@@ -587,6 +594,9 @@ def change_status(user: dict, request_id: str, to: str, note: Optional[str]) -> 
         conn.execute(f"""UPDATE {P}.de_request SET status = %s, hold_from = %s, updated_at = now(),
                          closed_at = CASE WHEN %s IN ('DONE', 'REJECTED') THEN now() END WHERE id::text = %s""",
                      (to, row["status"] if to == "ON_HOLD" else None, to, request_id))
+        if row["status"] == "IN_PROGRESS" or to in ("DONE", "REJECTED"):  # the work stops: open technician links close
+            conn.execute(f"""UPDATE {P}.de_work_link SET revoked_at = now() WHERE request_id::text = %s AND submitted_at IS NULL
+                             AND revoked_at IS NULL""", (request_id,))
         if to in ("DONE", "REJECTED"):
             conn.execute(f"""UPDATE {P}.de_assignment SET status = CASE WHEN %s = 'DONE' THEN 'DONE' ELSE 'RELEASED' END,
                              released_at = now(), released_note = %s WHERE request_id::text = %s AND status = 'ACTIVE'""",
@@ -725,3 +735,116 @@ def by_token(token: str) -> Optional[dict]:
 def signature_of(request_id: str) -> Optional[dict]:
     return db.fetchrow(f"SELECT signature, signature_type, user_id::text, branch_code FROM {P}.de_request WHERE id::text = %s AND signature IS NOT NULL",
                        (request_id,))
+
+
+# ---------------------------------------------------------------- technician photo link (no sign-in, 1 hour)
+
+def _link_state(r: dict) -> str:
+    if r["submitted_at"] is not None:
+        return "SENT"
+    if r["revoked_at"] is not None:
+        return "CLOSED"
+    return "OPEN" if r["expires_at"] > _now() else "EXPIRED"
+
+
+def work_links(request_id: str) -> list[dict]:
+    rows = db.fetch(f"""SELECT l.*, (SELECT count(*) FROM {P}.de_media m WHERE m.work_link_id = l.id)::int AS photos
+                        FROM {P}.de_work_link l WHERE l.request_id::text = %s ORDER BY l.created_at DESC""", (request_id,))
+    return [{"id": r["id"], "token": r["token"], "technician": r["technician_name"], "createdBy": r["created_by_name"],
+             "createdAt": _iso(r["created_at"]), "expiresAt": _iso(r["expires_at"]), "submittedAt": _iso(r["submitted_at"]),
+             "note": r["submit_note"], "photos": r["photos"], "state": _link_state(r)} for r in rows]
+
+
+def create_work_link(user: dict, request_id: str, technician_id: Optional[int]) -> dict:
+    """A new link for an assigned technician (the request must be In progress); an older open link of the request closes."""
+    row = get_row(request_id)
+    if row is None or row["status"] != "IN_PROGRESS":
+        raise DeError("Link foto untuk tukang dibuat saat pengajuan berstatus Dikerjakan")
+    techs = db.fetch(f"""SELECT t.id, t.name FROM {P}.de_assignment a JOIN {P}.de_technician t ON t.id = a.technician_id
+                         WHERE a.request_id::text = %s AND a.status = 'ACTIVE' ORDER BY a.id""", (request_id,))
+    tech = next((t for t in techs if technician_id is None or t["id"] == technician_id), None)
+    if tech is None:
+        raise DeError("Pilih tukang yang ditugaskan di pengajuan ini")
+    token = secrets.token_urlsafe(24)
+    with db.transaction() as conn:
+        conn.execute(f"""UPDATE {P}.de_work_link SET revoked_at = now() WHERE request_id::text = %s AND submitted_at IS NULL
+                         AND revoked_at IS NULL""", (request_id,))
+        conn.execute(f"""INSERT INTO {P}.de_work_link (token, request_id, technician_id, technician_name, created_by, created_by_name, expires_at)
+                         VALUES (%s, %s, %s, %s, %s, %s, now() + %s::interval)""",
+                     (token, request_id, tech["id"], tech["name"], user["id"], user.get("full_name") or user["username"],
+                      f"{WORK_LINK_MINUTES} minutes"))
+        _event(conn, request_id, user, "WORK", None, None, None, {"technician": tech["name"], "link": "created"})
+    return team_full(request_id)
+
+
+def revoke_work_link(user: dict, request_id: str, link_id: int) -> dict:
+    db.fetchrow(f"""UPDATE {P}.de_work_link SET revoked_at = now() WHERE id = %s AND request_id::text = %s AND submitted_at IS NULL
+                    AND revoked_at IS NULL RETURNING id""", (link_id, request_id))
+    return team_full(request_id)
+
+
+def _work(token: str, writable: bool = False) -> dict:
+    """The link with its request: unknown, expired or closed → LookupError (a sent link stays readable until it expires)."""
+    if not token or len(token) > 64:
+        raise LookupError("Link tidak ditemukan")
+    link = db.fetchrow(f"""SELECT l.*, r.status, r.number, r.kind, r.branch_code, r.branch_name, r.analysis, r.id::text AS rid
+                           FROM {P}.de_work_link l JOIN {P}.de_request r ON r.id = l.request_id WHERE l.token = %s""", (token,))
+    if link is None or link["revoked_at"] is not None or link["expires_at"] <= _now():
+        raise LookupError("Link sudah tidak berlaku. Minta link baru ke tim maintenance.")
+    if writable and (link["submitted_at"] is not None or link["status"] != "IN_PROGRESS"):
+        raise DeError("Foto sudah dikirim; link ini tidak bisa diubah lagi")
+    return link
+
+
+def work_view(token: str) -> dict:
+    link = _work(token)
+    photos = db.fetch(f"SELECT id::text, taken_at, uploaded_at FROM {P}.de_media WHERE work_link_id = %s ORDER BY uploaded_at", (link["id"],))
+    return {"number": link["number"], "kind": link["kind"], "kindLabel": KINDS[link["kind"]], "branchCode": link["branch_code"],
+            "branchName": link["branch_name"], "analysis": link["analysis"], "technician": link["technician_name"],
+            "items": [{k: i.get(k) for k in ("name", "qty", "category", "group", "location", "note", "urgency")} for i in items_of(link["rid"])],
+            "expiresAt": _iso(link["expires_at"]), "submittedAt": _iso(link["submitted_at"]), "note": link["submit_note"],
+            "photos": [{"id": ph["id"], "takenAt": _iso(ph["taken_at"] or ph["uploaded_at"])} for ph in photos], "max": MAX_WORK_PHOTOS}
+
+
+def work_add_photo(token: str, photo: str, lat: Optional[float], lng: Optional[float], taken_at: Optional[datetime]) -> dict:
+    link = _work(token, writable=True)
+    n = db.fetchrow(f"SELECT count(*)::int AS n FROM {P}.de_media WHERE work_link_id = %s", (link["id"],))["n"]
+    if n >= MAX_WORK_PHOTOS:
+        raise DeError(f"Maksimal {MAX_WORK_PHOTOS} foto; hapus satu dulu")
+    after = db.fetchrow(f"SELECT count(*)::int AS n FROM {P}.de_media WHERE request_id = %s AND kind = 'AFTER'", (link["request_id"],))["n"]
+    if after >= MAX_AFTER:
+        raise DeError(f"Foto hasil pekerjaan pengajuan ini sudah {MAX_AFTER}")
+    mime, data = parse_photo(photo)
+    _store(link["rid"], "AFTER", data, mime, {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}.get(mime, "jpg"), None,
+           taken_at=taken_at, lat=lat, lng=lng, by_name=f"{link['technician_name']} (tukang)", work_link_id=link["id"])
+    return work_view(token)
+
+
+def work_delete_photo(token: str, media_id: str) -> dict:
+    link = _work(token, writable=True)
+    row = db.fetchrow(f"DELETE FROM {P}.de_media WHERE id::text = %s AND work_link_id = %s RETURNING storage_path", (media_id, link["id"]))
+    if row:
+        (media_root() / row["storage_path"]).unlink(missing_ok=True)
+    return work_view(token)
+
+
+def work_submit(token: str, note: Optional[str]) -> dict:
+    link = _work(token, writable=True)
+    n = db.fetchrow(f"SELECT count(*)::int AS n FROM {P}.de_media WHERE work_link_id = %s", (link["id"],))["n"]
+    if n < 1:
+        raise DeError("Ambil minimal 1 foto hasil pekerjaan")
+    note = (note or "").strip()[:1000] or None
+    with db.transaction() as conn:
+        conn.execute(f"UPDATE {P}.de_work_link SET submitted_at = now(), submit_note = %s WHERE id = %s", (note, link["id"]))
+        conn.execute(f"""INSERT INTO {P}.de_event (request_id, actor_id, actor_name, kind, note, details)
+                         VALUES (%s, NULL, %s, 'WORK', %s, %s::jsonb)""",
+                     (link["request_id"], f"{link['technician_name']} (tukang)", note,
+                      json.dumps({"technician": link["technician_name"], "link": "sent", "photos": n}, ensure_ascii=False)))
+    return work_view(token)
+
+
+def work_media(token: str, media_id: str) -> Optional[dict]:
+    link = _work(token)
+    if not db.fetchrow(f"SELECT 1 AS x FROM {P}.de_media WHERE id::text = %s AND work_link_id = %s", (media_id, link["id"])):
+        return None
+    return media_file(media_id)

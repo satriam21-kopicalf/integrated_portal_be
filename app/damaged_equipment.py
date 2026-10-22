@@ -45,7 +45,7 @@ MAX_INVOICE_BYTES = 10 * 1024 * 1024
 WAGE_TYPES = ("DAILY", "MONTHLY")
 MAX_VIDEO_BYTES = 10 * 1024 * 1024
 MAX_ITEMS = 50
-KINDS = {"REPAIR": "Perbaikan (Building & Tools)", "PROCUREMENT": "Pengadaan (Dekorasi & Tools)"}
+KINDS = {"REPAIR": "Maintenance", "PROCUREMENT": "Pengadaan (Dekorasi & Tools)"}
 URGENCY = ("CRITICAL", "HIGH", "NORMAL", "LOW", "PLANNED")  # most urgent first
 URGENCY_LABEL = {"CRITICAL": "Kritis", "HIGH": "Tinggi", "NORMAL": "Normal", "LOW": "Rendah", "PLANNED": "Dijadwalkan"}
 # hours from sending to done (on hold not counted); PLANNED has no target

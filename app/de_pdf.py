@@ -143,8 +143,8 @@ def build(request_id: str, share_url: Optional[str] = None, public: bool = False
     ev_rows = [[Paragraph(f"<b>{h}</b>", small) for h in ("Waktu", "Proses", "Oleh", "Catatan")]]
     for e in r["events"]:
         what = (f"{de.STATUS_LABEL.get(e['from'] or '', e['from'] or '')} → {de.STATUS_LABEL.get(e['to'] or '', e['to'] or '')}"
-                if e["kind"] == "STATUS" else EVENT.get(e["kind"], e["kind"]))
-        extra = e["details"].get("technician")
+                if e["kind"] == "STATUS" else "Invoice dilampirkan" if e["details"].get("invoice") else EVENT.get(e["kind"], e["kind"]))
+        extra = e["details"].get("technician") or e["details"].get("invoice")
         if extra:
             what += f" · {extra}"
         ev_rows.append([Paragraph(_wib(e["at"]), small), Paragraph(_esc(what), body), Paragraph(_esc(e["actor"] or "-"), body),

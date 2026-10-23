@@ -216,6 +216,8 @@ def create(user: dict, branch_code: str, photo: str, lat: float, lng: float, acc
     branch = next((b for b in branch_options(user) if b["code"] == branch_code), None)
     if branch is None:
         raise CheckInError("Cabang tidak tersedia untuk akun Anda")
+    if done_today(str(user["id"])).get(branch["code"]):
+        raise CheckInError(f"Anda sudah check in di {branch['name']} hari ini. Check in berikutnya besok.")
     photo_type, data = parse_photo(photo)
     faces = count_faces(data)
     if faces is None:
@@ -278,9 +280,23 @@ def _view(r: dict, risk: bool = True) -> dict:
 
 
 def recent_of(user_id: str, limit: int = 10) -> list[dict]:
-    # the PIC's own list: without the risk signals
-    return [_view(r, risk=False) for r in db.fetch(
-        f"SELECT {COLUMNS} FROM {T} c WHERE c.user_id = %s ORDER BY c.visited_at DESC LIMIT %s", (user_id, limit))]
+    """The PIC's own list: without the risk signals, with the management's review (valid / not valid and its note)."""
+    out = []
+    for r in db.fetch(f"SELECT {COLUMNS} FROM {T} c WHERE c.user_id = %s ORDER BY c.visited_at DESC LIMIT %s", (user_id, limit)):
+        v = _view(r, risk=False)
+        v["review"] = None if not r.get("review_status") else {
+            "status": r["review_status"], "note": r.get("review_note"), "by": r.get("reviewed_by"),
+            "at": r["reviewed_at"].isoformat() if r.get("reviewed_at") else None}
+        out.append(v)
+    return out
+
+
+def done_today(user_id: str) -> dict[str, dict]:
+    """{branch code: {id, visitedAt}} of the PIC's check-ins today (WIB): one check in per branch per day."""
+    rows = db.fetch(f"""SELECT DISTINCT ON (branch_code) branch_code, id::text, visited_at FROM {T}
+                        WHERE user_id = %s AND (visited_at AT TIME ZONE 'Asia/Jakarta')::date = (now() AT TIME ZONE 'Asia/Jakarta')::date
+                        ORDER BY branch_code, visited_at""", (user_id,))
+    return {r["branch_code"]: {"id": r["id"], "visitedAt": r["visited_at"].isoformat()} for r in rows}
 
 
 def monitor(date_from: date, date_to: date, branches: Optional[list[str]], user_id: Optional[str] = None,

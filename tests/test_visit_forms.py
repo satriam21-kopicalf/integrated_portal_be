@@ -24,11 +24,13 @@ def test_counts_and_what_blocks_the_submit():
     c = vf._counts("outlet", answers)
     assert (c["under"], c["exceed"], c["rated"], c["total"]) == (1, 1, 59, 59) and c["score"] == round(58 * 100 / 59, 1)
     todo = vf.missing("outlet", answers, [])
-    assert todo == [{"key": items[0]["key"], "label": items[0]["label"], "need": "note+photo"}]
-    answers[items[0]["key"]]["note"] = "Lantai bar basah"
-    assert vf.missing("outlet", answers, [{"item": items[0]["key"]}]) == []
+    assert len(todo) == len([i for i in items if not i.get("platform")]) and todo[0] == {"key": items[0]["key"], "label": items[0]["label"], "need": "note+photo"}  # every rated item (2026-10-23)
+    for i in items:
+        answers[i["key"]]["note"] = "Catatan"
+    photos = [{"item": i["key"]} for i in items]
+    assert vf.missing("outlet", answers, photos) == []
     del answers[items[5]["key"]]
-    assert vf.missing("outlet", answers, [{"item": items[0]["key"]}]) == []  # unrated items do not block (2026-10-21)
+    assert vf.missing("outlet", answers, photos[:5] + photos[6:]) == []  # unrated items do not block (2026-10-21)
     assert vf.unrated("outlet", answers) == 1
 
 
@@ -47,10 +49,11 @@ def test_answers_are_checked_and_merged(monkeypatch):
 
 
 def test_platform_stars_manual_and_google_automatic(monkeypatch):
+    monkeypatch.setattr(vf, "done_today", lambda form, uid: {})
     import json
     platforms = {it["key"]: it.get("platform") for it in vf.all_items("outlet") if it["section"] == "rating"}
     assert platforms == {"rating.1": "google", "rating.2": "gofood", "rating.3": "grabfood", "rating.4": "shopeefood", "rating.5": None}
-    monkeypatch.setattr(vf, "own_draft", lambda form, user, vid: {"answers": {"rating.1": {"rating": "MEET", "stars": 1.0}}, "branch_code": "CTG54"})
+    monkeypatch.setattr(vf, "own_draft", lambda form, user, vid: {"answers": {"rating.1": {"rating": "MEET", "stars": 1.0}}, "branch_code": "CTG54", "branch_name": "Test"})
     saved = {}
     monkeypatch.setattr(vf.db, "fetchrow", lambda q, p=None: saved.update(q=q, p=p) or {"id": "x"})
     out = vf.save_answers("outlet", {"id": "u"}, "v", {"rating.2": {"stars": "4.56", "rating": "MEET"}})
@@ -88,9 +91,10 @@ def test_endpoints_follow_their_pages(anon, store, page_access, monkeypatch):
 
 
 def test_signature_is_optional_and_needs_a_name(monkeypatch):
+    monkeypatch.setattr(vf, "done_today", lambda form, uid: {})
     from tests.test_pic_checkin import _jpeg
     saved = {}
-    monkeypatch.setattr(vf, "own_draft", lambda form, user, vid: {"answers": {"rating.1": {"rating": "MEET"}}, "branch_code": "CCI01"})
+    monkeypatch.setattr(vf, "own_draft", lambda form, user, vid: {"answers": {"rating.1": {"rating": "MEET"}}, "branch_code": "CCI01", "branch_name": "Test"})
     monkeypatch.setattr(vf, "photos_of", lambda vid: [])
     monkeypatch.setattr(vf, "missing", lambda form, answers, photos: [])
     monkeypatch.setattr(vf, "_outlet", lambda code: None)
@@ -116,3 +120,13 @@ def test_unreadable_photo_is_refused_not_an_error(anon, store, monkeypatch):
     login(anon, "kasir", "Kasir1234")
     r = anon.post("/api/forms/outlet/visits/v/photos", json={"item": "rating.1", "photo": "data:image/png;base64,bm90LWFuLWltYWdlLWF0LWFsbA=="})
     assert r.status_code == 422
+
+
+def test_one_visit_per_branch_per_day(monkeypatch):
+    monkeypatch.setattr(vf, "done_today", lambda form, uid: {"CTG54": {"id": "v", "submittedAt": "x"}})
+    try:
+        vf._not_today("product", {"id": "u"}, "CTG54", "Kopi Calf Cempaka Putih")
+        raise AssertionError("daily")
+    except vf.VisitError as e:
+        assert "besok" in str(e)
+    vf._not_today("product", {"id": "u"}, "CCI01", "Other")  # another branch is fine

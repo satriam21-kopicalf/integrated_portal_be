@@ -20,6 +20,7 @@ the team can close a request as a duplicate of another one.
 """
 import hashlib
 import json
+import math
 
 import secrets
 import uuid
@@ -42,7 +43,9 @@ MAX_WORK_PHOTOS = 5        # photos per technician link
 WORK_LINK_MINUTES = 60    # a technician link is valid 1 hour
 MAX_INVOICES = 10
 MAX_INVOICE_BYTES = 10 * 1024 * 1024
-WAGE_TYPES = ("DAILY", "MONTHLY")
+WAGE_TYPES = ("HOURLY", "DAILY", "WEEKLY", "MONTHLY", "PER_JOB")  # PER_JOB = borongan (one amount per request)
+WAGE_UNIT = {"HOURLY": "jam", "DAILY": "hari", "WEEKLY": "minggu", "MONTHLY": "hari", "PER_JOB": "pekerjaan"}
+COST_KINDS = ("MATERIAL", "SERVICE", "TRANSPORT", "OTHER")
 MAX_VIDEO_BYTES = 10 * 1024 * 1024
 MAX_ITEMS = 50
 KINDS = {"REPAIR": "Maintenance", "PROCUREMENT": "Pengadaan (Dekorasi & Tools)"}
@@ -87,25 +90,27 @@ def _num(v: Any) -> Optional[float]:
 # ---------------------------------------------------------------- master: categories & technicians
 
 def categories(active_only: bool = True) -> list[dict]:
-    rows = db.fetch(f"""SELECT id, grp, name, default_urgency, examples, sort, is_active FROM {P}.de_category
+    rows = db.fetch(f"""SELECT id, grp, name, default_urgency, examples, sort, is_active, branch_groups FROM {P}.de_category
                         {"WHERE is_active" if active_only else ""} ORDER BY sort, name""")
     return [{"id": r["id"], "group": r["grp"], "name": r["name"], "defaultUrgency": r["default_urgency"],
-             "examples": list(r["examples"] or []), "sort": r["sort"], "isActive": r["is_active"]} for r in rows]
+             "examples": list(r["examples"] or []), "sort": r["sort"], "isActive": r["is_active"],
+             "branchGroups": list(r["branch_groups"] or [])} for r in rows]  # [] = every branch
 
 
 def save_category(category_id: Optional[int], body: dict) -> dict:
     if body.get("defaultUrgency") not in URGENCY:
         raise DeError("Urgensi tidak dikenal")
     examples = [e.strip()[:80] for e in body.get("examples") or [] if e and e.strip()][:30]
+    groups = sorted({str(g)[:40] for g in body.get("branchGroups") or [] if g})[:20]
     params = (body["group"].strip()[:60], body["name"].strip()[:80], body["defaultUrgency"], examples,
-              int(body.get("sort") or 0), bool(body.get("isActive", True)))
+              int(body.get("sort") or 0), bool(body.get("isActive", True)), groups)
     try:
         if category_id is None:
-            row = db.fetchrow(f"""INSERT INTO {P}.de_category (grp, name, default_urgency, examples, sort, is_active)
-                                  VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""", params)
+            row = db.fetchrow(f"""INSERT INTO {P}.de_category (grp, name, default_urgency, examples, sort, is_active, branch_groups)
+                                  VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""", params)
         else:
             row = db.fetchrow(f"""UPDATE {P}.de_category SET grp = %s, name = %s, default_urgency = %s, examples = %s, sort = %s,
-                                  is_active = %s, updated_at = now() WHERE id = %s RETURNING id""", (*params, category_id))
+                                  is_active = %s, branch_groups = %s, updated_at = now() WHERE id = %s RETURNING id""", (*params, category_id))
     except Exception as e:  # noqa: BLE001 - unique name
         if "de_category_name_key" in str(e):
             raise DeError("Nama kategori sudah dipakai") from None
@@ -140,7 +145,7 @@ def save_technician(technician_id: Optional[int], body: dict) -> dict:
         raise DeError("Nama tukang wajib diisi")
     wage_type = body.get("wageType") or "DAILY"
     if wage_type not in WAGE_TYPES:
-        raise DeError("Jenis gaji harus harian atau bulanan")
+        raise DeError("Jenis upah harus per jam, harian, mingguan, bulanan atau borongan")
     wage = body.get("wageAmount")
     if wage is not None and (float(wage) < 0 or float(wage) > 1e12):
         raise DeError("Nominal gaji tidak valid")
@@ -373,7 +378,11 @@ def form_state(user: dict) -> dict:
             v["tracker"] = tracker(r, events_of(r["id"]))
             v["lastNote"] = next((e for e in reversed(events_of(r["id"])) if e["note"]), None)
         out.append(v)
-    return {"user": {"id": str(user["id"]), "name": user.get("full_name") or user["username"]}, "branches": branch_options(user),
+    from app import branch_groups as bg
+    groups = {b["code"]: b["group_id"] for b in bg.outlets()}
+    branches = branch_options(user)
+    return {"user": {"id": str(user["id"]), "name": user.get("full_name") or user["username"]}, "branches": branches,
+            "branchGroups": {b["code"]: groups.get(b["code"]) for b in branches},
             "categories": categories(), "kinds": KINDS, "urgency": URGENCY_LABEL, "requests": out,
             "limits": {"photos": MAX_PHOTOS, "videoBytes": MAX_VIDEO_BYTES, "items": MAX_ITEMS}}
 
@@ -580,6 +589,8 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]]) -> di
 
 
 def team_full(request_id: str) -> dict:
+    if (get_row(request_id) or {}).get("status") in OPEN:
+        recompute(request_id)  # the labour of a running job grows with the time
     row = get_row(request_id)
     out = full(request_id)
     # every other request of the same branch or PIC (open first): one look at what is already asked
@@ -590,6 +601,8 @@ def team_full(request_id: str) -> dict:
     out["related"] = [{**view(r), "items": items_of(r["id"])} for r in rows]
     out["allowed"] = allowed_next(row)
     out["workLinks"] = work_links(request_id)
+    out["costItems"] = cost_items(request_id)
+    out["labor"] = labor(request_id)
     return out
 
 
@@ -600,6 +613,7 @@ def allowed_next(row: dict) -> list[str]:
 
 
 def change_status(user: dict, request_id: str, to: str, note: Optional[str]) -> dict:
+    recompute(request_id)
     row = get_row(request_id)
     if row is None or row["status"] == "DRAFT":
         raise LookupError("Pengajuan tidak ditemukan")
@@ -644,6 +658,7 @@ def change_status(user: dict, request_id: str, to: str, note: Optional[str]) -> 
                              released_at = now(), released_note = %s WHERE request_id::text = %s AND status = 'ACTIVE'""",
                          (to, None if to == "DONE" else "Pengajuan ditolak", request_id))
         _event(conn, request_id, user, "STATUS", row["status"], to, note)
+    recompute(request_id)  # Done / reject: the labour stops here
     return team_full(request_id)
 
 
@@ -653,18 +668,6 @@ def add_note(user: dict, request_id: str, note: str) -> dict:
         raise DeError("Catatan kosong")
     with db.transaction() as conn:
         _event(conn, request_id, user, "NOTE", None, None, note)
-    return team_full(request_id)
-
-
-def set_cost(user: dict, request_id: str, est: Optional[float], actual: Optional[float], vendor: Optional[str]) -> dict:
-    row = get_row(request_id)
-    if row is None:
-        raise LookupError("Pengajuan tidak ditemukan")
-    vendor = (vendor or "").strip()[:120] or None
-    with db.transaction() as conn:
-        conn.execute(f"UPDATE {P}.de_request SET est_cost = %s, actual_cost = %s, vendor = %s, updated_at = now() WHERE id::text = %s",
-                     (est, actual, vendor, request_id))
-        _event(conn, request_id, user, "COST", None, None, None, {"estCost": est, "actualCost": actual, "vendor": vendor})
     return team_full(request_id)
 
 
@@ -1129,3 +1132,140 @@ def overview(date_from: date, date_to: date, branches: Optional[list[str]]) -> d
         "branches": sorted(branches_.values(), key=lambda v: -v["count"])[:10], "repeats": repeats[:10],
         "urgency": urg, "modes": modes, "technicians": techs[:10], "reasons": reasons[:8],
     }
+
+
+# ---------------------------------------------------------------- cost lines & labour
+
+def cost_items(request_id: str) -> list[dict]:
+    rows = db.fetch(f"SELECT * FROM {P}.de_cost_item WHERE request_id::text = %s ORDER BY id", (request_id,))
+    return [{"id": r["id"], "kind": r["kind"], "description": r["description"], "qty": _num(r["qty"]), "estAmount": _num(r["est_amount"]),
+             "actualAmount": _num(r["actual_amount"]), "by": r["created_by"], "at": _iso(r["updated_at"])} for r in rows]
+
+
+def _units(wage_type: str, hours: float) -> float:
+    """Billable units of a job from the hours worked (rounded up): half hours, days, weeks; per job = 1."""
+    if wage_type == "PER_JOB":
+        return 1.0
+    if hours <= 0:
+        return 0.0
+    if wage_type == "HOURLY":
+        return math.ceil(hours * 2) / 2
+    if wage_type == "WEEKLY":
+        return float(math.ceil(hours / 168))
+    return float(math.ceil(hours / 24))  # DAILY, MONTHLY (per working day: monthly / 26)
+
+
+def labor(request_id: str) -> list[dict]:
+    """The labour of every technician who worked on the request: from In progress (or the assignment, if later) to the
+    release / Done / the handover request; amount = rate × units (monthly: rate / 26 per day), or the team's adjustment."""
+    row = get_row(request_id)
+    if row is None:
+        return []
+    start_ev = db.fetchrow(f"""SELECT min(at) AS at FROM {P}.de_event WHERE request_id::text = %s AND kind = 'STATUS' AND to_status = 'IN_PROGRESS'""",
+                           (request_id,))["at"]
+    rows = db.fetch(f"""SELECT a.id, a.status, a.assigned_at, a.released_at, a.labor_adjust, a.labor_note, t.name, t.kind, t.company,
+                               t.wage_type, t.wage_amount FROM {P}.de_assignment a JOIN {P}.de_technician t ON t.id = a.technician_id
+                        WHERE a.request_id::text = %s ORDER BY a.assigned_at""", (request_id,))
+    stop = row["handover_requested_at"] if row.get("handover_requested_at") and row["status"] not in ("IN_PROGRESS",) else None
+    out = []
+    for a in rows:
+        begin = max(a["assigned_at"], start_ev) if start_ev else None
+        end = a["released_at"] or _now()
+        if stop and a["status"] != "RELEASED":
+            end = min(end, stop)
+        hours = max(0.0, (end - begin).total_seconds() / 3600) if begin else 0.0
+        if a["status"] == "RELEASED" and hours <= 0:
+            continue
+        rate = _num(a["wage_amount"]) or 0.0
+        units = _units(a["wage_type"], hours) if (begin or a["wage_type"] == "PER_JOB") else 0.0
+        computed = round(rate / 26 * units if a["wage_type"] == "MONTHLY" else rate * units, 2)
+        adjust = _num(a["labor_adjust"])
+        out.append({"assignmentId": a["id"], "technician": a["name"], "kind": a["kind"], "company": a["company"], "status": a["status"],
+                    "wageType": a["wage_type"], "rate": rate, "hours": round(hours, 2), "units": units, "unit": WAGE_UNIT[a["wage_type"]],
+                    "computed": computed, "adjust": adjust, "note": a["labor_note"], "amount": adjust if adjust is not None else computed})
+    return out
+
+
+def recompute(request_id: str) -> None:
+    """The request's estimated cost = the estimates of the lines; actual = the actual lines + the labour."""
+    items = cost_items(request_id)
+    lab = sum(x["amount"] or 0 for x in labor(request_id))
+    ests = [i["estAmount"] for i in items if i["estAmount"] is not None]
+    acts = [i["actualAmount"] for i in items if i["actualAmount"] is not None]
+    est = round(sum(ests), 2) if ests else None
+    actual = round(sum(acts) + lab, 2) if (acts or lab) else None
+    db.fetchrow(f"""UPDATE {P}.de_request SET est_cost = %s, actual_cost = %s WHERE id::text = %s
+                    AND (est_cost IS DISTINCT FROM %s OR actual_cost IS DISTINCT FROM %s) RETURNING id""", (est, actual, request_id, est, actual))
+
+
+def _cost_open(request_id: str) -> dict:
+    row = get_row(request_id)
+    if row is None or row["status"] in ("DRAFT", "REJECTED", "DONE"):
+        raise DeError("Biaya diubah selama pengajuan masih berjalan")
+    return row
+
+
+def _amount(v: Any) -> Optional[float]:
+    if v is None or v == "":
+        return None
+    v = float(v)
+    if v < 0 or v > 1e12:
+        raise DeError("Nominal tidak valid")
+    return round(v, 2)
+
+
+def save_cost_item(user: dict, request_id: str, item_id: Optional[int], body: dict) -> dict:
+    _cost_open(request_id)
+    kind = body.get("kind") or "MATERIAL"
+    if kind not in COST_KINDS:
+        raise DeError("Jenis biaya tidak dikenal")
+    desc = " ".join((body.get("description") or "").split())[:200]
+    if not desc:
+        raise DeError("Deskripsi biaya wajib diisi")
+    qty = float(body.get("qty") or 1)
+    if qty <= 0 or qty > 1e6:
+        raise DeError("Qty tidak valid")
+    est, act = _amount(body.get("estAmount")), _amount(body.get("actualAmount"))
+    by = user.get("full_name") or user["username"]
+    with db.transaction() as conn:
+        if item_id is None:
+            conn.execute(f"""INSERT INTO {P}.de_cost_item (request_id, kind, description, qty, est_amount, actual_amount, created_by)
+                             VALUES (%s, %s, %s, %s, %s, %s, %s)""", (request_id, kind, desc, qty, est, act, by))
+        else:
+            n = conn.execute(f"""UPDATE {P}.de_cost_item SET kind = %s, description = %s, qty = %s, est_amount = %s, actual_amount = %s,
+                                 created_by = %s, updated_at = now() WHERE id = %s AND request_id::text = %s""",
+                             (kind, desc, qty, est, act, by, item_id, request_id)).rowcount
+            if not n:
+                raise LookupError("Baris biaya tidak ditemukan")
+        _event(conn, request_id, user, "COST", None, None, None,
+               {"item": desc, "estAmount": est, "actualAmount": act, "action": "add" if item_id is None else "edit"})
+    recompute(request_id)
+    return team_full(request_id)
+
+
+def delete_cost_item(user: dict, request_id: str, item_id: int) -> dict:
+    _cost_open(request_id)
+    with db.transaction() as conn:
+        row = conn.execute(f"DELETE FROM {P}.de_cost_item WHERE id = %s AND request_id::text = %s RETURNING description",
+                           (item_id, request_id)).fetchone()
+        if row:
+            _event(conn, request_id, user, "COST", None, None, None, {"item": row["description"], "action": "delete"})
+    recompute(request_id)
+    return team_full(request_id)
+
+
+def set_labor(user: dict, request_id: str, assignment_id: int, adjust: Optional[float], note: Optional[str]) -> dict:
+    _cost_open(request_id)
+    adjust = _amount(adjust)
+    note = (note or "").strip()[:300] or None
+    if adjust is not None and not note:
+        raise DeError("Alasan penyesuaian upah wajib diisi")
+    with db.transaction() as conn:
+        row = conn.execute(f"""UPDATE {P}.de_assignment a SET labor_adjust = %s, labor_note = %s FROM {P}.de_technician t
+                               WHERE a.id = %s AND a.request_id::text = %s AND t.id = a.technician_id RETURNING t.name""",
+                           (adjust, note if adjust is not None else None, assignment_id, request_id)).fetchone()
+        if row is None:
+            raise LookupError("Penugasan tidak ditemukan")
+        _event(conn, request_id, user, "COST", None, None, note, {"labor": row["name"], "adjust": adjust})
+    recompute(request_id)
+    return team_full(request_id)

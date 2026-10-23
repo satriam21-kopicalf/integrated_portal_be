@@ -22,7 +22,8 @@ Team (monitoring page; branches in scope):
     POST   /api/de/monitor/{id}/target                    {"dueAt", "note"}: adjusted due time (the PIC sees it)
     POST   /api/de/monitor/{id}/status                    {"to", "note"}
     POST   /api/de/monitor/{id}/notes                     {"note"}
-    PUT    /api/de/monitor/{id}/cost                      {"estCost", "actualCost", "vendor"}
+    POST|PATCH|DELETE /api/de/monitor/{id}/cost-items[/{item}]  cost lines {"kind", "description", "qty", "estAmount", "actualAmount"}
+    PUT    /api/de/monitor/{id}/labor/{assignment}        {"adjust", "note"}: the labour of a technician adjusted
     POST   /api/de/monitor/{id}/assignments               {"technicianId", "scheduledFor", "note"}
     POST   /api/de/assignments/{id}/release               {"note"}
     POST   /api/de/assignments/{id}/swap                  {"toRequestId", "scheduledFor", "note"}
@@ -333,10 +334,17 @@ class NoteIn(BaseModel):
     note: str = Field(min_length=1, max_length=2000)
 
 
-class CostIn(BaseModel):
-    estCost: Optional[float] = Field(None, ge=0, le=1e12)
-    actualCost: Optional[float] = Field(None, ge=0, le=1e12)
-    vendor: Optional[str] = Field(None, max_length=120)
+class CostItemIn(BaseModel):
+    kind: Literal["MATERIAL", "SERVICE", "TRANSPORT", "OTHER"] = "MATERIAL"
+    description: str = Field(min_length=1, max_length=200)
+    qty: float = Field(1, gt=0, le=1e6)
+    estAmount: Optional[float] = Field(None, ge=0, le=1e12)
+    actualAmount: Optional[float] = Field(None, ge=0, le=1e12)
+
+
+class LaborIn(BaseModel):
+    adjust: Optional[float] = Field(None, ge=0, le=1e12)
+    note: Optional[str] = Field(None, max_length=300)
 
 
 class AssignIn(BaseModel):
@@ -421,10 +429,28 @@ def team_note(request_id: str, body: NoteIn, request: Request, user: dict = Depe
     return _run(de.add_note, user, request_id, body.note)
 
 
-@router.put("/api/de/monitor/{request_id}/cost")
-def team_cost(request_id: str, body: CostIn, request: Request, user: dict = Depends(current_user)) -> dict:
+@router.post("/api/de/monitor/{request_id}/cost-items", status_code=201)
+def team_add_cost(request_id: str, body: CostItemIn, request: Request, user: dict = Depends(current_user)) -> dict:
     _team_row(request, user, request_id)
-    return _run(de.set_cost, user, request_id, body.estCost, body.actualCost, body.vendor)
+    return _with_work_urls(_run(de.save_cost_item, user, request_id, None, body.model_dump()))
+
+
+@router.patch("/api/de/monitor/{request_id}/cost-items/{item_id}")
+def team_edit_cost(request_id: str, item_id: int, body: CostItemIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _team_row(request, user, request_id)
+    return _with_work_urls(_run(de.save_cost_item, user, request_id, item_id, body.model_dump()))
+
+
+@router.delete("/api/de/monitor/{request_id}/cost-items/{item_id}")
+def team_delete_cost(request_id: str, item_id: int, request: Request, user: dict = Depends(current_user)) -> dict:
+    _team_row(request, user, request_id)
+    return _with_work_urls(_run(de.delete_cost_item, user, request_id, item_id))
+
+
+@router.put("/api/de/monitor/{request_id}/labor/{assignment_id}")
+def team_labor(request_id: str, assignment_id: int, body: LaborIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _team_row(request, user, request_id)
+    return _with_work_urls(_run(de.set_labor, user, request_id, assignment_id, body.adjust, body.note))
 
 
 @router.post("/api/de/monitor/{request_id}/assignments", status_code=201)
@@ -529,6 +555,7 @@ class CategoryIn(BaseModel):
     examples: list[str] = Field(default_factory=list, max_length=30)
     sort: int = Field(0, ge=0, le=9999)
     isActive: bool = True
+    branchGroups: list[str] = Field(default_factory=list, max_length=20)  # [] = every branch
 
 
 class TechnicianIn(BaseModel):
@@ -540,7 +567,7 @@ class TechnicianIn(BaseModel):
     phone: Optional[str] = Field(None, max_length=40)
     notes: Optional[str] = Field(None, max_length=500)
     isActive: bool = True
-    wageType: Literal["DAILY", "MONTHLY"] = "DAILY"
+    wageType: Literal["HOURLY", "DAILY", "WEEKLY", "MONTHLY", "PER_JOB"] = "DAILY"
     wageAmount: Optional[float] = Field(None, ge=0, le=1e12)
 
 

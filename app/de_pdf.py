@@ -173,6 +173,11 @@ def _event_text(e: dict) -> str:
         return f"{de.STATUS_LABEL.get(e['from'] or '', e['from'] or '')} → {de.STATUS_LABEL.get(e['to'] or '', e['to'] or '')}"
     if e["kind"] == "COST" and d.get("invoice") is not None:
         return f"Invoice dilampirkan · {d['invoice']}"
+    if e["kind"] == "COST" and d.get("labor"):
+        return f"Upah {d['labor']} " + (f"disesuaikan → {_rp(d.get('adjust'))}" if d.get("adjust") is not None else "kembali dihitung otomatis")
+    if e["kind"] == "COST" and d.get("item"):
+        verb = {"add": "Biaya ditambahkan", "edit": "Biaya diubah", "delete": "Biaya dihapus"}.get(d.get("action"), "Biaya")
+        return f"{verb} · {d['item']}" + (f" · estimasi {_rp(d.get('estAmount'))}, aktual {_rp(d.get('actualAmount'))}" if d.get("action") != "delete" else "")
     if e["kind"] == "COST":
         return f"Biaya diperbarui · estimasi {_rp(d.get('estCost'))}, aktual {_rp(d.get('actualCost'))}"
     if e["kind"] == "WORK":
@@ -300,7 +305,23 @@ def build(request_id: str, share_url: Optional[str] = None, public: bool = False
                                   Paragraph(_esc(a.get("scheduledFor") or "-"), s.body), Paragraph("Selesai" if a["status"] == "DONE" else "Aktif", s.body)]
                                  for a in active], [0.38, 0.3, 0.16, 0.16], s))
             story.append(Spacer(1, 6))
-        if r["estCost"] is not None or r["actualCost"] is not None:
+        lines = [] if public else de.cost_items(request_id)
+        work = [] if public else [x for x in de.labor(request_id) if x["amount"]]
+        if lines or work:
+            kinds = {"MATERIAL": "Material", "SERVICE": "Jasa", "TRANSPORT": "Transport", "OTHER": "Lainnya"}
+            rows = [[Paragraph(kinds.get(i["kind"], i["kind"]), s.small), Paragraph(f"<b>{_esc(i['description'])}</b>", s.body),
+                     Paragraph(f"{i['qty']:g}", s.body), Paragraph(_rp(i["estAmount"]), s.right), Paragraph(_rp(i["actualAmount"]), s.right)]
+                    for i in lines]
+            rows += [[Paragraph("Upah", s.small),
+                      Paragraph(f"<b>{_esc(x['technician'])}</b><br/><font size=7 color='{HEX['muted']}'>"
+                                + (f"{x['units']:g} {x['unit']} × {_rp(x['rate'])}" + (" (÷26 per hari)" if x["wageType"] == "MONTHLY" else "")
+                                   if x["adjust"] is None else f"disesuaikan: {_esc(x['note'] or '-')}") + "</font>", s.body),
+                      Paragraph("-", s.body), Paragraph("-", s.right), Paragraph(_rp(x["amount"]), s.right)] for x in work]
+            rows.append([Paragraph("", s.body), Paragraph("<b>Total</b>", s.body), Paragraph("", s.body),
+                         Paragraph(f"<b>{_rp(r['estCost'])}</b>", s.right), Paragraph(f"<b>{_rp(r['actualCost'])}</b>", s.right)])
+            story.append(_table(["Jenis", "Deskripsi", "Qty", "Estimasi", "Aktual"], rows, [0.12, 0.46, 0.08, 0.17, 0.17], s))
+            story.append(Spacer(1, 6))
+        elif r["estCost"] is not None or r["actualCost"] is not None:
             story.append(_grid([("Estimasi biaya", _rp(r["estCost"])), ("Biaya aktual", _rp(r["actualCost"])),
                                 ("Selisih", _rp((r["actualCost"] or 0) - (r["estCost"] or 0)) if r["actualCost"] is not None and r["estCost"] is not None else "-")], s, cols=3))
             story.append(Spacer(1, 6))

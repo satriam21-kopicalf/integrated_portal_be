@@ -6,12 +6,14 @@ performance and the signatures of the workbook are not part of these forms.
 A PIC visits one outlet at a time: the visit is a draft (saved as it is filled, continued later) for the signed-in
 account and the branch picked (a PIC with several branches fills one visit per branch), then submitted. Every item is
 rated UNDER / MEET / EXCEED with a note and camera photos (stamped in the browser with the time, the branch and the
-position; the server keeps the position and its distance to the outlet). An item rated UNDER needs a note and at least
-one photo (user decision 2026-10-20); items left unrated do not block the sending (2026-10-21: at least one rated).
+position; the server keeps the position and its distance to the outlet). Every rated item needs a note and at least one
+photo — material for the analysis (2026-10-23; before: UNDER only); items left unrated do not block the sending.
+Daily (2026-10-23): one visit per PIC, form and branch per day (WIB) — the next one the day after; a day without any
+visit of a PIC counts as a day off in the monitoring (attendance).
 Tables integration_portal.visit_form and visit_form_photo (migration 023).
 """
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 from app import database as db
@@ -203,8 +205,22 @@ def full(visit_id: str) -> dict:
     return out
 
 
+def done_today(form: str, user_id: str) -> dict[str, dict]:
+    """{branch code: {id, submittedAt}} of the PIC's visits sent today (WIB)."""
+    rows = db.fetch(f"""SELECT DISTINCT ON (branch_code) branch_code, id::text, submitted_at FROM {T}
+                        WHERE form = %s AND user_id::text = %s AND status = 'SUBMITTED'
+                          AND (submitted_at AT TIME ZONE 'Asia/Jakarta')::date = (now() AT TIME ZONE 'Asia/Jakarta')::date
+                        ORDER BY branch_code, submitted_at""", (form, user_id))
+    return {r["branch_code"]: {"id": r["id"], "submittedAt": r["submitted_at"].isoformat()} for r in rows}
+
+
+def _not_today(form: str, user: dict, branch_code: str, branch_name: str) -> None:
+    if done_today(form, str(user["id"])).get(branch_code):
+        raise VisitError(f"Form untuk {branch_name} sudah dikirim hari ini. Pengisian berikutnya besok.")
+
+
 def form_state(form: str, user: dict) -> dict:
-    """What the form page needs: the account, its branches, its drafts and its latest visits."""
+    """What the form page needs: the account, its branches, its drafts, its latest visits and the branches done today."""
     branches = branch_options(user)
     drafts = db.fetch(f"SELECT {COLS} FROM {T} v WHERE v.form = %s AND v.user_id::text = %s AND v.status = 'DRAFT' ORDER BY v.updated_at DESC",
                       (form, str(user["id"])))
@@ -212,7 +228,7 @@ def form_state(form: str, user: dict) -> dict:
                          ORDER BY v.submitted_at DESC LIMIT 10""", (form, str(user["id"])))
     return {"definition": DEFINITIONS[form], "user": {"id": str(user["id"]), "username": user["username"],
             "name": user.get("full_name") or user["username"]}, "branches": branches,
-            "drafts": [_view(r) for r in drafts], "recent": [_view(r) for r in recent]}
+            "drafts": [_view(r) for r in drafts], "recent": [_view(r) for r in recent], "today": done_today(form, str(user["id"]))}
 
 
 def open_visit(form: str, user: dict, branch_code: str) -> dict:
@@ -220,6 +236,7 @@ def open_visit(form: str, user: dict, branch_code: str) -> dict:
     branch = next((b for b in branch_options(user) if b["code"] == branch_code), None)
     if branch is None:
         raise VisitError("Cabang tidak tersedia untuk akun Anda")
+    _not_today(form, user, branch["code"], branch["name"])
     row = db.fetchrow(f"""SELECT id::text FROM {T} WHERE form = %s AND user_id::text = %s AND branch_code = %s AND status = 'DRAFT'""",
                       (form, str(user["id"]), branch["code"]))
     if row is None:
@@ -312,14 +329,14 @@ def unrated(form: str, answers: dict) -> int:
 
 
 def missing(form: str, answers: dict, photos: list[dict]) -> list[dict]:
-    """What blocks the submit: UNDER items without a note or a photo (unrated items are allowed, 2026-10-21)."""
+    """What blocks the submit: rated items without a note or a photo (unrated items are allowed, 2026-10-21)."""
     with_photo = {p["item"] for p in photos}
     out = []
     for it in all_items(form):
         if it["kind"] != "rating":
             continue
         a = answers.get(it["key"]) or {}
-        if a.get("rating") == "UNDER":
+        if a.get("rating") and not it.get("platform"):  # the platform stars (Rating Outlet) need neither
             need = [x for x, ok in (("note", bool(a.get("note"))), ("photo", it["key"] in with_photo)) if not ok]
             if need:
                 out.append({"key": it["key"], "label": it["label"], "need": "+".join(need)})
@@ -329,10 +346,11 @@ def missing(form: str, answers: dict, photos: list[dict]) -> list[dict]:
 def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Optional[float], accuracy: Optional[float],
            device: Optional[str], ip: Optional[str], signature: Optional[str] = None, signed_name: Optional[str] = None) -> dict:
     row = own_draft(form, user, visit_id)
+    _not_today(form, user, row["branch_code"], row["branch_name"])
     photos = photos_of(visit_id)
     todo = missing(form, row["answers"] or {}, photos)
     if todo:
-        raise VisitError(f"Belum bisa dikirim: {len(todo)} butir UNDER belum lengkap catatan/foto")
+        raise VisitError(f"Belum bisa dikirim: {len(todo)} butir yang dinilai belum lengkap catatan/foto")
     if unrated(form, row["answers"] or {}) == len([i for i in all_items(form) if i["kind"] == "rating"]):
         raise VisitError("Belum ada butir yang dinilai")
     # the signature is optional (like the stock opname); a name goes with it
@@ -427,6 +445,7 @@ def monitor(form: str, date_from: date, date_to: date, branches: Optional[list[s
             platforms.append({"key": it["key"], "platform": it["platform"], "label": it["label"],
                               "stars": round(sum(vals) / len(vals), 2) if vals else None, "visits": len(vals)})
     return {"definition": DEFINITIONS[form], "data": data, "summary": summary, "platforms": platforms,
+            "attendance": attendance(form, date_from, date_to, branches),
             "sections": sorted(sections.values(), key=lambda s: order.get(s["key"], 99)),
             "findings": [{**f, "branches": sorted(f["branches"])} for f in top],
             "pics": sorted(pics.values(), key=lambda p: -p["n"]), "truncated": len(rows) >= limit}
@@ -440,3 +459,31 @@ def signature_of(visit_id: str) -> Optional[dict]:
 def photo(photo_id: str) -> Optional[dict]:
     return db.fetchrow(f"""SELECT p.photo, p.photo_type, v.user_id::text, v.branch_code, v.form, v.status
                            FROM {TP} p JOIN {T} v ON v.id = p.visit_id WHERE p.id::text = %s""", (photo_id,))
+
+
+def attendance(form: str, date_from: date, date_to: date, branches: Optional[list[str]]) -> dict:
+    """Per PIC (an active account with the form page and a branch in scope): the days with a visit and the days off (no
+    visit at all that day) from the start of the period to today."""
+    from app import access
+    from app.utils import today as wib_today
+    end = min(date_to, wib_today())
+    days = [] if end < date_from else [date_from + timedelta(days=i) for i in range((end - date_from).days + 1)]
+    users = db.fetch("""SELECT u.id, u.username, u.full_name, u.role,
+                                (SELECT array_agg(b.branch_code) FROM integration_portal.user_branch b WHERE b.user_id = u.id) AS codes
+                         FROM integration_portal.user_account u WHERE u.is_active AND u.role <> 'superadmin'""")
+    scope = None if branches is None else set(branches)
+    pics = [u for u in users if u["codes"] and (scope is None or scope & set(u["codes"])) and f"form.{form}" in access.pages_for(u)]
+    rows = db.fetch(f"""SELECT user_id::text AS u, (submitted_at AT TIME ZONE 'Asia/Jakarta')::date AS d, count(*)::int AS n FROM {T}
+                         WHERE form = %s AND status = 'SUBMITTED' AND (submitted_at AT TIME ZONE 'Asia/Jakarta')::date BETWEEN %s AND %s
+                         GROUP BY 1, 2""", (form, date_from, end))
+    by: dict[str, dict[str, int]] = {}
+    for r in rows:
+        by.setdefault(r["u"], {})[r["d"].isoformat()] = r["n"]
+    out = []
+    for u in pics:
+        mine = by.get(str(u["id"]), {})
+        active = sum(1 for d in days if d.isoformat() in mine)
+        out.append({"id": str(u["id"]), "username": u["username"], "name": u["full_name"] or u["username"], "branches": len(u["codes"]),
+                    "active": active, "off": len(days) - active, "visits": sum(mine.values()), "days": mine})
+    out.sort(key=lambda x: (-x["off"], x["name"].lower()))
+    return {"days": [d.isoformat() for d in days], "pics": out}

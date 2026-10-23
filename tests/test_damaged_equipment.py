@@ -34,6 +34,7 @@ def test_flow_and_resume_after_hold():
 
 
 def test_status_rules(monkeypatch):
+    monkeypatch.setattr(de, "recompute", lambda rid: None)
     row = _row(status="PENDING")
     monkeypatch.setattr(de, "get_row", lambda rid: row)
     monkeypatch.setattr(de.db, "fetchrow", lambda q, p=None: {"n": 0})
@@ -163,7 +164,7 @@ def test_invoice_types_and_wages(monkeypatch):
     shared = de.without_invoices({"media": [{"kind": "PHOTO"}, {"kind": "INVOICE"}],
                                   "events": [{"kind": "COST", "details": {"invoice": "a.pdf"}}, {"kind": "COST", "details": {}}]})
     assert shared["media"] == [{"kind": "PHOTO"}] and shared["events"] == [{"kind": "COST", "details": {}}]
-    for body in ({"name": "A", "kind": "INTERNAL", "wageType": "WEEKLY"}, {"name": "A", "kind": "INTERNAL", "wageAmount": -1}):
+    for body in ({"name": "A", "kind": "INTERNAL", "wageType": "YEARLY"}, {"name": "A", "kind": "INTERNAL", "wageAmount": -1}):
         try:
             de.save_technician(None, body)
             raise AssertionError(body)
@@ -172,6 +173,7 @@ def test_invoice_types_and_wages(monkeypatch):
 
 
 def test_handover_and_vendor_rules(monkeypatch):
+    monkeypatch.setattr(de, "recompute", lambda rid: None)
     rows = {"r": _row(status="HANDOVER", mode="VENDOR", handover_at=None, actual_cost=None, est_cost=500000)}
     monkeypatch.setattr(de, "get_row", lambda rid: rows["r"])
     monkeypatch.setattr(de.db, "fetchrow", lambda q, p=None: {"n": 1})
@@ -221,3 +223,8 @@ def test_target_needs_a_reason(monkeypatch):
         raise AssertionError("reason")
     except de.DeError as e:
         assert "Alasan" in str(e)
+
+
+def test_labor_units():
+    assert de._units("HOURLY", 2.2) == 2.5 and de._units("DAILY", 25) == 2 and de._units("WEEKLY", 200) == 2
+    assert de._units("MONTHLY", 10) == 1 and de._units("PER_JOB", 0) == 1 and de._units("DAILY", 0) == 0

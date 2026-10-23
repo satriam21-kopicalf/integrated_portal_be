@@ -76,6 +76,7 @@ def form(user: dict = Depends(require_page(FORM))) -> dict:
         "user": {"id": str(user["id"]), "username": user["username"], "name": user.get("full_name") or user["username"]},
         "branches": pic_checkin.branch_options(user),
         "recent": pic_checkin.recent_of(str(user["id"])),
+        "today": pic_checkin.done_today(str(user["id"])),  # branches already checked in today
         "serverTime": datetime.now().astimezone().isoformat(),
     }
 

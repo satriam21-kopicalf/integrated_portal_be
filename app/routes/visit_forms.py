@@ -166,6 +166,24 @@ def monitoring(form: str, request: Request, dateFrom: Optional[date] = Query(Non
     return {"period": {"from": start.isoformat(), "to": end.isoformat()}, **vf.monitor(form, start, end, branches, userId)}
 
 
+@router.get("/api/monitoring/{form}/attendance")
+def monitoring_attendance(form: str, request: Request, month: str = Query(..., pattern=r"^\d{4}-\d{2}$"), branch: Optional[str] = None,
+                          group: Optional[str] = Query(None, max_length=60), user: dict = Depends(current_user)) -> dict:
+    """The attendance of a calendar month (28-31 days): per PIC the days with a visit and the days off."""
+    if form not in FORMS:
+        raise HTTPException(404, detail="Form tidak dikenal")
+    _mon_page(form, request, user)
+    y, m = (int(x) for x in month.split("-"))
+    if not 1 <= m <= 12 or not 2020 <= y <= 2100:
+        raise HTTPException(422, detail="Bulan tidak valid")
+    first = date(y, m, 1)
+    last = (date(y + (m == 12), m % 12 + 1, 1) - timedelta(days=1))
+    scoped = scoped_branch(branch)
+    branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
+    branches = branch_groups.narrow(branches, group)
+    return {"month": month, "first": first.isoformat(), "last": last.isoformat(), **vf.attendance(form, first, last, branches)}
+
+
 @router.get("/api/monitoring/{form}/visits/{visit_id}")
 def monitoring_visit(form: str, visit_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
     if form not in FORMS:

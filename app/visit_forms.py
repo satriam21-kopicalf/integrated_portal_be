@@ -23,6 +23,7 @@ T = "integration_portal.visit_form"
 TP = "integration_portal.visit_form_photo"
 RATINGS = ("UNDER", "MEET", "EXCEED")
 MAX_PHOTOS_PER_ITEM = 3
+DAILY_SINCE = date(2026, 10, 23)  # one visit per branch per day from here; days off are counted from this day
 
 
 class VisitError(CheckInError):
@@ -463,11 +464,12 @@ def photo(photo_id: str) -> Optional[dict]:
 
 def attendance(form: str, date_from: date, date_to: date, branches: Optional[list[str]]) -> dict:
     """Per PIC (an active account with the form page and a branch in scope): the days with a visit and the days off (no
-    visit at all that day) from the start of the period to today."""
+    visit at all that day), counted from DAILY_SINCE (the daily rule) and up to yesterday — today is no day off yet."""
     from app import access
     from app.utils import today as wib_today
-    end = min(date_to, wib_today())
-    days = [] if end < date_from else [date_from + timedelta(days=i) for i in range((end - date_from).days + 1)]
+    now = wib_today()
+    start, end = max(date_from, DAILY_SINCE), min(date_to, now)
+    days = [] if end < start else [start + timedelta(days=i) for i in range((end - start).days + 1)]
     users = db.fetch("""SELECT u.id, u.username, u.full_name, u.role,
                                 (SELECT array_agg(b.branch_code) FROM integration_portal.user_branch b WHERE b.user_id = u.id) AS codes
                          FROM integration_portal.user_account u WHERE u.is_active AND u.role <> 'superadmin'""")
@@ -483,7 +485,8 @@ def attendance(form: str, date_from: date, date_to: date, branches: Optional[lis
     for u in pics:
         mine = by.get(str(u["id"]), {})
         active = sum(1 for d in days if d.isoformat() in mine)
+        off = sum(1 for d in days if d < now and d.isoformat() not in mine)
         out.append({"id": str(u["id"]), "username": u["username"], "name": u["full_name"] or u["username"], "branches": len(u["codes"]),
-                    "active": active, "off": len(days) - active, "visits": sum(mine.values()), "days": mine})
+                    "active": active, "off": off, "visits": sum(mine.values()), "days": mine})
     out.sort(key=lambda x: (-x["off"], x["name"].lower()))
-    return {"days": [d.isoformat() for d in days], "pics": out}
+    return {"days": [d.isoformat() for d in days], "today": now.isoformat(), "since": DAILY_SINCE.isoformat(), "pics": out}

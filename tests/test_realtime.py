@@ -40,6 +40,8 @@ def test_origin_patterns():
     assert realtime.origin_allowed("https://portal.kopicalf.co.id")
     assert realtime.origin_allowed("https://integrated-portal-git-main-x.vercel.app")
     assert realtime.origin_allowed("http://localhost:3002")
+    assert realtime.origin_allowed("https://operations.kopicalf.co.id")
+    assert realtime.origin_allowed("https://fe-operations-git-main-x.vercel.app")
     assert not realtime.origin_allowed(None) and not realtime.origin_allowed("https://kopicalf.co.id.evil.com")
 
 

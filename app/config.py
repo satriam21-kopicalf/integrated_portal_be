@@ -23,10 +23,13 @@ class Settings(BaseSettings):
     # Server
     port: int = 8002
     cors_origins: str = "*"  # comma separated list
-    # browsers allowed to open the dashboard WebSocket (/ws); shell-style wildcards
+    # browsers allowed to open the dashboard WebSocket (/ws); shell-style wildcards. The portal and Kopi Calf
+    # Operations (fe-operations: the PIC / outlet app with the Dashboard, Sales and the forms)
     ws_allowed_origins: str = (
         "https://portal.kopicalf.co.id,https://integrated-portal*.vercel.app,"
-        "http://localhost:3002,http://127.0.0.1:3002"
+        "http://localhost:3002,http://127.0.0.1:3002,"
+        "https://operations.kopicalf.co.id,https://fe-operations*.vercel.app,"
+        "http://localhost:3003,http://127.0.0.1:3003"
     )
     timezone: str = "Asia/Jakarta"
 

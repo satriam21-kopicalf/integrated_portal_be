@@ -1,7 +1,7 @@
 """Stock opname in the Cost Control menu (D-51): every call goes to the kopicalf-platform stock-count API.
 
     /api/so/{path}     -> {SO_GATEWAY_URL}/api/{path}   (any method; JSON, photos and Excel files pass through)
-    GET /api/so-sites  (superadmin) stock-opname sites without an ESB branch (HUB WH, HUB CK, ...) for User Accounts
+    GET /api/so-sites  (superadmin) sites without an ESB branch (HUB WH, HUB CK, outlets outside ESB …) for User Accounts
 
 kopicalf-platform keeps the only implementation (lists, schedules, counting, photos, review, ESB export) in
 warehouse-backend /portal. This route signs who is asking (X-Portal-Assertion, HMAC-SHA256 with SO_GATEWAY_SECRET):
@@ -68,10 +68,14 @@ def assertion(user: dict, secret: str) -> str:
 
 @router.get("/api/so-sites")
 def so_sites(_user: dict = Depends(require_superadmin)) -> list[dict]:
-    """Sites to assign for stock opname that have no ESB branch code (HUB WH, HUB CK, warehouses, kitchens)."""
+    """Sites to assign that have no ESB branch: HUB WH, HUB CK, warehouses, kitchens and outlets outside ESB (e.g. Wasgee
+    Tea Lab, mapped by hand in kopicalf); outlets with an ESB branch come from /api/branches."""
     rows = db.fetch(
         """SELECT f.code, f.name, f.facility_type FROM kc_master.facility f
-           WHERE f.is_active AND f.facility_type NOT IN ('OUTLET', 'VIRTUAL', 'OFFICE')
+           WHERE f.is_active AND f.facility_type NOT IN ('VIRTUAL', 'OFFICE')
+             AND NOT EXISTS (SELECT 1 FROM kc_master.facility_esb_map m
+                             JOIN integration_esb.master_branches b ON b.company_code = m.company_code AND b.branch_id::text = m.esb_id
+                             WHERE m.facility_id = f.id)
            ORDER BY f.facility_type, f.name""")
     return [{"branch_code": r["code"], "branch_name": r["name"], "facility_type": r["facility_type"]} for r in rows]
 

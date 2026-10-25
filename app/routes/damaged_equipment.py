@@ -100,12 +100,12 @@ def _readable(request: Request, user: dict, row: Optional[dict]) -> dict:
 
 
 def _share_url(token: Optional[str]) -> Optional[str]:
-    return f"{get_settings().portal_url.rstrip('/')}/share/de/{token}" if token else None
+    return f"{get_settings().operations_url.rstrip('/')}/share/de/{token}" if token else None
 
 
 def _with_work_urls(out: dict) -> dict:
     for link in out.get("workLinks", []):
-        link["url"] = f"{get_settings().portal_url.rstrip('/')}/share/de-work/{link['token']}"
+        link["url"] = f"{get_settings().operations_url.rstrip('/')}/share/de-work/{link['token']}"
     return out
 
 

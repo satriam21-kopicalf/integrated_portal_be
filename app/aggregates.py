@@ -104,11 +104,11 @@ WITH line AS (
            COALESCE(NULLIF(split_part(mm.raw_data->>'categoryDetail', ' - ', 1), ''), {_txt("m->>'menuCategoryName'")}),
            COALESCE(NULLIF(split_part(mm.raw_data->>'categoryDetail', ' - ', 2), ''), upper(a.kind)),
            {_num("p->>'qty'")}, {_num("p->>'price'")} * {_num("p->>'qty'")}, {_num("p->>'discountValue'")}
-    FROM {TABLE_TRANSACTIONS} h,
-         jsonb_array_elements(COALESCE(h.raw_data->'salesMenus', '[]'::jsonb)) m,
-         LATERAL (VALUES ('package', m->'packages'), ('extra', m->'extras')) a(kind, items),
-         jsonb_array_elements(COALESCE(a.items, '[]'::jsonb)) p
-         LEFT JOIN {SCHEMA}.master_pos_menu mm ON mm.menu_id = p->>'menuID'
+    FROM {TABLE_TRANSACTIONS} h
+         CROSS JOIN LATERAL jsonb_array_elements(COALESCE(h.raw_data->'salesMenus', '[]'::jsonb)) m
+         CROSS JOIN LATERAL (VALUES ('package', m->'packages'), ('extra', m->'extras')) a(kind, items)
+         CROSS JOIN LATERAL jsonb_array_elements(COALESCE(a.items, '[]'::jsonb)) p
+         LEFT JOIN {SCHEMA}.master_pos_menu mm ON mm.menu_id = p->>'menuID' AND mm.company_code = h.company_code
     WHERE {DAY_FILTER} AND {TYPE_CONDITIONS['sales']} AND {active_line_sql('m')}
 )
 INSERT INTO {PORTAL}.agg_menu_daily

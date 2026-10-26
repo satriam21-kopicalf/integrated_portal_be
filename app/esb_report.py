@@ -83,11 +83,16 @@ _master: dict[str, Any] = {"loaded": 0.0, "menus": {}, "branches": {}, "users": 
 def _load_masters() -> tuple[dict, dict, dict]:
     with _master_lock:
         if time.monotonic() - _master["loaded"] > _MASTER_TTL:
+            # keyed "company|menuID": ESB reuses menu IDs across companies (Kopi Calf CALF, Wasgee Tea CALF7)
             menus = {}
-            for r in db.fetch(f"SELECT menu_id, category_name, raw_data FROM {SCHEMA}.master_pos_menu"):
+            for r in db.fetch(f"SELECT company_code, menu_id, category_name, raw_data FROM {SCHEMA}.master_pos_menu"):
                 detail = (r["raw_data"] or {}).get("categoryDetail") or ""
                 category, _, sub = detail.partition(" - ")
-                menus[str(r["menu_id"])] = (category or r["category_name"] or "", sub)
+                menus[f"{r['company_code']}|{r['menu_id']}"] = (category or r["category_name"] or "", sub)
+            _master["branch_company"] = {
+                r["branch_code"]: r["company_code"] for r in db.fetch(
+                    f"SELECT branch_code, COALESCE(company_code, 'CALF') AS company_code FROM {SCHEMA}.master_branches "
+                    "WHERE COALESCE(branch_code, '') <> ''")}
             branches = {
                 r["branch_code"]: (r["branch_name"], r["brand"], r["city"], r["area"])
                 for r in db.fetch(
@@ -206,9 +211,10 @@ def report_rows(header: dict, menus: dict, branches: dict, users: dict) -> list[
     waiter = _waiter(header, users)
 
     rows = []
+    company = _master.get("branch_company", {}).get(header.get("branchCode"), "CALF")
     for (suffix, item, parent), (qty, price, subtotal, discount, service, tax, vat, total) in zip(lines, amounts):
         if suffix:
-            category, detail = menus.get(str(item.get("menuID")), (parent.get("menuCategoryName"), ""))
+            category, detail = menus.get(f"{company}|{item.get('menuID')}", (parent.get("menuCategoryName"), ""))
         else:
             category, detail = item.get("menuCategoryName"), item.get("menuCategoryDetailName")
         row_bill_discount = bill_discount * subtotal / subtotal_sum if subtotal_sum else 0.0

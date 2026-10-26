@@ -66,7 +66,11 @@ SALES = [
     sale("S-000", "B-0", "2026-09-29", "Finished", [menu("Tea", 2, 10000)]),
 ]
 MASTERS = {
-    "menus": [{"menu_id": "139", "category_name": "EXTRA", "raw_data": {"categoryDetail": "EXTRA - LEVEL SUGAR"}}],
+    # the same menu ID in another company (ESB reuses IDs): never used for a Kopi Calf sale
+    "menus": [{"company_code": "CALF", "menu_id": "139", "category_name": "EXTRA", "raw_data": {"categoryDetail": "EXTRA - LEVEL SUGAR"}},
+              {"company_code": "CALF7", "menu_id": "139", "category_name": "TOPPING", "raw_data": {"categoryDetail": "TOPPING - BOBA"}}],
+    # branch -> company (Kopi Calf outlets CALF, Wasgee Tea CALF7)
+    "companies": {"CCI01": "CALF", "CCI04": "CALF", "CTG54": "CALF", "OLD01": "CALF", "TGP17": "CALF", "WSG02": "CALF7"},
     "branches": [{"branch_code": "CCI01", "branch_name": "Kopi Calf Supratman Bandung", "brand": "Kopi Calf",
                   "city": "Bandung, Kota", "area": None},
                  {"branch_code": "TGP17", "branch_name": "Kopi Calf To Go Pamulang", "brand": "Kopi Calf",
@@ -99,16 +103,23 @@ class FakeDB:
         self.queries.append((query, params))
         if self.fail:
             raise RuntimeError("database is down")
+        if "COALESCE(company_code, %(main)s) = %(c)s" in query:  # app/scope.py company_branches
+            return [{"branch_code": b} for b, c in MASTERS["companies"].items() if c == params["c"]]
         if "integration_portal." in query:  # aggregates: none in the fake, so summaries read raw rows
             return []
-        if "master_pos_menu" in query:
-            return MASTERS["menus"]
+        if "COALESCE(company_code, 'CALF') AS company_code" in query:  # esb_report branch -> company
+            return [{"branch_code": b, "company_code": c} for b, c in MASTERS["companies"].items()]
+        if "WITH c AS" in query:  # /api/branches
+            return [{"branch_code": "CCI01", "branch_name": "Kopi Calf Supratman Bandung", "company_code": "CALF",
+                     "brand": "Kopi Calf", "count": 2},
+                    {"branch_code": "WSG02", "branch_name": "Wasgee Tea Lab - Cempaka Putih", "company_code": "CALF7",
+                     "brand": "Wasgee Tea", "count": 1}]
         if "master_branch_attributes" in query:
             return MASTERS["branches"]
+        if "master_pos_menu" in query:
+            return MASTERS["menus"]
         if "master_pos_users" in query:
             return MASTERS["users"]
-        if "WITH c AS" in query:  # /api/branches
-            return [{"branch_code": "CCI01", "branch_name": "Kopi Calf Supratman Bandung", "count": 2}]
         if "WHERE branch_code = ANY(%s)" in query:
             return [b for b in MASTERS["branches"] if b["branch_code"] in params[0]]
         if "transactions_pos_sales_items" in query:

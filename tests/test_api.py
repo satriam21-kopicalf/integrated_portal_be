@@ -6,7 +6,7 @@ from app.esb_report import REPORT_HEADERS, report_rows
 from tests.conftest import SALES
 
 COL = {n: i for i, n in enumerate(REPORT_HEADERS)}
-MENUS = {"139": ("EXTRA", "LEVEL SUGAR")}
+MENUS = {"CALF|139": ("EXTRA", "LEVEL SUGAR"), "CALF7|139": ("TOPPING", "BOBA")}
 BRANCHES = {"CCI01": ("Kopi Calf Supratman Bandung", "Kopi Calf", "Bandung, Kota", None)}
 
 
@@ -114,8 +114,16 @@ def test_summary_deductions(client):
 
 
 def test_branches(client):
-    assert client.get("/api/branches").json() == [
-        {"branch_code": "CCI01", "branch_name": "Kopi Calf Supratman Bandung", "count": 2}]
+    # the Kopi Calf outlets by default, one company per request (brands never mix); "all" for the account settings
+    kopi_calf = {"branch_code": "CCI01", "branch_name": "Kopi Calf Supratman Bandung", "company_code": "CALF",
+                 "brand": "Kopi Calf", "count": 2}
+    wasgee = {"branch_code": "WSG02", "branch_name": "Wasgee Tea Lab - Cempaka Putih", "company_code": "CALF7",
+              "brand": "Wasgee Tea", "count": 1}
+    assert client.get("/api/branches").json() == [kopi_calf]
+    assert client.get("/api/branches?company=CALF7").json() == [wasgee]
+    assert client.get("/api/branches?company=all").json() == [kopi_calf, wasgee]
+    assert client.get("/api/branches/companies").json() == [
+        {"code": "CALF", "name": "Kopi Calf", "branches": 1}, {"code": "CALF7", "name": "Wasgee Tea", "branches": 1}]
 
 
 def test_transaction_detail_and_404(client):

@@ -39,6 +39,7 @@ from app.esb_report import (REPORT_COLUMN_WIDTHS, REPORT_HEADERS, TYPE_CONDITION
                             iter_report_rows)
 from app.daily_report import DAILY_COLUMN_WIDTHS, DAILY_HEADERS, daily_rows
 from app.menu_report import MENU_COLUMN_WIDTHS, MENU_HEADERS, menu_rows
+from app.scope import COMPANY_NAMES, MAIN_COMPANY
 from app.utils import parse_branches
 from app.xlsx_stream import StreamingXlsxWriter
 
@@ -157,12 +158,18 @@ MENU_MAX_DAYS = 62
 MENU_MAX_DAYS_GSHEET = 31  # 10 million cells per Google Sheet: ~500k rows of 20 columns
 
 
-def _file_name(date_from: date, date_to: date, branch: Optional[str], tx_type: str, report: str) -> str:
+def _file_name(date_from: date, date_to: date, branch: Optional[str], tx_type: str, report: str,
+               company: Optional[str] = None) -> str:
+    """`company`: every branch of that company (nothing narrowed by hand) - the brand instead of a branch count; the
+    main company (Kopi Calf) keeps the plain name of all branches."""
     name = f"{REPORTS[report][1]}_{date_from.isoformat()}_to_{date_to.isoformat()}"
     if tx_type != "sales":
         name += f"_{tx_type}"
     codes = parse_branches(branch)
-    if len(codes) == 1:
+    if company:
+        if company != MAIN_COMPANY:
+            name += "_" + re.sub(r"[^A-Za-z0-9]+", "_", COMPANY_NAMES.get(company, company)).strip("_")
+    elif len(codes) == 1:
         name += "_" + re.sub(r"[^A-Za-z0-9]+", "_", codes[0]).strip("_")
     elif codes:
         name += f"_{len(codes)}_branches"
@@ -190,7 +197,7 @@ FORMATS = ("xlsx", "gsheet")
 
 
 def create_job(date_from: date, date_to: date, branch: Optional[str], tx_type: str = "sales",
-               report: str = "detail", owner: Optional[dict] = None, fmt: str = "xlsx") -> dict:
+               report: str = "detail", owner: Optional[dict] = None, fmt: str = "xlsx", company: Optional[str] = None) -> dict:
     cleanup_old_exports()
     job = {
         "id": uuid.uuid4().hex,
@@ -216,7 +223,8 @@ def create_job(date_from: date, date_to: date, branch: Optional[str], tx_type: s
         "headers": 0,
         "items": 0,
         "sheets": 0,
-        "fileName": _file_name(date_from, date_to, branch, tx_type, report),
+        "company": company,
+        "fileName": _file_name(date_from, date_to, branch, tx_type, report, company),
         "fileSize": None,
         "error": None,
         "createdAt": _now(),
@@ -325,9 +333,13 @@ def _day_headers(day: date, branch: Optional[str], tx_type: str) -> Iterator[dic
     )
 
 
-def _branch_name(code: Optional[str]) -> str:
-    if not code:
+def _branch_name(code: Optional[str], company: Optional[str] = None) -> str:
+    """The branches of a report: "All" (every Kopi Calf outlet), "All Wasgee Tea" (every outlet of another company),
+    else their names."""
+    if not code or company == MAIN_COMPANY:
         return "All"
+    if company:
+        return f"All {COMPANY_NAMES.get(company, company)}"
     codes = parse_branches(code)
     rows = db.fetch(
         f"SELECT DISTINCT ON (branch_code) branch_code, branch_name FROM {SCHEMA}.master_branches "
@@ -348,7 +360,7 @@ def _preamble(job: dict, date_from: Optional[str] = None, date_to: Optional[str]
         [],
         ["Generated", datetime.now().strftime("%d-%m-%Y %H:%M:%S")],
         ["Period", f"{d(date_from or job['dateFrom'])} - {d(date_to or job['dateTo'])}"],
-        ["Branch", _branch_name(job["branch"])],
+        ["Branch", _branch_name(job["branch"], job.get("company"))],
         ["Sales Type", TYPE_LABELS[job["type"]]],
         *([["Date Group Mode", "Daily"]] if daily else []),
         ["Generated Username", job.get("ownerName") or "Integrated Portal"],  # who exported it
@@ -365,7 +377,7 @@ def _summary_rows(job: dict, date_from: Optional[str] = None, date_to: Optional[
     header = ["Date", "Gross Subtotal", "Void & Cancelled", "Other Cost (CUPPING, WASTE, ...)",
               "Open Bills", "Sales Subtotal", "Sales Nett Sales", "Sales Transactions"]
     rows = [["Ringkasan Penjualan"], ["Period", f"{date_from} - {date_to}"],
-            ["Branch", _branch_name(job["branch"])], [], header]
+            ["Branch", _branch_name(job["branch"], job.get("company"))], [], header]
     for day in s["days"] + [{"date": "TOTAL", **s["totals"]}]:
         rows.append([day["date"], day["gross"]["subtotal"], -day["void"]["subtotal"], -day["other_cost"]["subtotal"],
                      -day["open"]["subtotal"], day["sales"]["subtotal"], day["sales"]["nettSales"],

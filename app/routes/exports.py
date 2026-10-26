@@ -15,7 +15,7 @@ from app import activity, exports, gsheets
 from app.config import get_settings
 from app.esb_report import TYPE_CONDITIONS
 from app.routes.auth import current_user
-from app.scope import scoped_branch
+from app.scope import company_scope, is_whole_scope, scoped_branch
 from app.utils import resolve_date_range, today
 
 router = APIRouter(prefix="/api/exports", tags=["exports"])
@@ -82,7 +82,10 @@ def create_export(req: ExportRequest, request: Request, user: dict = Depends(cur
                       "(batas 10 juta sel); pilih Excel untuk periode lebih panjang", 422)
     if fmt == "gsheet" and not gsheets.enabled():
         return _error("Export ke Google Sheets belum dikonfigurasi di server", 422)
-    job = exports.create_job(date_from, date_to, scoped_branch(req.branch), tx_type, report, user, fmt)
+    branch = scoped_branch(req.branch)
+    # every branch of the company of the request: the file is named after the brand, not a branch count
+    company = company_scope.get() if is_whole_scope(branch) else None
+    job = exports.create_job(date_from, date_to, branch, tx_type, report, user, fmt, company=company)
     activity.record("export.create", user=user, request=request, page="/sales",
                     summary=f"Export {exports.REPORTS[report][0]} {date_from:%d-%m-%Y} s/d {date_to:%d-%m-%Y}"
                     + (" ke Google Sheets" if fmt == "gsheet" else ""),

@@ -32,7 +32,7 @@ from app.routes.damaged_equipment import router as damaged_equipment_router
 from app.routes.visit_forms import router as visit_forms_router
 from app.routes.branch_groups import router as branch_groups_router
 from app.routes.rating import router as rating_router
-from app.scope import branch_scope
+from app.scope import branch_scope, company_of_request, company_scope
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("integrated_portal_be")
@@ -75,8 +75,10 @@ app.add_middleware(
 
 @app.middleware("http")
 async def scope_to_user_branches(request: Request, call_next):
-    """Role "user": every data endpoint only sees the user's branches (app/scope.py)."""
+    """Role "user": every data endpoint only sees the user's branches; the sales endpoints see one company (brand)
+    at a time, `?company=` (app/scope.py)."""
     token = None
+    company_token = company_scope.set(company_of_request(request.url.path, request.query_params.get("company")))
     if request.url.path.startswith("/api/") and not request.url.path.startswith("/api/auth/"):
         user = await run_in_threadpool(session_lookup, request)
         if user and user["role"] not in accounts.GLOBAL_ROLES:
@@ -86,6 +88,7 @@ async def scope_to_user_branches(request: Request, call_next):
     finally:
         if token is not None:
             branch_scope.reset(token)
+        company_scope.reset(company_token)
 
 
 @app.middleware("http")

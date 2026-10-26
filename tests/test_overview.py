@@ -87,7 +87,7 @@ def fake_sales_rows(f, start, end, group=(), select="", table=ov.DAILY, tx_type=
 def fake_hourly_rows(f):
     out = {}
     for r in HOURLY:
-        if f.start <= r["sales_date"] <= f.end and (not f.branch or r["branch_code"] == f.branch)                 and (not f.channels or r["channel"] in f.channels):
+        if f.start <= r["sales_date"] <= f.end and (not f.branch or r["branch_code"] in f.branch.split(","))                 and (not f.channels or r["channel"] in f.channels):
             o = out.setdefault((r["sales_date"].isoweekday(), r["hour"]),
                                {"dow": r["sales_date"].isoweekday(), "hour": r["hour"], "bills": 0, "subtotal": 0})
             o["bills"] += r["bills"]

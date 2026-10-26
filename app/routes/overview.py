@@ -39,7 +39,7 @@ from fastapi.responses import JSONResponse
 from app import database as db
 from app.config import get_settings
 from app.database import SCHEMA
-from app.scope import allowed_branches, scoped_branch
+from app.scope import MAIN_COMPANY, allowed_branches, company_scope, is_whole_scope, scoped_branch
 from app.utils import TTLCache, data_version, parse_branches, today
 
 # the comparison period of the request (compareFrom / compareTo), read by parse_filters
@@ -573,8 +573,10 @@ def menu_rows(f: Filters) -> list[dict]:
             )
             SELECT t.menu_id, t.kind, COALESCE(m.menu_name, t.name) AS menu_name, t.category, t.category_detail,
                    t.bills, t.qty, t.subtotal, t.discount
-            FROM t LEFT JOIN {SCHEMA}.master_pos_menu m ON m.menu_id = t.menu_id""",
-        params,
+            FROM t LEFT JOIN LATERAL (
+                SELECT x.menu_name FROM {SCHEMA}.master_pos_menu x WHERE x.menu_id = t.menu_id
+                ORDER BY (x.company_code = %(menu_company)s) DESC LIMIT 1) m ON true""",
+        {**params, "menu_company": company_scope.get() or MAIN_COMPANY},
     )
 
 
@@ -968,7 +970,7 @@ def build_hourly_compare(f: Filters, mode: str, compare_from: Optional[str], com
         codes = [c for c in codes if c != "-"]
         if not codes:
             # the selected branches, else the busiest branches of the period
-            selected = parse_branches(f.branch)
+            selected = [] if is_whole_scope(f.branch) else parse_branches(f.branch)
             codes = selected if len(selected) >= 2 else [
                 b["branchCode"] for b in sorted(build_branches(f, "day")["branches"], key=lambda b: -b["bills"]) if b["bills"]][:5]
         codes = codes[:MAX_COMPARE_BRANCHES]

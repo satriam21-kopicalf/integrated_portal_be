@@ -15,7 +15,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from app import activity, gmaps
+from app import activity, gmaps, grab
 from app.access import deny, has_page
 from app.routes.auth import current_user
 from app.scope import allowed_branches
@@ -89,6 +89,48 @@ def google_maps_sync(request: Request, user: dict = Depends(current_user)) -> di
     activity.record("system.gmaps_sync", user=user, request=request, page="/rating/google-maps",
                     summary="Sinkronisasi Google Maps dijalankan")
     return {"started": True, "syncing": True}
+
+
+class SessionIn(BaseModel):
+    cookie: str = Field(min_length=20, max_length=20000)
+    csrf: Optional[str] = Field(None, max_length=200)
+
+
+@router.get("/api/rating/grabfood")
+def grabfood(request: Request, user: dict = Depends(current_user)) -> dict:
+    """Page rating.grabfood: outlet open/close status, official rating and review summary, per outlet in scope."""
+    if not has_page(user, "rating.grabfood"):
+        deny(request, user)
+    return {"ready": True, "source": "grabfood", "canEdit": user.get("role") in EDITORS,
+            "session": grab.session_info() if user.get("role") in EDITORS else None,
+            "data": grab.overview(allowed_branches())}
+
+
+@router.get("/api/rating/grabfood/{branch}/reviews")
+def grabfood_reviews(branch: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    if not has_page(user, "rating.grabfood"):
+        deny(request, user)
+    return {"data": grab.reviews(branch, allowed_branches())}
+
+
+@router.put("/api/rating/grabfood/session")
+def grabfood_session(body: SessionIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    """Super admin / Cost Control refresh the merchant session cookie (pasted from the Grab portal)."""
+    _grab_editor(request, user)
+    try:
+        result = grab.set_session(body.cookie, body.csrf, user)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    activity.record("system.grab_session", user=user, request=request, page="/rating/grabfood",
+                    summary="Sesi Grab Merchant diperbarui")
+    return result
+
+
+def _grab_editor(request: Request, user: dict) -> None:
+    if not has_page(user, "rating.grabfood"):
+        deny(request, user)
+    if user.get("role") not in EDITORS:
+        deny(request, user)
 
 
 @router.get("/api/rating/{source}")

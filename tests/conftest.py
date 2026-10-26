@@ -105,6 +105,8 @@ class FakeDB:
             raise RuntimeError("database is down")
         if "COALESCE(company_code, %(main)s) = %(c)s" in query:  # app/scope.py company_branches
             return [{"branch_code": b} for b, c in MASTERS["companies"].items() if c == params["c"]]
+        if "grab_" in query:  # GrabFood monitoring tables: empty in the fake
+            return []
         if "integration_portal." in query:  # aggregates: none in the fake, so summaries read raw rows
             return []
         if "COALESCE(company_code, 'CALF') AS company_code" in query:  # esb_report branch -> company

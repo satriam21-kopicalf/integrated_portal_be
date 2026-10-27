@@ -194,16 +194,28 @@ REVIEW_COLS = f"""gr.review_id, gr.merchant_id, gr.created_at, gr.rating, gr.des
     LEFT JOIN {SCHEMA}.master_branches b ON b.branch_code = s.branch_code"""
 
 
+REVIEW_SORTS = {
+    "newest": "gr.created_at DESC, gr.review_id", "oldest": "gr.created_at, gr.review_id",
+    "lowest": "gr.rating NULLS LAST, gr.created_at DESC, gr.review_id", "highest": "gr.rating DESC NULLS LAST, gr.created_at DESC, gr.review_id",
+}
+
+
 def reviews(scope, *, merchant: Optional[str] = None, branch: Optional[str] = None, ratings: Optional[list[int]] = None,
             photo: Optional[bool] = None, replied: Optional[bool] = None, q: Optional[str] = None,
-            date_from: Optional[date] = None, date_to: Optional[date] = None, page: int = 1, size: int = 20) -> dict:
-    """Every review in scope, newest first, filtered and paged: {data, total, page, size, counts}."""
+            date_from: Optional[date] = None, date_to: Optional[date] = None, page: int = 1, size: int = 20,
+            city: Optional[str] = None, text: Optional[bool] = None, sort: str = "newest") -> dict:
+    """Every review in scope, filtered and paged: {data, total, page, size, counts}. sort: newest (default), oldest,
+    lowest (stars), highest; city: the outlet's city on Grab; text: only reviews with (True) / without (False) words."""
     cond, params = _scope_sql(scope)
     where, args = [f"TRUE {cond}"], list(params)
     if merchant:
         where.append("gr.merchant_id = %s"); args.append(merchant)
     if branch:
         where.append("s.branch_code = %s"); args.append(branch)
+    if city:
+        where.append("s.city_name = %s"); args.append(city)
+    if text is not None:
+        where.append("COALESCE(btrim(gr.description), '') <> ''" if text else "COALESCE(btrim(gr.description), '') = ''")
     if ratings:
         where.append("gr.rating = ANY(%s)"); args.append([int(x) for x in ratings])
     if photo is not None:
@@ -227,7 +239,7 @@ def reviews(scope, *, merchant: Optional[str] = None, branch: Optional[str] = No
                    round(avg(gr.rating), 2) AS avg
             FROM {SCHEMA}.grab_review gr JOIN {SCHEMA}.grab_store s ON s.merchant_id = gr.merchant_id WHERE {sql_where}""",
         args) or {}
-    rows = db.fetch(f"SELECT {REVIEW_COLS} WHERE {sql_where} ORDER BY gr.created_at DESC, gr.review_id LIMIT %s OFFSET %s",
+    rows = db.fetch(f"SELECT {REVIEW_COLS} WHERE {sql_where} ORDER BY {REVIEW_SORTS.get(sort, REVIEW_SORTS['newest'])} LIMIT %s OFFSET %s",
                     [*args, size, (page - 1) * size])
     return {"data": [_review(r) for r in rows], "total": head.get("total") or 0, "page": page, "size": size,
             "counts": {"withPhoto": head.get("with_photo") or 0, "unreplied": head.get("unreplied") or 0,

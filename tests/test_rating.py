@@ -199,3 +199,13 @@ def test_grabfood_opening_hours_and_minutes_closed():
     assert v["shouldBeOpen"] is True and v["closedInHours"] is True and v["closedMinutesToday"] == 150
     assert v["today"] == [{"start": "08:00", "end": "20:00"}] and len(v["week"]) == 7
     assert _hours_view(None, [], False, day)["shouldBeOpen"] is None
+
+
+def test_grabfood_reviews_city_text_and_sort(fake_db):
+    from app import grab
+    grab.reviews(None, city="Bandung", text=True, sort="lowest")
+    sql, args = fake_db.queries[-1]
+    assert "s.city_name = %s" in sql and "Bandung" in args and "btrim(gr.description), '') <> ''" in sql
+    assert "ORDER BY gr.rating NULLS LAST" in sql
+    grab.reviews(None, sort="bad")  # an unknown sort falls back to newest
+    assert "ORDER BY gr.created_at DESC" in fake_db.queries[-1][0]

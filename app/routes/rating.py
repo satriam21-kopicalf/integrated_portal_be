@@ -129,12 +129,15 @@ def grabfood_reviews(request: Request, merchant: Optional[str] = Query(None, max
                      photo: Optional[bool] = None, replied: Optional[bool] = None, q: Optional[str] = Query(None, max_length=120),
                      date_from: Optional[date] = Query(None, alias="from"), date_to: Optional[date] = Query(None, alias="to"),
                      page: int = Query(1, ge=1, le=10000), size: int = Query(20, ge=1, le=100),
+                     city: Optional[str] = Query(None, max_length=80), text: Optional[bool] = None,
+                     sort: str = Query("newest", pattern=r"^(newest|oldest|lowest|highest)$"),
                      user: dict = Depends(current_user)) -> dict:
-    """Every GrabFood review in scope, newest first; filters: outlet, stars (e.g. 1,2), with photo, replied, text, period."""
+    """Every GrabFood review in scope; filters: outlet, city, stars (e.g. 1,2), with photo, with words, replied, text
+    search, period; sort newest / oldest / lowest / highest."""
     _grab_page(request, user)
     return grab.reviews(allowed_branches(), merchant=merchant, branch=branch,
                         ratings=[int(x) for x in rating.split(",")] if rating else None, photo=photo, replied=replied, q=q,
-                        date_from=date_from, date_to=date_to, page=page, size=size)
+                        date_from=date_from, date_to=date_to, page=page, size=size, city=city, text=text, sort=sort)
 
 
 @router.get("/api/rating/grabfood/reviews/{review_id}")

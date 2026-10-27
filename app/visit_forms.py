@@ -30,91 +30,181 @@ class VisitError(CheckInError):
     """A visit refused with a message for the PIC (HTTP 422)."""
 
 
-def _items(prefix: str, labels: list[str]) -> list[dict]:
-    return [{"key": f"{prefix}.{i}", "no": i, "label": label, "kind": "rating"} for i, label in enumerate(labels, start=1)]
+REQ, OPT = "required", "optional"
 
 
-PREMIX = ["Premix Premium", "Premix Regular", "Premix Premium Oat", "Premix Smooth", "Premix Magic", "Premix Jefferson",
-          "Premix Coklat", "Premix Tea Series", "Premix Matcha", "Premix Taro", "Premix Dirty & Ice White", "Colbrew Liquid",
-          "Cream Based", "Creamer Liquid", "Dimsum", "Roti Kukus", "Puding", "Side Dish Lainnya", "Maincourse"]
+def _it(prefix: str, no: int, label: str, label_en: str, *, kind: str = "rating", required: bool = True,
+        required_for: Optional[list[str]] = None, note: Optional[str] = None, photo: Optional[str] = None, **extra) -> dict:
+    """One item. required: it must be rated before sending (required_for: only at the outlets of these branch groups,
+    Monitoring → Branch groups). note / photo: what a rated required item needs (both by default); an optional item
+    needs neither."""
+    item = {"key": f"{prefix}.{no}", "no": no, "label": label, "labelEn": label_en, "kind": kind, "required": required,
+            "note": note or REQ, "photo": photo or REQ, **extra}
+    if required_for:
+        item["requiredFor"] = required_for
+    return item
+
+
+def _list(prefix: str, rows: list[tuple]) -> list[dict]:
+    """[(label, label_en, options?), ...] numbered from 1."""
+    return [_it(prefix, i, r[0], r[1], **(r[2] if len(r) > 2 else {})) for i, r in enumerate(rows, start=1)]
+
+
+def _sec(key: str, title: str, title_en: str, items: list[dict]) -> dict:
+    return {"key": key, "title": title, "titleEn": title_en, "items": items}
+
+
+def _grp(key: str, title: str, title_en: str, subtitle: str, subtitle_en: str, sections: list[dict]) -> dict:
+    return {"key": key, "title": title, "titleEn": title_en, "subtitle": subtitle, "subtitleEn": subtitle_en, "sections": sections}
+
+
+O = {"required": False}  # optional item
+
+# Stock preparation and shelf-life labels (2026-10-27, Operations): the premixes and liquids below are required at every
+# outlet (CTG, CTGP, CCI); the rest optional.
+PREMIX = [
+    ("Premix Premium", "Premix Premium", {}), ("Premix Regular", "Premix Regular", {}),
+    ("Premix Premium Oat", "Premix Premium Oat", {}), ("Premix Smooth", "Premix Smooth", {}),
+    ("Premix Magic", "Premix Magic", {}), ("Premix Jefferson", "Premix Jefferson", O),
+    ("Premix Coklat", "Premix Chocolate", {}), ("Premix Tea Series", "Premix Tea Series", {}),
+    ("Premix Matcha", "Premix Matcha", {}), ("Premix Taro", "Premix Taro", O),
+    ("Premix Dirty & Ice White", "Premix Dirty & Ice White", O), ("Cold Brew Liquid", "Cold Brew Liquid", {}),
+    ("Cream Base", "Cream Base", {}), ("Creamer Liquid", "Creamer Liquid", {}),
+    ("Dimsum", "Dim Sum", O), ("Roti Kukus", "Steamed Bun", O), ("Puding", "Pudding", O),
+    ("Side Dish Lainnya", "Other Side Dishes", O), ("Maincourse", "Main Course", O),
+]
+EVIDENCE_NOTE_ONLY = {"note": REQ, "photo": OPT}  # a note is required, the photo is not
 
 DEFINITIONS: dict[str, dict] = {
     "product": {
         "title": "Monitoring Product",
+        "titleEn": "Monitoring Product",
         "groups": [
-            {"key": "availability", "title": "Availability", "subtitle": "Ketersediaan dan Kesesuaian Produk", "sections": [
-                {"key": "stok-preparation", "title": "Stok Preparation", "items": _items("stok-preparation", [f"Ketersediaan Stok {x}" for x in PREMIX])},
-                {"key": "shelf-life", "title": "Shelf Life Label", "items": _items("shelf-life", [f"Shelf Life Label {x}" for x in PREMIX])},
-                {"key": "espresso-beans", "title": "Espresso dan Beans", "items": _items("espresso-beans", [
-                    "Ketersediaan Stok Espresso Premium", "Ketersediaan Stok Espresso Regular", "Ketersediaan Stok Beans Premium",
-                    "Ketersediaan Stok Beans Regular", "Ketersediaan Stok Beans Cold Brew", "Ketersediaan Stok Beans Specialty"])},
-                {"key": "bahan-penolong", "title": "Bahan Penolong", "items": _items("bahan-penolong", [
-                    "Ketersediaan Cup Es", "Ketersediaan Cup Frosted", "Ketersediaan Cup Jefferson", "Ketersediaan Paper Cup",
-                    "Ketersediaan Es Batu", "Ketersediaan Es Batu dalam Klip", "Ketersediaan Can Dan Tutup Can (Sudah Stiker)",
-                    "Ketersediaan Botol Dan Tutup Botol (Sudah Stiker)", "Ketersediaan Straw 5mm", "Ketersediaan Straw 6mm",
-                    "Ketersediaan Lunch Box S", "Ketersediaan Lunch Box M", "Ketersediaan Set Spork", "Ketersediaan Greeting Card",
-                    "Ketersediaan Beans Card Specialty", "Ketersediaan Plastik Take Away"])},
-                {"key": "bahan-baku", "title": "Bahan Baku", "items": _items("bahan-baku", [
-                    "Kesesuaian Form Request Bahan Baku", "Kesesuaian Form Request FM, Oat Milk, Ice Cream, Brookfarm",
-                    "Kesesuaian Form Request Ice Hot, Rich Gold", "Kesesuaian Form Request Bahan Baku Maincourse",
-                    "Kesesuaian Form Request Bahan Baku Side Dishes"])},
-            ]},
-            {"key": "kualitas-produk", "title": "Kualitas Produk", "subtitle": "5 Senses - Taste", "sections": [
-                {"key": "kualitas-produk", "title": "Kualitas Produk", "items": _items("kualitas-produk", [
-                    "Cupping Premium", "Cupping Regular", "Cupping All Premix", "Cupping All Cream & Foam", "Cupping Menu Specialty",
-                    "Test Food WIP Side Dish & Main Course", "Test Food Menu Side Dish", "Test Food Menu Main Course",
-                    "Handling & Treatment Product"])},
-            ]},
+            _grp("availability", "Availability", "Availability", "Ketersediaan dan Kesesuaian Produk", "Product availability and conformity", [
+                _sec("stok-preparation", "Stock Preparation", "Stock Preparation",
+                     _list("stok-preparation", [(f"Ketersediaan Stok {i}", f"{e} stock available", o) for i, e, o in PREMIX])),
+                _sec("shelf-life", "Shelf Life Label", "Shelf Life Label",
+                     _list("shelf-life", [(f"Shelf Life Label {i}", f"{e} shelf-life label", o) for i, e, o in PREMIX])),
+                # Beans Specialty: required at the CTGP and CCI outlets only (2026-10-27)
+                _sec("espresso-beans", "Espresso dan Beans", "Espresso and Beans", _list("espresso-beans", [
+                    ("Ketersediaan Stok Espresso Premium", "Espresso Premium stock available"),
+                    ("Ketersediaan Stok Espresso Regular", "Espresso Regular stock available"),
+                    ("Ketersediaan Stok Beans Premium", "Beans Premium stock available", O),
+                    ("Ketersediaan Stok Beans Regular", "Beans Regular stock available", O),
+                    ("Ketersediaan Stok Beans Cold Brew", "Cold Brew beans stock available"),
+                    ("Ketersediaan Stok Beans Specialty", "Specialty beans stock available", {"required": False, "required_for": ["CTGP", "CCI"]}),
+                ])),
+                _sec("bahan-penolong", "Bahan Penolong", "Supporting Materials", _list("bahan-penolong", [
+                    ("Ketersediaan Cup Es", "Iced cups available"), ("Ketersediaan Cup Frosted", "Frosted cups available"),
+                    ("Ketersediaan Cup Jefferson", "Jefferson cups available", O), ("Ketersediaan Paper Cup", "Paper cups available"),
+                    ("Ketersediaan Es Batu", "Ice cubes available"), ("Ketersediaan Es Batu dalam Klip", "Ice cubes in clip bags available"),
+                    ("Ketersediaan Can Dan Tutup Can (Sudah Stiker)", "Cans and can lids available (stickered)"),
+                    ("Ketersediaan Botol Dan Tutup Botol (Sudah Stiker)", "Bottles and bottle caps available (stickered)"),
+                    ("Ketersediaan Straw 5mm", "5 mm straws available"), ("Ketersediaan Straw 6mm", "6 mm straws available", O),
+                    ("Ketersediaan Lunch Box S", "Lunch boxes S available", O), ("Ketersediaan Lunch Box M", "Lunch boxes M available", O),
+                    ("Ketersediaan Set Spork", "Spork sets available", O), ("Ketersediaan Greeting Card", "Greeting cards available"),
+                    ("Ketersediaan Beans Card Specialty", "Specialty beans cards available", O),
+                    ("Ketersediaan Plastik Take Away", "Take-away bags available"),
+                ])),
+                _sec("bahan-baku", "Bahan Baku", "Raw Materials", _list("bahan-baku", [
+                    ("Kesesuaian Form Request Bahan Baku", "Raw material request form matches"),
+                    ("Kesesuaian Form Request FM, Oat Milk, Ice Cream, Brookfarm", "Request form FM, Oat Milk, Ice Cream, Brookfarm matches"),
+                    ("Kesesuaian Form Request Ice Hot, Rich Gold", "Request form Ice Hot, Rich Gold matches", O),
+                    ("Kesesuaian Form Request Bahan Baku Maincourse", "Main course raw material request form matches", O),
+                    ("Kesesuaian Form Request Bahan Baku Side Dishes", "Side dish raw material request form matches"),
+                ])),
+            ]),
+            _grp("kualitas-produk", "Kualitas Produk", "Product Quality", "5 Indra - Rasa", "5 Senses - Taste", [
+                _sec("kualitas-produk", "Kualitas Produk", "Product Quality", _list("kualitas-produk", [
+                    ("Cupping Premium", "Cupping Premium"), ("Cupping Regular", "Cupping Regular"),
+                    ("Cupping All Premix", "Cupping all premixes"), ("Cupping All Cream & Foam", "Cupping all cream & foam"),
+                    ("Cupping Menu Specialty", "Cupping specialty menu"),
+                    ("Test Food WIP Side Dish & Main Course", "Test food WIP side dish & main course", O),
+                    ("Test Food Menu Side Dish", "Test food side dish menu", O),
+                    ("Test Food Menu Main Course", "Test food main course menu", O),
+                    ("Handling & Treatment Product", "Product handling & treatment"),
+                ])),
+            ]),
         ],
     },
     "outlet": {
         "title": "Monitoring Outlet",
+        "titleEn": "Monitoring Outlet",
         "groups": [
-            {"key": "kebersihan-rating", "title": "Kebersihan dan Rating Outlet", "subtitle": "5 Senses - Eye", "sections": [
-                {"key": "kebersihan", "title": "Kebersihan Outlet", "items": _items("kebersihan", [
-                    "Kebersihan Area Bar Bersih", "Kebersihan Area Bar Kotor", "Kebersihan Area Kitchen", "Kebersihan Tools",
-                    "Kebersihan Area Facade / Halaman Depan", "Kebersihan Area Indoor", "Kebersihan Area Outdoor",
-                    "Kebersihan Area Toilet & Musholla", "Kebersihan Area Warehouse", "Kebersihan Area Mess"])},
+            _grp("kebersihan-rating", "Kebersihan dan Rating Outlet", "Outlet Cleanliness and Rating", "5 Indra - Penglihatan", "5 Senses - Sight", [
+                _sec("kebersihan", "Kebersihan Outlet", "Outlet Cleanliness", _list("kebersihan", [
+                    ("Kebersihan Area Bar Bersih", "Clean bar area"), ("Kebersihan Area Bar Kotor", "Dirty bar area"),
+                    ("Kebersihan Area Kitchen", "Kitchen area"), ("Kebersihan Tools", "Tools"),
+                    ("Kebersihan Area Facade / Halaman Depan", "Facade / front yard"), ("Kebersihan Area Indoor", "Indoor area"),
+                    ("Kebersihan Area Outdoor", "Outdoor area"), ("Kebersihan Area Toilet & Musholla", "Toilet & prayer room"),
+                    ("Kebersihan Area Warehouse", "Warehouse area"), ("Kebersihan Area Mess", "Staff mess"),
+                ])),
                 # platform = the stars of the outlet on that platform go with the item (2026-10-21): Google from
-                # Rating & Review → Google Maps (automatic), the delivery apps typed by the PIC (no API yet)
-                {"key": "rating", "title": "Rating Outlet", "items": [
-                    {**it, **({"platform": p} if p else {})} for it, p in zip(_items("rating", [
-                        "Rating Google", "Rating Gofood", "Rating Grabfood", "Rating Shopeefood", "Complain Customer"]),
-                        ("google", "gofood", "grabfood", "shopeefood", None))]},
-            ]},
-            {"key": "barista-flow", "title": "Barista + Flow Bar", "subtitle": "Memastikan Role and Responsibilities di dalam Bar", "sections": [
-                {"key": "barista", "title": "Barista", "items": [
-                    {"key": "barista.1", "no": 1, "label": "Grooming Barista", "kind": "rating"},
-                    {"key": "barista.2", "no": 2, "label": "Kedisiplinan Barista", "kind": "rating"},
-                    {"key": "barista.3", "no": 3, "label": "Nama Barista Telat", "kind": "text"},
-                    {"key": "barista.4", "no": 4, "label": "Update Rekap Absen Barista", "kind": "rating"}]},
-                {"key": "flow-bar", "title": "Flow Bar", "items": _items("flow-bar", [
-                    "Speed Of Service", "Kesesuaian Role Barista", "Kesesuaian Flow Bar"])},
-            ]},
-            {"key": "hospitality", "title": "Hospitality", "subtitle": "5 Senses - Ear - Produk Knowledge", "sections": [
-                {"key": "hospitality", "title": "Hospitality", "items": _items("hospitality", [
-                    "Product Knowledge Barista", "Greetings Barista", "Offering Product Barista", "Music"])},
-            ]},
-            {"key": "smell", "title": "Smell", "subtitle": "5 Senses - Wangi Outlet - Alat alat Kebersihan", "sections": [
-                {"key": "alat-kebersihan", "title": "Kelengkapan Alat Kebersihan", "items": _items("alat-kebersihan", [
-                    "Sapu", "Pengki", "Pel Area Bar", "Pel Area Customer", "Wipper", "Pel Karet", "Sikat Mesin Kopi & Grinder",
-                    "Lap Area Bar Depan", "Lap Area Kitchen & Bar Belakang", "Lap Area Customer", "Lap Gelas", "Lap Tools",
-                    "Lap Mesin Kopi", "Lap Steam Milk", "Lap Basket Porta"])},
-                {"key": "chemical", "title": "Kelengkapan Chemical", "items": _items("chemical", [
-                    "Sabun Kaca", "Sabun Cuci Piring", "Sabun Cuci Tangan", "Sabun Lantai", "Sabun Toilet", "Pengharum AC",
-                    "Pengharum Ruangan", "Pengharum Mushola & Toilet"])},
-            ]},
-            {"key": "kenyamanan", "title": "Kenyamanan Outlet", "subtitle": "5 Senses - Suhu Ruangan & Kenyamanan Outlet", "sections": [
-                {"key": "kenyamanan", "title": "Kenyamanan Outlet", "items": _items("kenyamanan", [
-                    "Kondisi Ruangan", "Kondisi Furniture (Sofa, Meja, Karpet, Kursi)", "Kondisi Internet Customer",
-                    "Kondisi Merchandise"])},
-            ]},
-            # added 2026-10-21 (user request): the workbook's ADMINISTRASI & FINANCE
-            {"key": "administrasi-finance", "title": "Administrasi & Finance", "subtitle": "Administrasi & Finance Outlet", "sections": [
-                {"key": "administrasi-finance", "title": "Administrasi & Finance", "items": _items("administrasi-finance", [
-                    "SO Packaging", "SO Weekly / Monthly", "Daily Cupping", "Dokumentasi Surat Jalan", "Form Selfpickup",
-                    "Penggunaan Pitty Cash Terkontrol", "Setoran Uang Pembelian Menggunakan Cash"])},
-            ]},
+                # Rating & Review → Google Maps (automatic), the delivery apps typed by the PIC
+                _sec("rating", "Rating Outlet", "Outlet Rating", _list("rating", [
+                    ("Rating Google", "Google rating", {"platform": "google"}),
+                    ("Rating GoFood", "GoFood rating", {"platform": "gofood"}),
+                    ("Rating GrabFood", "GrabFood rating", {"platform": "grabfood"}),
+                    ("Rating ShopeeFood", "ShopeeFood rating", {"platform": "shopeefood"}),
+                    ("Complain Customer (7 hari ke belakang)", "Customer complaints (last 7 days)"),
+                ])),
+            ]),
+            _grp("barista-flow", "Barista + Flow Bar", "Barista + Bar Flow", "Memastikan peran dan tanggung jawab di bar",
+                 "Roles and responsibilities in the bar", [
+                _sec("barista", "Barista", "Barista", _list("barista", [
+                    ("Grooming Barista", "Barista grooming"),
+                    ("Kedisiplinan Barista", "Barista discipline", O),
+                    ("Nama Barista Telat", "Names of late baristas", {"kind": "text", "required": False}),
+                    ("Update Rekap Absen Barista", "Barista attendance recap updated"),
+                ])),
+                # Speed of service and roles: a note is required, no photo needed; the bar flow: note and photo
+                _sec("flow-bar", "Flow Bar", "Bar Flow", _list("flow-bar", [
+                    ("Speed Of Service", "Speed of service", EVIDENCE_NOTE_ONLY),
+                    ("Kesesuaian Role Barista", "Barista roles followed", EVIDENCE_NOTE_ONLY),
+                    ("Kesesuaian Flow Bar", "Bar flow followed"),
+                ])),
+            ]),
+            _grp("hospitality", "Hospitality", "Hospitality", "5 Indra - Pendengaran - Product Knowledge", "5 Senses - Hearing - Product knowledge", [
+                _sec("hospitality", "Hospitality", "Hospitality", _list("hospitality", [
+                    ("Product Knowledge Barista", "Barista product knowledge", EVIDENCE_NOTE_ONLY),
+                    ("Greetings Barista", "Barista greetings", EVIDENCE_NOTE_ONLY),
+                    ("Offering Product Barista", "Barista product offering", EVIDENCE_NOTE_ONLY),
+                    ("Music", "Music", EVIDENCE_NOTE_ONLY),
+                ])),
+            ]),
+            _grp("smell", "Aroma", "Smell", "5 Indra - Wangi Outlet - Alat Kebersihan", "5 Senses - Outlet scent - Cleaning tools", [
+                _sec("alat-kebersihan", "Kelengkapan Alat Kebersihan", "Cleaning Tools Complete", _list("alat-kebersihan", [
+                    ("Sapu", "Broom"), ("Pengki", "Dustpan"), ("Pel Area Bar", "Bar area mop"), ("Pel Area Customer", "Customer area mop"),
+                    ("Wipper", "Squeegee"), ("Pel Karet", "Rubber mop"), ("Sikat Mesin Kopi & Grinder", "Coffee machine & grinder brush", O),
+                    ("Lap Area Bar Depan", "Front bar cloth"), ("Lap Area Kitchen & Bar Belakang", "Kitchen & back bar cloth"),
+                    ("Lap Area Customer", "Customer area cloth"), ("Lap Gelas", "Glass cloth", O), ("Lap Tools", "Tools cloth"),
+                    ("Lap Mesin Kopi", "Coffee machine cloth", O), ("Lap Steam Milk", "Steam wand cloth", O),
+                    ("Lap Basket Porta", "Portafilter basket cloth", O),
+                ])),
+                _sec("chemical", "Kelengkapan Chemical", "Chemicals Complete", _list("chemical", [
+                    ("Sabun Kaca", "Glass cleaner"), ("Sabun Cuci Piring", "Dish soap"), ("Sabun Cuci Tangan", "Hand soap"),
+                    ("Sabun Lantai", "Floor cleaner"), ("Sabun Toilet", "Toilet cleaner", O), ("Pengharum AC", "AC freshener"),
+                    ("Pengharum Ruangan", "Room freshener"), ("Pengharum Mushola & Toilet", "Prayer room & toilet freshener", O),
+                ])),
+            ]),
+            _grp("kenyamanan", "Kenyamanan Outlet", "Outlet Comfort", "5 Indra - Suhu Ruangan & Kenyamanan Outlet",
+                 "5 Senses - Room temperature & outlet comfort", [
+                _sec("kenyamanan", "Kenyamanan Outlet", "Outlet Comfort", _list("kenyamanan", [
+                    ("Kondisi Ruangan", "Room condition"),
+                    ("Kondisi Furniture (Sofa, Meja, Karpet, Kursi)", "Furniture condition (sofa, table, carpet, chair)"),
+                    ("Kondisi Internet Customer", "Customer internet"), ("Kondisi Merchandise", "Merchandise condition", O),
+                ])),
+            ]),
+            # added 2026-10-21 (user request): the workbook's ADMINISTRASI & FINANCE; SO Packaging became SO Daily (2026-10-27)
+            _grp("administrasi-finance", "Administrasi & Finance", "Administration & Finance", "Administrasi & Finance Outlet",
+                 "Outlet administration & finance", [
+                _sec("administrasi-finance", "Administrasi & Finance", "Administration & Finance", _list("administrasi-finance", [
+                    ("SO Daily", "Daily stock opname"), ("SO Weekly / Monthly", "Weekly / monthly stock opname"),
+                    ("Daily Cupping", "Daily cupping"), ("Dokumentasi Surat Jalan", "Delivery note documentation"),
+                    ("Form Selfpickup", "Self-pickup form", O), ("Penggunaan Pitty Cash Terkontrol", "Petty cash use under control"),
+                    ("Setoran Uang Pembelian Menggunakan Cash", "Cash purchase money deposited"),
+                ])),
+            ]),
         ],
     },
 }
@@ -126,7 +216,8 @@ def all_items(form: str) -> list[dict]:
     for g in DEFINITIONS[form]["groups"]:
         for s in g["sections"]:
             for it in s["items"]:
-                out.append({**it, "group": g["key"], "section": s["key"], "section_title": s["title"]})
+                out.append({**it, "group": g["key"], "section": s["key"], "section_title": s["title"],
+                            "section_title_en": s.get("titleEn", s["title"])})
     return out
 
 
@@ -144,6 +235,18 @@ COLS = """v.id::text, v.form, v.status, v.user_id::text, v.username, v.full_name
     v.updated_at, v.submitted_at, v.answers, v.counts, v.score, v.latitude, v.longitude, v.accuracy_m, v.outlet_latitude,
     v.outlet_longitude, v.radius_m, v.distance_m, v.outside_radius, v.low_accuracy, v.signed_name, v.signed_at,
     (v.signature IS NOT NULL) AS has_signature"""
+
+
+def group_of(branch_code: str) -> Optional[str]:
+    """The branch group code (CCI, CTG, CTGP …, Monitoring → Branch groups) of an outlet, None when it has none."""
+    r = db.fetchrow("""SELECT g.code FROM integration_portal.branch_group_member m JOIN integration_portal.branch_group g ON g.id = m.group_id
+                       WHERE m.branch_code = %s""", (branch_code,))
+    return r["code"] if r else None
+
+
+def is_required(item: dict, group: Optional[str]) -> bool:
+    """Must the item be rated before sending, at an outlet of this branch group?"""
+    return bool(item.get("required", True)) or (group is not None and group in (item.get("requiredFor") or []))
 
 
 def _num(v: Any) -> Optional[float]:
@@ -199,6 +302,7 @@ def _auto_items(form: str) -> list[dict]:
 def full(visit_id: str) -> dict:
     row = get_visit(visit_id)
     out = _view(row, photos_of(visit_id))
+    out["branchGroup"] = group_of(row["branch_code"])  # which items are required at this outlet
     if row["status"] == "DRAFT" and _auto_items(row["form"]):
         # a draft shows the current figure; it is kept in the answers at sending
         g = google_rating(row["branch_code"])
@@ -329,18 +433,26 @@ def unrated(form: str, answers: dict) -> int:
     return sum(1 for it in all_items(form) if it["kind"] == "rating" and not (answers.get(it["key"]) or {}).get("rating"))
 
 
-def missing(form: str, answers: dict, photos: list[dict]) -> list[dict]:
-    """What blocks the submit: rated items without a note or a photo (unrated items are allowed, 2026-10-21)."""
+def missing(form: str, answers: dict, photos: list[dict], group: Optional[str] = None) -> list[dict]:
+    """What blocks the submit (2026-10-27): a required item not rated (need "rating"), or a rated required item without
+    the note / photo it asks for (need "note", "photo" or "note+photo"). Optional items block nothing; the platform stars
+    of Rating Outlet need neither a note nor a photo. `group` = the outlet's branch group (an item may be required only
+    at CTGP / CCI outlets)."""
     with_photo = {p["item"] for p in photos}
     out = []
     for it in all_items(form):
-        if it["kind"] != "rating":
+        if it["kind"] != "rating" or not is_required(it, group):
             continue
         a = answers.get(it["key"]) or {}
-        if a.get("rating") and not it.get("platform"):  # the platform stars (Rating Outlet) need neither
-            need = [x for x, ok in (("note", bool(a.get("note"))), ("photo", it["key"] in with_photo)) if not ok]
-            if need:
-                out.append({"key": it["key"], "label": it["label"], "need": "+".join(need)})
+        if not a.get("rating"):
+            out.append({"key": it["key"], "label": it["label"], "labelEn": it.get("labelEn"), "need": "rating"})
+            continue
+        if it.get("platform"):
+            continue
+        need = [x for x, ok in (("note", it.get("note") != "required" or bool(a.get("note"))),
+                                ("photo", it.get("photo") != "required" or it["key"] in with_photo)) if not ok]
+        if need:
+            out.append({"key": it["key"], "label": it["label"], "labelEn": it.get("labelEn"), "need": "+".join(need)})
     return out
 
 
@@ -349,7 +461,9 @@ def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Opti
     row = own_draft(form, user, visit_id)
     _not_today(form, user, row["branch_code"], row["branch_name"])
     photos = photos_of(visit_id)
-    todo = missing(form, row["answers"] or {}, photos)
+    todo = missing(form, row["answers"] or {}, photos, group_of(row["branch_code"]))
+    if any(t["need"] == "rating" for t in todo):
+        raise VisitError(f"Belum bisa dikirim: {sum(1 for t in todo if t['need'] == 'rating')} butir wajib belum dinilai")
     if todo:
         raise VisitError(f"Belum bisa dikirim: {len(todo)} butir yang dinilai belum lengkap catatan/foto")
     if unrated(form, row["answers"] or {}) == len([i for i in all_items(form) if i["kind"] == "rating"]):
@@ -414,11 +528,12 @@ def monitor(form: str, date_from: date, date_to: date, branches: Optional[list[s
             rating = (answers.get(it["key"]) or {}).get("rating")
             if it["kind"] != "rating" or not rating:
                 continue
-            s = sections.setdefault(it["section"], {"key": it["section"], "title": it["section_title"], "group": it["group"],
-                                                    "under": 0, "meet": 0, "exceed": 0})
+            s = sections.setdefault(it["section"], {"key": it["section"], "title": it["section_title"], "titleEn": it["section_title_en"],
+                                                    "group": it["group"], "under": 0, "meet": 0, "exceed": 0})
             s[rating.lower()] += 1
             if rating == "UNDER":
-                f = findings.setdefault(it["key"], {"key": it["key"], "label": it["label"], "section": it["section_title"],
+                f = findings.setdefault(it["key"], {"key": it["key"], "label": it["label"], "labelEn": it.get("labelEn"),
+                                                    "section": it["section_title"], "sectionEn": it["section_title_en"],
                                                     "count": 0, "branches": set()})
                 f["count"] += 1
                 f["branches"].add(r["branch_name"])
@@ -443,7 +558,7 @@ def monitor(form: str, date_from: date, date_to: date, branches: Optional[list[s
     for it in items:
         if it.get("platform"):
             vals = [float(a["stars"]) for r in rows if (a := (r["answers"] or {}).get(it["key"]) or {}).get("stars") is not None]
-            platforms.append({"key": it["key"], "platform": it["platform"], "label": it["label"],
+            platforms.append({"key": it["key"], "platform": it["platform"], "label": it["label"], "labelEn": it.get("labelEn"),
                               "stars": round(sum(vals) / len(vals), 2) if vals else None, "visits": len(vals)})
     return {"definition": DEFINITIONS[form], "data": data, "summary": summary, "platforms": platforms,
             "attendance": attendance(form, date_from, date_to, branches),

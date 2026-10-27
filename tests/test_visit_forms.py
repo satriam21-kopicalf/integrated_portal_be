@@ -13,7 +13,35 @@ def test_items_follow_the_form_visit_workbook():
     assert [g["title"] for g in vf.DEFINITIONS["outlet"]["groups"]][-2:] == ["Kenyamanan Outlet", "Administrasi & Finance"]
     assert len({i["key"] for i in product}) == 74 and len({i["key"] for i in outlet}) == 60
     late = next(i for i in outlet if i["label"] == "Nama Barista Telat")
-    assert late["kind"] == "text"  # a name, not a rating
+    assert late["kind"] == "text" and late["required"] is False  # a name, not a rating; optional
+    # every item, section and group has its English text (ENG / IDN, 2026-10-27)
+    for form in ("product", "outlet"):
+        for g in vf.DEFINITIONS[form]["groups"]:
+            assert g["titleEn"] and g["subtitleEn"]
+            for sec in g["sections"]:
+                assert sec["titleEn"] and all(i["labelEn"] for i in sec["items"])
+    assert any(i["label"] == "SO Daily" for i in outlet) and not any(i["label"] == "SO Packaging" for i in outlet)
+
+
+def _required(form, group):
+    return {i["label"] for i in vf.all_items(form) if i["kind"] == "rating" and vf.is_required(i, group)}
+
+
+def test_required_items_per_branch_group():
+    """Operations 2026-10-27: the core premixes, espresso and request forms are required; Beans Specialty only at CTGP
+    and CCI; the rest optional."""
+    ctg, ctgp, cci = _required("product", "CTG"), _required("product", "CTGP"), _required("product", "CCI")
+    assert len(ctg) == 11 * 2 + 3 + 10 + 3 + 6 == 44 and ctgp == cci == ctg | {"Ketersediaan Stok Beans Specialty"}
+    for label in ("Ketersediaan Stok Premix Premium", "Shelf Life Label Cream Base", "Ketersediaan Stok Espresso Regular",
+                  "Ketersediaan Stok Beans Cold Brew", "Kesesuaian Form Request Bahan Baku Side Dishes", "Cupping Premium"):
+        assert label in ctg, label
+    for label in ("Ketersediaan Stok Premix Jefferson", "Ketersediaan Stok Beans Premium", "Ketersediaan Cup Jefferson",
+                  "Ketersediaan Set Spork", "Test Food Menu Side Dish", "Kesesuaian Form Request Ice Hot, Rich Gold"):
+        assert label not in ctg, label
+    outlet = _required("outlet", "CTG")
+    assert len(outlet) == 10 + 5 + 2 + 3 + 4 + 10 + 6 + 3 + 6 == 49
+    for label in ("Kedisiplinan Barista", "Lap Gelas", "Sabun Toilet", "Kondisi Merchandise", "Form Selfpickup"):
+        assert label not in outlet, label
 
 
 def test_counts_and_what_blocks_the_submit():
@@ -23,15 +51,34 @@ def test_counts_and_what_blocks_the_submit():
     answers[items[1]["key"]] = {"rating": "EXCEED"}
     c = vf._counts("outlet", answers)
     assert (c["under"], c["exceed"], c["rated"], c["total"]) == (1, 1, 59, 59) and c["score"] == round(58 * 100 / 59, 1)
-    todo = vf.missing("outlet", answers, [])
-    assert len(todo) == len([i for i in items if not i.get("platform")]) and todo[0] == {"key": items[0]["key"], "label": items[0]["label"], "need": "note+photo"}  # every rated item (2026-10-23)
+    required = [i for i in items if vf.is_required(i, "CTG") and not i.get("platform")]
+    todo = vf.missing("outlet", answers, [], "CTG")
+    by_key = {t["key"]: t["need"] for t in todo}
+    assert len(todo) == len(required) and by_key[items[0]["key"]] == "note+photo"
+    speed = next(i for i in items if i["label"] == "Speed Of Service")
+    assert by_key[speed["key"]] == "note"  # a note, no photo needed
+    assert all(i["key"] not in by_key for i in items if not vf.is_required(i, "CTG"))  # optional: no evidence needed
     for i in items:
         answers[i["key"]]["note"] = "Catatan"
     photos = [{"item": i["key"]} for i in items]
-    assert vf.missing("outlet", answers, photos) == []
-    del answers[items[5]["key"]]
-    assert vf.missing("outlet", answers, photos[:5] + photos[6:]) == []  # unrated items do not block (2026-10-21)
-    assert vf.unrated("outlet", answers) == 1
+    assert vf.missing("outlet", answers, photos, "CTG") == []
+    optional = next(i for i in items if not vf.is_required(i, "CTG"))
+    del answers[optional["key"]]
+    assert vf.missing("outlet", answers, photos, "CTG") == []  # an optional item may stay unrated
+    del answers[required[0]["key"]]
+    assert vf.missing("outlet", answers, photos, "CTG") == [
+        {"key": required[0]["key"], "label": required[0]["label"], "labelEn": required[0]["labelEn"], "need": "rating"}]
+
+
+def test_beans_specialty_is_required_at_ctgp_and_cci_only():
+    items = [i for i in vf.all_items("product") if i["kind"] == "rating"]
+    answers = {i["key"]: {"rating": "MEET", "note": "ok"} for i in items}
+    photos = [{"item": i["key"]} for i in items]
+    beans = next(i for i in items if i["label"] == "Ketersediaan Stok Beans Specialty")
+    del answers[beans["key"]]
+    assert vf.missing("product", answers, photos, "CTG") == []
+    assert [t["key"] for t in vf.missing("product", answers, photos, "CTGP")] == [beans["key"]]
+    assert [t["key"] for t in vf.missing("product", answers, photos, "CCI")] == [beans["key"]]
 
 
 def test_answers_are_checked_and_merged(monkeypatch):
@@ -67,6 +114,8 @@ def test_platform_stars_manual_and_google_automatic(monkeypatch):
             pass
     # sending keeps the Google rating of that moment (a stale figure in the draft is replaced)
     monkeypatch.setattr(vf, "photos_of", lambda vid: [])
+    monkeypatch.setattr(vf, "missing", lambda *a: [])  # the required items are another test
+    monkeypatch.setattr(vf, "group_of", lambda code: "CTG")
     monkeypatch.setattr(vf, "_outlet", lambda code: None)
     monkeypatch.setattr(vf, "full", lambda vid: {"id": vid})
     monkeypatch.setattr(vf, "google_rating", lambda code: {"stars": 4.7, "reviews": 812, "source": "google", "fetchedAt": "2026-10-21T06:00:00+07:00", "mapsUri": "u"})
@@ -96,7 +145,8 @@ def test_signature_is_optional_and_needs_a_name(monkeypatch):
     saved = {}
     monkeypatch.setattr(vf, "own_draft", lambda form, user, vid: {"answers": {"rating.1": {"rating": "MEET"}}, "branch_code": "CCI01", "branch_name": "Test"})
     monkeypatch.setattr(vf, "photos_of", lambda vid: [])
-    monkeypatch.setattr(vf, "missing", lambda form, answers, photos: [])
+    monkeypatch.setattr(vf, "missing", lambda *a: [])
+    monkeypatch.setattr(vf, "group_of", lambda code: "CCI")
     monkeypatch.setattr(vf, "_outlet", lambda code: None)
     monkeypatch.setattr(vf, "full", lambda vid: {"id": vid})
     monkeypatch.setattr(vf.db, "fetchrow", lambda q, p=None: saved.update(p=p) or {"id": "v"})

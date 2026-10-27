@@ -122,3 +122,46 @@ def test_reviews_newest_first(places):
         {"rating": 3, "publishTime": "2025-05-12T10:00:00Z"}]}}
     got = next(o for o in gmaps.overview() if o["code"] == "CCI01")["reviews"]
     assert [r["publishedAt"][:4] for r in got] == ["2026", "2025", "2024"]
+
+
+def test_grabfood_session_is_super_admin_only(anon, store, page_access):
+    """Cost Control and branch users see the GrabFood data of their scope but never the merchant session (2026-10-27)."""
+    store.add("cc", "cc@kopicalf.co.id", "Cost Control", "Cost1234", role="cost_control")
+    page_access.overrides[str(store.user["id"])] = {"rating.grabfood": True}
+    cc = next(u for u in store.users.values() if u["username"] == "cc")
+    page_access.overrides[str(cc["id"])] = {"rating.grabfood": True}
+    cookie = {"cookie": "mexusers_authn_token=abc.def.ghi; mexusers_authn_token_jti=xyz"}
+    for name, pw in (("kasir", "Kasir1234"), ("cc", "Cost1234")):
+        login(anon, name, pw)
+        g = anon.get("/api/rating/grabfood").json()
+        assert g["canEdit"] is False and g["session"] is None
+        assert anon.put("/api/rating/grabfood/session", json=cookie).status_code == 403
+        r = anon.get("/api/rating/grabfood/reviews?rating=1,2&photo=true&page=1&size=10").json()
+        assert r["data"] == [] and r["total"] == 0 and r["size"] == 10
+        assert anon.get("/api/rating/grabfood/reviews/unknown").status_code == 404
+        assert anon.get("/api/rating/grabfood/reviews?rating=9").status_code == 422
+    login(anon, "superadmin", "Admin1234")
+    g = anon.get("/api/rating/grabfood").json()
+    assert g["canEdit"] is True and g["session"] == {"present": False, "valid": False}
+
+
+def test_grabfood_reviews_follow_the_branch_scope(fake_db):
+    """A branch user only reads reviews of the outlets mapped to their branches; an unmapped outlet needs every branch."""
+    from app import grab
+    grab.reviews(("CCI01",), photo=True, replied=False, q="tumpah_%", ratings=[1, 2])
+    sql, args = fake_db.queries[-1]
+    assert "s.branch_code = ANY(%s)" in sql and ["CCI01"] in args and [1, 2] in args
+    assert r"%tumpah\_\%%" in args  # the search text is a literal, not a pattern
+    grab.reviews((), page=1)
+    assert "s.branch_code = '-'" in fake_db.queries[-1][0]
+
+
+def test_grabfood_menu_availability(anon, store, page_access, fake_db):
+    """The menu endpoint follows the page and the branch scope; the default lists only what is unavailable."""
+    page_access.overrides[str(store.user["id"])] = {"rating.grabfood": True}
+    login(anon, "kasir", "Kasir1234")
+    r = anon.get("/api/rating/grabfood/menu").json()
+    assert r == {"data": [], "counts": {"AVAILABLE": 0, "OUT_OF_STOCK": 0, "OFF": 0}}
+    sql, args = fake_db.queries[-1]
+    assert "m.status <> 'AVAILABLE'" in sql and ["CCI01"] in args
+    assert anon.get("/api/rating/grabfood/menu?status=SOLD").status_code == 422

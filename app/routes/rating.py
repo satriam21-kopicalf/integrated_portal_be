@@ -5,11 +5,17 @@
     GET  /api/rating/google-maps/search?q&branch     super admin / Cost Control: places for a text, near the outlet
     PUT  /api/rating/google-maps/places/{branch}     super admin / Cost Control: {"placeId"} (null = not on Google Maps)
     POST /api/rating/google-maps/sync                super admin / Cost Control: match and refresh now (background)
-    GET  /api/rating/{source}                        page rating.<source>: ShopeeFood, GoFood, GrabFood (being built)
+    GET  /api/rating/grabfood                        page rating.grabfood: every Grab outlet in scope (status, rating, reviews)
+    GET  /api/rating/grabfood/reviews                every review in scope, filtered and paged
+    GET  /api/rating/grabfood/reviews/{review_id}    one review (preview, photos)
+    GET  /api/rating/grabfood/menu                   menu availability: out of stock / switched off items and add-ons
+    PUT  /api/rating/grabfood/session                super admin only: refresh the Grab merchant session
+    GET  /api/rating/{source}                        page rating.<source>: ShopeeFood, GoFood (being built)
 
 The pages are off for every role until a super admin ticks them in User Accounts → Roles & pages; role "user" sees its
 own branches.
 """
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -96,27 +102,72 @@ class SessionIn(BaseModel):
     csrf: Optional[str] = Field(None, max_length=200)
 
 
+GRAB = "rating.grabfood"
+GRAB_SESSION_ROLES = ("superadmin",)  # only a super admin sees and refreshes the merchant session (2026-10-27)
+
+
+def _grab_page(request: Request, user: dict) -> None:
+    if not has_page(user, GRAB):
+        deny(request, user)
+
+
 @router.get("/api/rating/grabfood")
 def grabfood(request: Request, user: dict = Depends(current_user)) -> dict:
-    """Page rating.grabfood: outlet open/close status, official rating and review summary, per outlet in scope."""
-    if not has_page(user, "rating.grabfood"):
-        deny(request, user)
-    return {"ready": True, "source": "grabfood", "canEdit": user.get("role") in EDITORS,
-            "session": grab.session_info() if user.get("role") in EDITORS else None,
+    """Page rating.grabfood: every outlet in scope with its open/close status, official rating and reviews."""
+    _grab_page(request, user)
+    admin = user.get("role") in GRAB_SESSION_ROLES
+    return {"ready": True, "source": "grabfood", "canEdit": admin,
+            "session": grab.session_info() if admin else None,
             "data": grab.overview(allowed_branches())}
 
 
+@router.get("/api/rating/grabfood/reviews")
+def grabfood_reviews(request: Request, merchant: Optional[str] = Query(None, max_length=40),
+                     branch: Optional[str] = Query(None, max_length=40), rating: Optional[str] = Query(None, pattern=r"^[1-5](,[1-5])*$"),
+                     photo: Optional[bool] = None, replied: Optional[bool] = None, q: Optional[str] = Query(None, max_length=120),
+                     date_from: Optional[date] = Query(None, alias="from"), date_to: Optional[date] = Query(None, alias="to"),
+                     page: int = Query(1, ge=1, le=10000), size: int = Query(20, ge=1, le=100),
+                     user: dict = Depends(current_user)) -> dict:
+    """Every GrabFood review in scope, newest first; filters: outlet, stars (e.g. 1,2), with photo, replied, text, period."""
+    _grab_page(request, user)
+    return grab.reviews(allowed_branches(), merchant=merchant, branch=branch,
+                        ratings=[int(x) for x in rating.split(",")] if rating else None, photo=photo, replied=replied, q=q,
+                        date_from=date_from, date_to=date_to, page=page, size=size)
+
+
+@router.get("/api/rating/grabfood/reviews/{review_id}")
+def grabfood_review(review_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    """One review for the preview (text, items, aspects, photos)."""
+    _grab_page(request, user)
+    r = grab.review(review_id, allowed_branches())
+    if r is None:
+        raise HTTPException(status_code=404, detail="Ulasan tidak ditemukan")
+    return r
+
+
+@router.get("/api/rating/grabfood/menu")
+def grabfood_menu(request: Request, merchant: Optional[str] = Query(None, max_length=40),
+                  status: str = Query("unavailable", pattern=r"^(unavailable|all|AVAILABLE|OUT_OF_STOCK|OFF)$"),
+                  kind: Optional[str] = Query(None, pattern=r"^(item|modifier)$"), q: Optional[str] = Query(None, max_length=120),
+                  user: dict = Depends(current_user)) -> dict:
+    """GrabFood menu availability of the outlets in scope: out of stock / switched off items and add-ons (or all)."""
+    _grab_page(request, user)
+    return grab.menu(allowed_branches(), merchant=merchant, status=status, kind=kind, q=q)
+
+
 @router.get("/api/rating/grabfood/{branch}/reviews")
-def grabfood_reviews(branch: str, request: Request, user: dict = Depends(current_user)) -> dict:
-    if not has_page(user, "rating.grabfood"):
-        deny(request, user)
-    return {"data": grab.reviews(branch, allowed_branches())}
+def grabfood_branch_reviews(branch: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    """Older clients: the latest reviews of one outlet."""
+    _grab_page(request, user)
+    return grab.reviews(allowed_branches(), branch=branch, size=100)
 
 
 @router.put("/api/rating/grabfood/session")
 def grabfood_session(body: SessionIn, request: Request, user: dict = Depends(current_user)) -> dict:
-    """Super admin / Cost Control refresh the merchant session cookie (pasted from the Grab portal)."""
-    _grab_editor(request, user)
+    """Super admin only: refresh the merchant session cookie (pasted from the Grab portal)."""
+    _grab_page(request, user)
+    if user.get("role") not in GRAB_SESSION_ROLES:
+        deny(request, user)
     try:
         result = grab.set_session(body.cookie, body.csrf, user)
     except ValueError as e:
@@ -124,13 +175,6 @@ def grabfood_session(body: SessionIn, request: Request, user: dict = Depends(cur
     activity.record("system.grab_session", user=user, request=request, page="/rating/grabfood",
                     summary="Sesi Grab Merchant diperbarui")
     return result
-
-
-def _grab_editor(request: Request, user: dict) -> None:
-    if not has_page(user, "rating.grabfood"):
-        deny(request, user)
-    if user.get("role") not in EDITORS:
-        deny(request, user)
 
 
 @router.get("/api/rating/{source}")

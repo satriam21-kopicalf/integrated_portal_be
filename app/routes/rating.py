@@ -149,10 +149,11 @@ def grabfood_review(review_id: str, request: Request, user: dict = Depends(curre
 
 @router.get("/api/rating/grabfood/menu")
 def grabfood_menu(request: Request, merchant: Optional[str] = Query(None, max_length=40),
-                  status: str = Query("unavailable", pattern=r"^(unavailable|all|AVAILABLE|OUT_OF_STOCK|OFF)$"),
+                  status: str = Query("unavailable", pattern=r"^(unavailable|all|price|AVAILABLE|OUT_OF_STOCK|OFF)$"),
                   kind: Optional[str] = Query(None, pattern=r"^(item|modifier)$"), q: Optional[str] = Query(None, max_length=120),
                   user: dict = Depends(current_user)) -> dict:
-    """GrabFood menu availability of the outlets in scope: out of stock / switched off items and add-ons (or all)."""
+    """GrabFood menu of the outlets in scope: out of stock / switched off items and add-ons, the whole menu, or the
+    items priced differently from most outlets of the same city (status=price)."""
     _grab_page(request, user)
     return grab.menu(allowed_branches(), merchant=merchant, status=status, kind=kind, q=q)
 

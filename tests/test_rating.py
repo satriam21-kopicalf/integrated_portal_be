@@ -176,3 +176,26 @@ def test_grabfood_branch_mapping_is_super_admin_only(anon, store, page_access):
     assert anon.get("/api/rating/grabfood/branches").json() == {"data": []}
     assert anon.put("/api/rating/grabfood/stores/6-X/branch", json={"branchCode": "CCI01"}).status_code == 404  # unknown store
     assert anon.put("/api/rating/grabfood/stores/6-X/branch", json={"branchCode": "bad code!"}).status_code == 422
+
+
+def test_grabfood_opening_hours_and_minutes_closed():
+    """Grab's weekly hours are Sunday first; a range past midnight stops at 24:00; minutes closed only count inside the
+    opening hours, and before the first known status the outlet counts as open."""
+    from datetime import date, datetime, timedelta
+
+    from app.grab import WIB, _hours_view, closed_minutes, day_ranges
+    week = [{"ranges": [{"start": "08:00", "end": "20:00"}]}] * 5 + \
+        [{"ranges": [{"start": "08:00", "end": "11:45"}, {"start": "12:30", "end": "20:00"}]},
+         {"ranges": [{"start": "18:00", "end": "02:00"}]}]
+    assert day_ranges(week, date(2026, 10, 30)) == [(480, 705), (750, 1200)]  # Friday: prayer break
+    assert day_ranges(week, date(2026, 10, 31)) == [(1080, 1440)]             # Saturday: past midnight, cut at 24:00
+    assert day_ranges(None, date(2026, 10, 30)) == []
+    day = datetime(2026, 10, 27, tzinfo=WIB)                                   # Tuesday 08:00-20:00
+    events = [(day - timedelta(hours=3), True), (day + timedelta(hours=9), False), (day + timedelta(hours=10, minutes=30), True),
+              (day + timedelta(hours=14), False)]
+    assert closed_minutes(day_ranges(week, day.date()), events, day, day + timedelta(hours=15)) == 150
+    assert closed_minutes(day_ranges(week, day.date()), [], day, day + timedelta(hours=15)) == 0  # no data, no blame
+    v = _hours_view(week, events, False, day + timedelta(hours=15))
+    assert v["shouldBeOpen"] is True and v["closedInHours"] is True and v["closedMinutesToday"] == 150
+    assert v["today"] == [{"start": "08:00", "end": "20:00"}] and len(v["week"]) == 7
+    assert _hours_view(None, [], False, day)["shouldBeOpen"] is None

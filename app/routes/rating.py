@@ -10,6 +10,8 @@
     GET  /api/rating/grabfood/reviews/{review_id}    one review (preview, photos)
     GET  /api/rating/grabfood/menu                   menu availability: out of stock / switched off items and add-ons
     PUT  /api/rating/grabfood/session                super admin only: refresh the Grab merchant session
+    GET  /api/rating/grabfood/branches               super admin: ESB branches to map a Grab store to
+    PUT  /api/rating/grabfood/stores/{id}/branch     super admin: map a Grab store to its ESB branch
     GET  /api/rating/{source}                        page rating.<source>: ShopeeFood, GoFood (being built)
 
 The pages are off for every role until a super admin ticks them in User Accounts → Roles & pages; role "user" sees its
@@ -160,6 +162,36 @@ def grabfood_branch_reviews(branch: str, request: Request, user: dict = Depends(
     """Older clients: the latest reviews of one outlet."""
     _grab_page(request, user)
     return grab.reviews(allowed_branches(), branch=branch, size=100)
+
+
+class BranchIn(BaseModel):
+    branchCode: Optional[str] = Field(None, max_length=40, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+@router.get("/api/rating/grabfood/branches")
+def grabfood_branches(request: Request, user: dict = Depends(current_user)) -> dict:
+    """Super admin: ESB branches to map a Grab store to."""
+    _grab_page(request, user)
+    if user.get("role") not in GRAB_SESSION_ROLES:
+        deny(request, user)
+    return {"data": grab.branch_options()}
+
+
+@router.put("/api/rating/grabfood/stores/{merchant_id}/branch")
+def grabfood_store_branch(merchant_id: str, body: BranchIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    """Super admin: map a Grab store to its ESB branch (null = not mapped); the branch scope of every user follows it."""
+    _grab_page(request, user)
+    if user.get("role") not in GRAB_SESSION_ROLES:
+        deny(request, user)
+    try:
+        result = grab.set_branch(merchant_id, body.branchCode)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from None
+    activity.record("system.grab_branch", user=user, request=request, page="/rating/grabfood",
+                    summary=f"Outlet Grab {merchant_id} -> {body.branchCode or 'tidak dipetakan'}", details=result)
+    return result
 
 
 @router.put("/api/rating/grabfood/session")

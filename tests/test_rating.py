@@ -165,3 +165,14 @@ def test_grabfood_menu_availability(anon, store, page_access, fake_db):
     sql, args = fake_db.queries[-1]
     assert "m.status <> 'AVAILABLE'" in sql and ["CCI01"] in args
     assert anon.get("/api/rating/grabfood/menu?status=SOLD").status_code == 422
+
+
+def test_grabfood_branch_mapping_is_super_admin_only(anon, store, page_access):
+    page_access.overrides[str(store.user["id"])] = {"rating.grabfood": True}
+    login(anon, "kasir", "Kasir1234")
+    assert anon.get("/api/rating/grabfood/branches").status_code == 403
+    assert anon.put("/api/rating/grabfood/stores/6-X/branch", json={"branchCode": "CCI01"}).status_code == 403
+    login(anon, "superadmin", "Admin1234")
+    assert anon.get("/api/rating/grabfood/branches").json() == {"data": []}
+    assert anon.put("/api/rating/grabfood/stores/6-X/branch", json={"branchCode": "CCI01"}).status_code == 404  # unknown store
+    assert anon.put("/api/rating/grabfood/stores/6-X/branch", json={"branchCode": "bad code!"}).status_code == 422

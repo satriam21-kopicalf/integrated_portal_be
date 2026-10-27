@@ -43,6 +43,10 @@ def session_info() -> dict:
             "updatedBy": row["updated_by"], "lastCheckedAt": _iso(row["last_checked_at"]), "note": row["note"]}
 
 
+# CASE, not AND: Postgres may evaluate jsonb_array_length first, which fails on a review without photos (JSON null)
+HAS_PHOTO = "(CASE WHEN jsonb_typeof(gr.image_urls) = 'array' THEN jsonb_array_length(gr.image_urls) ELSE 0 END) > 0"
+
+
 def overview(scope) -> list[dict]:
     """One row per Grab outlet in scope: ESB branch, latest status, official rating, reviews (30 days and all)."""
     cond, params = _scope_sql(scope)
@@ -71,7 +75,7 @@ def overview(scope) -> list[dict]:
         ) rv ON true
         LEFT JOIN LATERAL (
             SELECT count(*)::int AS total_reviews,
-                   count(*) FILTER (WHERE jsonb_typeof(gr.image_urls) = 'array' AND jsonb_array_length(gr.image_urls) > 0)::int AS photo_reviews
+                   count(*) FILTER (WHERE {HAS_PHOTO})::int AS photo_reviews
             FROM {SCHEMA}.grab_review gr WHERE gr.merchant_id = s.merchant_id
         ) ra ON true
         LEFT JOIN LATERAL (
@@ -88,7 +92,8 @@ def overview(scope) -> list[dict]:
         "status": {"isOpen": r["is_open"], "label": r["status_label"], "isBusy": r["is_busy"],
                    "closeReason": r["close_reason"], "pauseCause": r["pause_cause"],
                    "openUntil": _iso(r["open_until"]), "pauseUntil": _iso(r["pause_until"]), "checkedAt": _iso(r["status_at"])},
-        "rating": {"score": float(r["score"]) if r["score"] is not None else None, "count": r["rating_count"],
+        "rating": {"score": float(r["score"]) if r["score"] is not None and (r["rating_count"] or 0) > 0 else None,  # 0 = no rating yet
+                   "count": r["rating_count"],
                    "distribution": r["distribution"], "capturedOn": _iso(r["rating_on"])},
         "reviews30d": {"count": r["review_count"] or 0, "avg": float(r["avg_recent"]) if r["avg_recent"] is not None else None,
                        "low": r["low_count"] or 0, "unreplied": r["unreplied"] or 0, "lastAt": _iso(r["last_review_at"])},
@@ -97,7 +102,6 @@ def overview(scope) -> list[dict]:
     } for r in rows]
 
 
-HAS_PHOTO = "jsonb_typeof(gr.image_urls) = 'array' AND jsonb_array_length(gr.image_urls) > 0"
 
 
 def _review(r) -> dict:
@@ -166,6 +170,36 @@ def review(review_id: str, scope) -> Optional[dict]:
     cond, params = _scope_sql(scope)
     r = db.fetchrow(f"SELECT {REVIEW_COLS} WHERE gr.review_id = %s {cond}", [review_id, *params])
     return _review(r) if r else None
+
+
+def branch_options() -> list[dict]:
+    """ESB branches (company CALF) for mapping a Grab store, with the store already using each one (if any)."""
+    rows = db.fetch(
+        f"""SELECT b.branch_code, b.branch_name, s.merchant_id AS used_by
+            FROM {SCHEMA}.master_branches b
+            LEFT JOIN {SCHEMA}.grab_store s ON s.branch_code = b.branch_code
+            WHERE COALESCE(b.company_code, 'CALF') = 'CALF' AND b.branch_name NOT ILIKE 'BULK%%'
+            ORDER BY b.branch_name""")
+    return [{"code": r["branch_code"], "name": r["branch_name"], "usedBy": r["used_by"]} for r in rows]
+
+
+def set_branch(merchant_id: str, branch_code: Optional[str]) -> dict:
+    """Map a Grab store to its ESB branch by hand (super admin); None unmaps it. One store per branch."""
+    store = db.fetchrow(f"SELECT merchant_id FROM {SCHEMA}.grab_store WHERE merchant_id = %s", [merchant_id])
+    if not store:
+        raise LookupError("Outlet Grab tidak ditemukan")
+    if branch_code:
+        if not db.fetchrow(f"SELECT 1 AS ok FROM {SCHEMA}.master_branches WHERE branch_code = %s", [branch_code]):
+            raise ValueError(f"Cabang {branch_code} tidak ada di ESB")
+        other = db.fetchrow(f"SELECT merchant_name FROM {SCHEMA}.grab_store WHERE branch_code = %s AND merchant_id <> %s",
+                            [branch_code, merchant_id])
+        if other:
+            raise ValueError(f"Cabang {branch_code} sudah dipakai {other['merchant_name']}")
+    with db.transaction() as c:
+        # 'manual' also when unmapped: the engine does not map it again by name
+        c.execute(f"UPDATE {SCHEMA}.grab_store SET branch_code = %s, branch_match = 'manual' WHERE merchant_id = %s",
+                  (branch_code or None, merchant_id))
+    return {"merchantId": merchant_id, "branchCode": branch_code or None}
 
 
 MENU_STATUSES = ("AVAILABLE", "OUT_OF_STOCK", "OFF")

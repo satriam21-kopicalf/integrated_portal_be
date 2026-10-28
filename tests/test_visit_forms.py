@@ -72,13 +72,44 @@ def test_counts_and_what_blocks_the_submit():
 
 def test_beans_specialty_is_required_at_ctgp_and_cci_only():
     items = [i for i in vf.all_items("product") if i["kind"] == "rating"]
-    answers = {i["key"]: {"rating": "MEET", "note": "ok"} for i in items}
+    answers = {i["key"]: {"rating": "MEET", "note": "ok", **({"qty": 500} if i.get("qty") else {})} for i in items}
     photos = [{"item": i["key"]} for i in items]
     beans = next(i for i in items if i["label"] == "Ketersediaan Stok Beans Specialty")
     del answers[beans["key"]]
     assert vf.missing("product", answers, photos, "CTG") == []
     assert [t["key"] for t in vf.missing("product", answers, photos, "CTGP")] == [beans["key"]]
     assert [t["key"] for t in vf.missing("product", answers, photos, "CCI")] == [beans["key"]]
+
+
+def test_grams_of_stock_preparation_espresso_and_beans(monkeypatch):
+    """Operations 2026-10-28: Stock Preparation, Espresso and Beans take the stock in grams (net weight); a rated
+    required item needs it, an optional one not; 0 g is a valid count."""
+    items = vf.all_items("product")
+    with_qty = {i["section"] for i in items if i.get("qty") == "g"}
+    assert with_qty == {"stok-preparation", "espresso-beans"}
+    assert all(i.get("qty") == "g" for i in items if i["section"] in with_qty)
+    premix = next(i for i in items if i["label"] == "Ketersediaan Stok Premix Premium")
+    jefferson = next(i for i in items if i["label"] == "Ketersediaan Stok Premix Jefferson")
+    shelf = next(i for i in items if i["label"] == "Shelf Life Label Premix Premium")
+    rated = {k["key"]: {"rating": "MEET", "note": "ok"} for k in (premix, jefferson, shelf)}
+    photos = [{"item": k} for k in rated]
+    need = {t["key"]: t["need"] for t in vf.missing("product", rated, photos, "CTG")}
+    assert need[premix["key"]] == "qty" and jefferson["key"] not in need and shelf["key"] not in need
+    rated[premix["key"]]["qty"] = 0
+    assert premix["key"] not in {t["key"] for t in vf.missing("product", rated, photos, "CTG")}
+
+    monkeypatch.setattr(vf, "own_draft", lambda form, user, vid: {"answers": {}})
+    monkeypatch.setattr(vf.db, "fetchrow", lambda q, p=None: {"id": "x"})
+    out = vf.save_answers("product", {"id": "u"}, "v", {premix["key"]: {"rating": "MEET", "qty": "1250.46"}})
+    assert out["answers"][premix["key"]] == {"rating": "MEET", "qty": 1250.5}
+    assert out["answers"] == vf.save_answers("product", {"id": "u"}, "v", {premix["key"]: {"rating": "MEET", "qty": 1250.5}})["answers"]
+    for bad in ({premix["key"]: {"qty": -1}}, {premix["key"]: {"qty": "x"}}, {premix["key"]: {"qty": 2_000_000}},
+                {shelf["key"]: {"qty": 10}}):
+        try:
+            vf.save_answers("product", {"id": "u"}, "v", bad)
+            raise AssertionError(bad)
+        except vf.VisitError:
+            pass
 
 
 def test_answers_are_checked_and_merged(monkeypatch):

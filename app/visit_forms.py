@@ -74,6 +74,10 @@ PREMIX = [
     ("Side Dish Lainnya", "Other Side Dishes", O), ("Maincourse", "Main Course", O),
 ]
 EVIDENCE_NOTE_ONLY = {"note": REQ, "photo": OPT}  # a note is required, the photo is not
+# Stock Preparation, Espresso and Beans (2026-10-28, Operations): the PIC also types the stock in grams (net weight); a
+# rated required item needs it, like its note and photo
+QTY = {"qty": "g"}
+MAX_QTY_G = 1_000_000
 
 DEFINITIONS: dict[str, dict] = {
     "product": {
@@ -82,17 +86,18 @@ DEFINITIONS: dict[str, dict] = {
         "groups": [
             _grp("availability", "Availability", "Availability", "Ketersediaan dan Kesesuaian Produk", "Product availability and conformity", [
                 _sec("stok-preparation", "Stock Preparation", "Stock Preparation",
-                     _list("stok-preparation", [(f"Ketersediaan Stok {i}", f"{e} stock available", o) for i, e, o in PREMIX])),
+                     _list("stok-preparation", [(f"Ketersediaan Stok {i}", f"{e} stock available", {**o, **QTY}) for i, e, o in PREMIX])),
                 _sec("shelf-life", "Shelf Life Label", "Shelf Life Label",
                      _list("shelf-life", [(f"Shelf Life Label {i}", f"{e} shelf-life label", o) for i, e, o in PREMIX])),
                 # Beans Specialty: required at the CTGP and CCI outlets only (2026-10-27)
                 _sec("espresso-beans", "Espresso dan Beans", "Espresso and Beans", _list("espresso-beans", [
-                    ("Ketersediaan Stok Espresso Premium", "Espresso Premium stock available"),
-                    ("Ketersediaan Stok Espresso Regular", "Espresso Regular stock available"),
-                    ("Ketersediaan Stok Beans Premium", "Beans Premium stock available", O),
-                    ("Ketersediaan Stok Beans Regular", "Beans Regular stock available", O),
-                    ("Ketersediaan Stok Beans Cold Brew", "Cold Brew beans stock available"),
-                    ("Ketersediaan Stok Beans Specialty", "Specialty beans stock available", {"required": False, "required_for": ["CTGP", "CCI"]}),
+                    ("Ketersediaan Stok Espresso Premium", "Espresso Premium stock available", QTY),
+                    ("Ketersediaan Stok Espresso Regular", "Espresso Regular stock available", QTY),
+                    ("Ketersediaan Stok Beans Premium", "Beans Premium stock available", {**O, **QTY}),
+                    ("Ketersediaan Stok Beans Regular", "Beans Regular stock available", {**O, **QTY}),
+                    ("Ketersediaan Stok Beans Cold Brew", "Cold Brew beans stock available", QTY),
+                    ("Ketersediaan Stok Beans Specialty", "Specialty beans stock available",
+                     {"required": False, "required_for": ["CTGP", "CCI"], **QTY}),
                 ])),
                 _sec("bahan-penolong", "Bahan Penolong", "Supporting Materials", _list("bahan-penolong", [
                     ("Ketersediaan Cup Es", "Iced cups available"), ("Ketersediaan Cup Frosted", "Frosted cups available"),
@@ -393,6 +398,19 @@ def save_answers(form: str, user: dict, visit_id: str, patch: dict) -> dict:
                     raise VisitError("Rating harus angka 1,0 sampai 5,0")
             cur["stars"] = stars
             cur["source"] = "manual" if stars is not None else None
+        if "qty" in value:
+            # grams (net weight) of Stock Preparation, Espresso and Beans
+            if not known[key].get("qty"):
+                raise VisitError("Gramasi hanya untuk butir Stock Preparation, Espresso dan Beans")
+            qty = value["qty"]
+            if qty is not None:
+                try:
+                    qty = round(float(qty), 1)
+                except (TypeError, ValueError):
+                    raise VisitError("Gramasi harus angka 0 sampai 1.000.000 gram") from None
+                if not 0 <= qty <= MAX_QTY_G:
+                    raise VisitError("Gramasi harus angka 0 sampai 1.000.000 gram")
+            cur["qty"] = qty
         answers[key] = {k: v for k, v in cur.items() if v is not None}
     answers = {k: v for k, v in answers.items() if v}
     counts = _counts(form, answers)
@@ -435,9 +453,9 @@ def unrated(form: str, answers: dict) -> int:
 
 def missing(form: str, answers: dict, photos: list[dict], group: Optional[str] = None) -> list[dict]:
     """What blocks the submit (2026-10-27): a required item not rated (need "rating"), or a rated required item without
-    the note / photo it asks for (need "note", "photo" or "note+photo"). Optional items block nothing; the platform stars
-    of Rating Outlet need neither a note nor a photo. `group` = the outlet's branch group (an item may be required only
-    at CTGP / CCI outlets)."""
+    the note / photo / grams it asks for (need "note", "photo", "qty" or a combination, e.g. "note+photo"). Optional
+    items block nothing; the platform stars of Rating Outlet need neither a note nor a photo. `group` = the outlet's
+    branch group (an item may be required only at CTGP / CCI outlets)."""
     with_photo = {p["item"] for p in photos}
     out = []
     for it in all_items(form):
@@ -450,7 +468,8 @@ def missing(form: str, answers: dict, photos: list[dict], group: Optional[str] =
         if it.get("platform"):
             continue
         need = [x for x, ok in (("note", it.get("note") != "required" or bool(a.get("note"))),
-                                ("photo", it.get("photo") != "required" or it["key"] in with_photo)) if not ok]
+                                ("photo", it.get("photo") != "required" or it["key"] in with_photo),
+                                ("qty", not it.get("qty") or a.get("qty") is not None)) if not ok]
         if need:
             out.append({"key": it["key"], "label": it["label"], "labelEn": it.get("labelEn"), "need": "+".join(need)})
     return out
@@ -465,7 +484,7 @@ def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Opti
     if any(t["need"] == "rating" for t in todo):
         raise VisitError(f"Belum bisa dikirim: {sum(1 for t in todo if t['need'] == 'rating')} butir wajib belum dinilai")
     if todo:
-        raise VisitError(f"Belum bisa dikirim: {len(todo)} butir yang dinilai belum lengkap catatan/foto")
+        raise VisitError(f"Belum bisa dikirim: {len(todo)} butir yang dinilai belum lengkap catatan/foto/gram")
     if unrated(form, row["answers"] or {}) == len([i for i in all_items(form) if i["kind"] == "rating"]):
         raise VisitError("Belum ada butir yang dinilai")
     # the signature is optional (like the stock opname); a name goes with it

@@ -64,16 +64,19 @@ PAGES: list[tuple[str, str, str]] = [
 ]
 PAGE_KEYS = tuple(p[0] for p in PAGES)
 CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))
-EDITABLE_ROLES = ("cost_control", "user")
+EDITABLE_ROLES = ("cost_control", "user", "outlet")
+FORM_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("form."))
+# role "user" = Area Supervisor / PIC: Dashboard, Sales, Stock Opname, Waste, the Guide and every form (a new form page
+# is added to the role by its migration); role "outlet" = the shared outlet / HUB CK / HUB WH accounts (2026-10-28)
 DEFAULT_ROLE_PAGES = {
-    "user": ["overview", "sales", "stock-opname", "guide", "form.pic-check-in", "form.product", "form.outlet", "form.damaged-equipment"],
+    "user": ["overview", "sales", "stock-opname", "waste", "guide", *FORM_PAGES],
+    "outlet": ["stock-opname", "waste"],
     "cost_control": ["overview", "sales", "stock-opname", "waste", "guide", *CC_PAGES],
 }
 
 # Operations app (operations.kopicalf.co.id, 2026-10-28): the pages it has. An account whose pages are all there and
 # include a form signs in to Operations only; the portal refuses it (the portal sends APP_HEADER: portal on its calls).
-OPERATIONS_PAGES = frozenset({"overview", "sales", "rating.grabfood", "form.pic-check-in", "form.product", "form.outlet",
-                              "form.damaged-equipment"})
+OPERATIONS_PAGES = frozenset({"overview", "sales", "rating.grabfood", "stock-opname", "waste", "guide", *FORM_PAGES})
 APP_HEADER = "x-kopicalf-app"
 
 _cache = TTLCache()
@@ -118,7 +121,8 @@ def has_page(user: dict, page: str) -> bool:
 
 def operations_only(user: dict) -> bool:
     """A form account (PIC, technician …) with nothing the portal alone has: it uses Operations, not the portal.
-    Superadmins and accounts with other menus (Monitoring, Cost Control, Stock Opname …) keep the portal."""
+    Superadmins and accounts with other menus (Monitoring, Cost Control, Aggregator …) keep the portal; an account
+    without any form (the outlet / hub accounts: Stock Opname and Waste) too."""
     if user.get("role") == "superadmin":
         return False
     pages = set(pages_for(user))
@@ -187,6 +191,8 @@ def so_role(user: dict) -> str:
     """Role the gateway assertion carries: a "user" given Cost Control pages acts as Cost Control in kopicalf (the
     paths it may call are limited by so_page)."""
     role = user.get("role") or "user"
+    if role == "outlet":  # the outlet / hub accounts count like any crew in kopicalf
+        role = "user"
     if role == "user" and any(p in CC_PAGES for p in pages_for(user)):
         return "cost_control"
     return role

@@ -83,10 +83,13 @@ def test_form_accounts_use_operations(monkeypatch):
     monkeypatch.setattr(access, "pages_for", lambda u: pages[u["username"]])
     pages.update(pic=["overview", "sales", "form.pic-check-in", "form.product", "form.outlet", "form.damaged-equipment"],
                  tech=["overview", "form.damaged-equipment", "mon.damaged-equipment"],
-                 outlet=["stock-opname", "waste", "form.pengajuan"], cc=["overview", "cc.monitor"], admin=[])
+                 outlet=["stock-opname", "waste"], full=["overview", "sales", "stock-opname", "waste", "guide", *access.FORM_PAGES],
+                 farhan=["overview", "form.product", "mon.product"], cc=["overview", "cc.monitor"], admin=[])
     assert access.operations_only({"username": "pic", "role": "user"})
     assert not access.operations_only({"username": "tech", "role": "user"})  # Monitoring is in the portal only
-    assert not access.operations_only({"username": "outlet", "role": "user"})  # Pengajuan and Stock Opname: portal
+    assert not access.operations_only({"username": "outlet", "role": "outlet"})  # no form: the portal
+    assert access.operations_only({"username": "full", "role": "user"})  # every page of a PIC is in Operations
+    assert not access.operations_only({"username": "farhan", "role": "user"})
     assert not access.operations_only({"username": "cc", "role": "user"})  # no form
     assert not access.operations_only({"username": "admin", "role": "superadmin"})
 
@@ -102,7 +105,7 @@ def test_portal_refuses_operations_accounts(page_access, monkeypatch):
         monkeypatch.setattr(accounts, name, getattr(mem, name))
     auth_module.forget_sessions()
     pic = mem.add("pic.satu", "pic@kopicalf.co.id", "PIC Satu", "Pic12345", branch_codes=["CCI01"])
-    page_access.overrides[pic["id"]] = {"stock-opname": False, "guide": False}  # forms, Dashboard and Sales
+    page_access.overrides[pic["id"]] = {}  # the PIC pages of the role: all in Operations
     with TestClient(app, base_url="https://testserver") as c:
         res = c.post("/api/auth/login", headers={"X-Kopicalf-App": "portal"},
                      json={"identifier": "pic.satu", "password": "Pic12345", "method": "username"})
@@ -110,3 +113,13 @@ def test_portal_refuses_operations_accounts(page_access, monkeypatch):
         assert login(c, "pic.satu", "Pic12345").status_code == 200  # Operations sends no header
         assert c.get("/api/auth/me").status_code == 200
         assert c.get("/api/auth/me", headers={"X-Kopicalf-App": "portal"}).status_code == 403  # an old portal session
+
+
+def test_roles_of_the_pics_and_the_outlets():
+    pic = set(access.DEFAULT_ROLE_PAGES["user"])
+    assert pic == {"overview", "sales", "stock-opname", "waste", "guide", "form.pic-check-in", "form.product", "form.outlet",
+                   "form.damaged-equipment", "form.pengajuan"}
+    assert pic <= access.OPERATIONS_PAGES
+    assert access.so_role({"id": "x", "role": "outlet"}) == "user"  # the outlet accounts count as crew in kopicalf
+    from app import accounts
+    assert "outlet" in accounts.ROLES and "outlet" not in accounts.GLOBAL_ROLES  # branch scoped like role user

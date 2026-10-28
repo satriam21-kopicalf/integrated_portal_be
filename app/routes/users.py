@@ -129,7 +129,7 @@ def users_summary():
     """Counts for the page header: totals, roles, status, users without branches, sign-in activity."""
     c = accounts.user_counts()
     return {"total": c.get("total", 0), "active": c.get("active", 0), "inactive": c.get("inactive", 0),
-            "locked": c.get("locked", 0), "superadmins": c.get("superadmins", 0), "users": c.get("users", 0),
+            "locked": c.get("locked", 0), "superadmins": c.get("superadmins", 0), "users": c.get("users", 0), "outlets": c.get("outlets", 0),
             "withoutBranch": c.get("without_branch", 0), "neverSignedIn": c.get("never_signed_in", 0),
             "active7d": c.get("active_7d", 0), "branchesCovered": c.get("branches_covered", 0)}
 

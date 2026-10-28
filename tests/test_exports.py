@@ -327,3 +327,18 @@ def test_maintenance_purges_activity_and_old_sheets(monkeypatch):
     monkeypatch.setattr(s, "gsheet_retention_days", 30)
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp({"ok": False, "error": "unauthorized"}))
     assert maintenance.main() == 1 and sql
+
+
+def test_cleanup_skips_folders(monkeypatch, tmp_path):
+    """A folder in the export directory (e.g. backups put there) is left alone: the cleanup used to fail on it and with
+    it every new export (2026-10-28)."""
+    monkeypatch.setattr(exports, "_export_dir", lambda: tmp_path)
+    old = tmp_path / "old.xlsx"
+    old.write_bytes(b"x")
+    (tmp_path / "backup").mkdir()
+    (tmp_path / "backup" / "keep.json").write_text("{}")
+    past = (datetime.now() - timedelta(days=30)).timestamp()
+    for p in (old, tmp_path / "backup"):
+        os.utime(p, (past, past))
+    assert exports.cleanup_old_exports() == 1
+    assert not old.exists() and (tmp_path / "backup" / "keep.json").exists()

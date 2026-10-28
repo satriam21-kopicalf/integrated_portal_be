@@ -134,7 +134,7 @@ def cleanup_old_exports() -> int:
     cutoff = datetime.now().timestamp() - get_settings().export_ttl_hours * 3600
     removed = 0
     for path in _export_dir().iterdir():
-        if path.name.startswith("."):  # slot lock files
+        if path.name.startswith(".") or not path.is_file():  # slot lock files; a folder put here is not an export
             continue
         try:
             if path.stat().st_mtime < cutoff:

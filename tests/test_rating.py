@@ -1,4 +1,4 @@
-"""Rating & Review (app/routes/rating.py, app/gmaps.py): each source opens with its own page, off by default; Google Maps
+"""Aggregator (app/routes/rating.py, app/gmaps.py): each source opens with its own page, off by default; Google Maps
 matches the outlets to their place and reads the latest Places API data."""
 from datetime import datetime
 

@@ -151,7 +151,7 @@ Data dibaca dari tabel agregat (bukan `raw_data`), dibangun ulang per tanggal ol
 - **Tukang** (`de_technician`, `de_assignment`): penugasan (bisa lebih dari satu), lepas, dan **geser ke pengajuan prioritas** dengan alasan (tercatat di kedua pengajuan); beban kerja per tukang. Pengajuan ganda ditutup sebagai duplikat dengan tautan ke pengajuan aslinya.
 - Menggantikan halaman kerangka *Tools & Heavy Tools* (`form.tools` / `mon.tools`; akses lama dipindahkan oleh migration 027).
 
-### Rating & Review → Google Maps (migration 020)
+### Aggregator → Google Maps (migration 020)
 
 `app/gmaps.py` membaca outlet Kopi Calf di Google Maps lewat **Places API (New)** resmi: nama, rating, jumlah ulasan, alamat, status bisnis, jam buka (buka/tutup dihitung saat dibaca, WIB) dan ulasan yang diberikan API (**maksimal 5 per outlet**, pilihan Google; seluruh ulasan hanya lewat Business Profile API).
 
@@ -178,7 +178,7 @@ Lihat [.env.example](.env.example). Kredensial database sama dengan yang dipakai
 | `GOOGLE_APPS_SCRIPT_URL` / `_KEY` | kosong | Web app Apps Script + kunci acak server (kosong = export Google Sheets nonaktif) |
 | `GOOGLE_SHARE_ROLE` | `writer` | Akses user pembuat export ke sheet (`writer`/`reader`) |
 | `GOOGLE_SHARE_LINK` | `view` | Akses siapa pun yang punya link sheet/folder export (`view`/`edit`/`none`) |
-| `GOOGLE_PLACES_API_KEY` | kosong | Key Places API (New) untuk Rating & Review → Google Maps; batasi ke Places API (New) + IP VPS |
+| `GOOGLE_PLACES_API_KEY` | kosong | Key Places API (New) untuk Aggregator → Google Maps; batasi ke Places API (New) + IP VPS |
 | `TIMEZONE` | `Asia/Jakarta` | Untuk rentang tanggal default |
 | `OVERVIEW_DATA_FROM` | `2025-08-01` | Awal riwayat lengkap untuk perbandingan Overview |
 | `SESSION_HOURS` / `SESSION_REMEMBER_DAYS` | 12 / 30 | Masa berlaku sesi login (biasa / "keep me signed in") |

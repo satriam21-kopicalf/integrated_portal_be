@@ -145,7 +145,7 @@ DEFINITIONS: dict[str, dict] = {
                     ("Kebersihan Area Warehouse", "Warehouse area"), ("Kebersihan Area Mess", "Staff mess"),
                 ])),
                 # platform = the stars of the outlet on that platform go with the item (2026-10-21): Google from
-                # Rating & Review → Google Maps (automatic), the delivery apps typed by the PIC
+                # Aggregator → Google Maps (automatic), the delivery apps typed by the PIC
                 _sec("rating", "Rating Outlet", "Outlet Rating", _list("rating", [
                     ("Rating Google", "Google rating", {"platform": "google"}),
                     ("Rating GoFood", "GoFood rating", {"platform": "gofood"}),
@@ -290,7 +290,7 @@ def get_visit(visit_id: str) -> Optional[dict]:
 
 
 def google_rating(branch_code: str) -> Optional[dict]:
-    """The outlet's latest Google Maps rating (Rating & Review → Google Maps, app/gmaps.py); None when not on Google."""
+    """The outlet's latest Google Maps rating (Aggregator → Google Maps, app/gmaps.py); None when not on Google."""
     r = db.fetchrow("SELECT data, fetched_at FROM integration_portal.gmaps_place WHERE branch_code = %s AND place_id IS NOT NULL",
                     (branch_code,))
     d = (r or {}).get("data") or {}

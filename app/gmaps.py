@@ -1,4 +1,4 @@
-"""Rating & Review → Google Maps: the outlets on Google Maps through the official Places API (New), 2026-10-19.
+"""Aggregator → Google Maps: the outlets on Google Maps through the official Places API (New), 2026-10-19.
 
 Per Kopi Calf outlet (ESB master_branches, name "Kopi Calf …"): name, rating, number of reviews, address, business
 status, opening hours (open / closed computed at read time, WIB) and the reviews the API gives (at most 5 per place,

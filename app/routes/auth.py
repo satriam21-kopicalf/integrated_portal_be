@@ -68,7 +68,17 @@ def current_user(request: Request) -> dict:
     if not user:
         raise HTTPException(status_code=401, detail="Sesi berakhir, silakan login kembali")
     request.state.user = user
+    if _from_portal(request) and access.operations_only(user):
+        raise HTTPException(status_code=403, detail=OPERATIONS_ONLY)
     return user
+
+
+OPERATIONS_ONLY = "Akun ini menggunakan aplikasi Operations. Silakan login di operations.kopicalf.co.id"
+
+
+def _from_portal(request: Request) -> bool:
+    """Is the call made by the portal (portal.kopicalf.co.id)? Operations, scripts and API clients send no header."""
+    return request.headers.get(access.APP_HEADER, "").strip().lower() == "portal"
 
 
 def require_superadmin(request: Request, user: dict = Depends(current_user)) -> dict:
@@ -158,6 +168,10 @@ def login(req: LoginRequest, request: Request):
     if not row["is_active"]:
         failed("inactive", "Login ditolak: akun nonaktif")
         return JSONResponse({"error": "Akun dinonaktifkan. Hubungi administrator."}, status_code=403)
+    if _from_portal(request) and access.operations_only(row):
+        # form accounts sign in to Operations (2026-10-28); no session is made here
+        failed("operations_only", "Login portal ditolak: akun menggunakan Operations")
+        return JSONResponse({"error": OPERATIONS_ONLY, "redirect": settings.operations_url}, status_code=403)
 
     ttl = timedelta(days=settings.session_remember_days) if req.remember else timedelta(hours=settings.session_hours)
     token = new_token()

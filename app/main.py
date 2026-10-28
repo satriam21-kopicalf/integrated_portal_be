@@ -29,6 +29,7 @@ from app.routes.stock_opname import router as stock_opname_router
 from app.routes.waste import router as waste_router
 from app.routes.pic_checkin import router as pic_checkin_router
 from app.routes.damaged_equipment import router as damaged_equipment_router
+from app.routes.pengajuan import router as pengajuan_router
 from app.routes.visit_forms import router as visit_forms_router
 from app.routes.branch_groups import router as branch_groups_router
 from app.routes.rating import router as rating_router
@@ -121,7 +122,8 @@ app.include_router(branch_groups_router)  # Monitoring → Branch groups / Overv
 app.include_router(pic_checkin_router)  # PIC Check In: before the generic form routes
 app.include_router(visit_forms_router)  # Monitoring Product / Outlet forms and monitoring: before the generic routes
 app.include_router(damaged_equipment_router)  # Form & Monitoring → Damaged Equipment; /api/public/de/* = share links (no sign-in)
-app.include_router(rating_router)  # Rating & Review (skeleton): pages rating.*
+app.include_router(pengajuan_router)  # Form & Monitoring → Pengajuan (petty cash)
+app.include_router(rating_router)  # Aggregator (skeleton): pages rating.*
 app.include_router(access_router)  # pages of roles & users, job titles, departments
 app.include_router(activity_router)  # superadmin reads; any signed-in user reports page views
 app.include_router(realtime_router)

@@ -31,6 +31,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("form.product", "Monitoring Product (form)", "Form"),
     ("form.outlet", "Monitoring Outlet (form)", "Form"),
     ("form.damaged-equipment", "Damaged Equipment (form)", "Form"),
+    ("form.pengajuan", "Pengajuan (form)", "Form"),
     ("cc.monitor", "Monitor", "Cost Control · Stock opname"),
     ("cc.reviews", "Review", "Cost Control · Stock opname"),
     ("cc.entry", "Enter / import SO", "Cost Control · Stock opname"),
@@ -52,10 +53,14 @@ PAGES: list[tuple[str, str, str]] = [
     ("mon.outlet", "Monitoring Outlet", "Monitoring"),
     ("mon.damaged-equipment", "Damaged Equipment", "Monitoring"),
     ("mon.branch-groups", "Branch groups", "Monitoring"),
-    ("rating.google-maps", "Google Maps", "Rating & Review"),
-    ("rating.shopeefood", "ShopeeFood", "Rating & Review"),
-    ("rating.gofood", "GoFood", "Rating & Review"),
-    ("rating.grabfood", "GrabFood", "Rating & Review"),
+    # Form Pengajuan (2026-10-28): the monitoring and its two approval steps (not menu entries of their own)
+    ("mon.pengajuan", "Pengajuan", "Monitoring"),
+    ("mon.pengajuan.verify", "Pengajuan: verify (Operations)", "Monitoring"),
+    ("mon.pengajuan.finance", "Pengajuan: approve & pay (Finance)", "Monitoring"),
+    ("rating.google-maps", "Google Maps", "Aggregator"),
+    ("rating.shopeefood", "ShopeeFood", "Aggregator"),
+    ("rating.gofood", "GoFood", "Aggregator"),
+    ("rating.grabfood", "GrabFood", "Aggregator"),
 ]
 PAGE_KEYS = tuple(p[0] for p in PAGES)
 CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))
@@ -64,6 +69,12 @@ DEFAULT_ROLE_PAGES = {
     "user": ["overview", "sales", "stock-opname", "guide", "form.pic-check-in", "form.product", "form.outlet", "form.damaged-equipment"],
     "cost_control": ["overview", "sales", "stock-opname", "waste", "guide", *CC_PAGES],
 }
+
+# Operations app (operations.kopicalf.co.id, 2026-10-28): the pages it has. An account whose pages are all there and
+# include a form signs in to Operations only; the portal refuses it (the portal sends APP_HEADER: portal on its calls).
+OPERATIONS_PAGES = frozenset({"overview", "sales", "rating.grabfood", "form.pic-check-in", "form.product", "form.outlet",
+                              "form.damaged-equipment"})
+APP_HEADER = "x-kopicalf-app"
 
 _cache = TTLCache()
 
@@ -103,6 +114,15 @@ def pages_for(user: dict) -> list[str]:
 
 def has_page(user: dict, page: str) -> bool:
     return page in pages_for(user)
+
+
+def operations_only(user: dict) -> bool:
+    """A form account (PIC, technician …) with nothing the portal alone has: it uses Operations, not the portal.
+    Superadmins and accounts with other menus (Monitoring, Cost Control, Stock Opname …) keep the portal."""
+    if user.get("role") == "superadmin":
+        return False
+    pages = set(pages_for(user))
+    return any(p.startswith("form.") for p in pages) and pages <= OPERATIONS_PAGES
 
 
 def deny(request: Request, user: dict) -> None:

@@ -1,4 +1,4 @@
-"""Rating & Review: ratings and reviews of the outlets on Google Maps, ShopeeFood, GoFood and GrabFood.
+"""Aggregator: ratings and reviews of the outlets on Google Maps, ShopeeFood, GoFood and GrabFood.
 
     GET  /api/rating/google-maps                     page rating.google-maps: the outlets in scope with their place on
                                                      Google Maps (app/gmaps.py, Places API)

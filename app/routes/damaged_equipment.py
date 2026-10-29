@@ -35,6 +35,8 @@ Team (monitoring page; branches in scope):
                                                           DELETE …/work-links/{link} closes it
     GET|POST|PATCH /api/de/categories[/{id}]              master categories (GET: form or monitoring page)
     GET|POST|PATCH /api/de/technicians[/{id}]             technicians with their active jobs
+Approvals (Review → Accept, 2026-10-29; the same settings as Form Fund): GET /api/de/approvals (monitoring page),
+    PUT /api/de/approvals/{kind} {"steps": [{"label", "userIds"}]} (superadmin; no step = any monitoring account accepts)
 Both: GET /api/de/requests/{id}/pdf, POST /api/de/requests/{id}/share (renew the link), GET /api/de/media/{id},
       GET /api/de/requests/{id}/signature, GET /api/de/requests/{id}/handover-signature/{pic|vendor},
       GET /api/de/requests/{id}/final (Done: the internal work report or the vendor's handover record)
@@ -74,6 +76,8 @@ def _run(fn, *args):
         return fn(*args)
     except LookupError as e:
         raise HTTPException(404, detail=str(e)) from None
+    except PermissionError as e:  # not the approver of the step waiting
+        raise HTTPException(403, detail=str(e)) from None
     except CheckInError as e:  # DeError, or a photo / signature that cannot be read
         raise HTTPException(422, detail=str(e)) from None
 
@@ -681,3 +685,39 @@ def work_submit(token: str, body: WorkSubmitIn) -> dict:
 @router.get("/api/public/de-work/{token}/media/{media_id}")
 def work_media(token: str, media_id: str) -> FileResponse:
     return _file(_run(de.work_media, token, media_id))
+
+
+# ---------------------------------------------------------------- approvals (Review → Accept)
+
+class DeStepIn(BaseModel):
+    label: str = Field("", max_length=60)
+    userIds: list[str] = Field(default_factory=list, max_length=50)
+
+
+class DeFlowIn(BaseModel):
+    steps: list[DeStepIn] = Field(default_factory=list, max_length=8)
+
+
+@router.get("/api/de/approvals")
+def approvals(request: Request, user: dict = Depends(current_user)) -> dict:
+    _need(request, user, MON)
+    from app import pengajuan as pg
+    kinds = pg.FLOW_FORMS["de"][0]
+    return {"kinds": kinds, "flows": {k: pg.flow(k, "de") for k in kinds}, "users": pg.approver_options(),
+            "canEdit": user.get("role") == "superadmin"}
+
+
+@router.put("/api/de/approvals/{kind}")
+def set_approvals(kind: str, body: DeFlowIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    if user.get("role") != "superadmin":
+        deny(request, user)
+    from app import pengajuan as pg
+    steps = [{**s.model_dump(), "type": "APPROVE"} for s in body.steps]
+    try:
+        out = pg.set_flow(user, kind, steps, "de")
+    except CheckInError as e:
+        raise HTTPException(422, detail=str(e)) from None
+    activity.record("de", user=user, request=request, page="/monitoring/damaged-equipment",
+                    summary=f"Mengatur approval Damaged Equipment {kind}", details={"kind": kind, "steps": steps})
+    return {"flow": out}
+

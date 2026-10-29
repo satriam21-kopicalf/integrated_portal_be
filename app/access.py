@@ -74,7 +74,9 @@ DEFAULT_ROLE_PAGES = {
 
 # Operations app (operations.kopicalf.co.id, 2026-10-28): the pages it has. An account whose pages are all there and
 # include a form signs in to Operations only; the portal refuses it (the portal sends APP_HEADER: portal on its calls).
-OPERATIONS_PAGES = frozenset({"overview", "sales", "rating.grabfood", "stock-opname", "waste", "guide", *FORM_PAGES})
+# every Aggregator menu opens in Operations too (2026-10-29)
+OPERATIONS_PAGES = frozenset({"overview", "sales", "rating.grabfood", "rating.google-maps", "rating.shopeefood", "rating.gofood",
+                              "stock-opname", "waste", "guide", *FORM_PAGES})
 APP_HEADER = "x-kopicalf-app"
 
 _cache = TTLCache()

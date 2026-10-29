@@ -267,7 +267,7 @@ COLS = """r.id::text, r.number, r.kind, r.status, r.hold_from, r.user_id::text, 
     r.duplicate_of::text, r.created_at, r.updated_at, r.submitted_at, r.closed_at, r.target_at, r.target_note, r.target_by,
     r.target_set_at, r.target_changes, r.mode, r.handover_requested_at, r.handover_at, r.handover_note, r.handover_distance_m,
     r.handover_outside, r.pic_sign_name, (r.pic_sign IS NOT NULL) AS has_pic_sign, r.vendor_sign_name,
-    (r.vendor_sign IS NOT NULL) AS has_vendor_sign, r.approved_by,
+    (r.vendor_sign IS NOT NULL) AS has_vendor_sign, r.approved_by, r.approval_step,
     (SELECT number FROM integration_portal.de_request d WHERE d.id = r.duplicate_of) AS duplicate_number"""
 
 
@@ -614,6 +614,7 @@ def team_full(request_id: str) -> dict:
                     (request_id, row["branch_code"], row["user_id"], list(OPEN)))
     out["related"] = [{**view(r), "items": items_of(r["id"])} for r in rows]
     out["allowed"] = allowed_next(row)
+    out["approval"] = approval_state(row) if row["status"] == "REVIEW" else None
     out["workLinks"] = work_links(request_id)
     out["costItems"] = cost_items(request_id)
     out["labor"] = labor(request_id)
@@ -626,6 +627,19 @@ def allowed_next(row: dict) -> list[str]:
     return list(FLOW.get(row["status"], ()))
 
 
+def approval_state(row: dict) -> Optional[dict]:
+    """The approval step a request in Review waits at (Review → Accept, set by management like Form Fund; 2026-10-29).
+    None when its kind has no step: any monitoring account accepts it, as before."""
+    from app import pengajuan as pg
+    steps = pg._approvals(pg.flow(row["kind"], "de"))
+    if not steps:
+        return None
+    at = min(max(row.get("approval_step") or 1, 1), len(steps))
+    step = steps[at - 1]
+    return {"position": at, "total": len(steps), "label": step["label"], "users": [u["name"] for u in step["users"]],
+            "userIds": [u["id"] for u in step["users"]], "steps": [{"label": s["label"], "users": [u["name"] for u in s["users"]]} for s in steps]}
+
+
 def change_status(user: dict, request_id: str, to: str, note: Optional[str]) -> dict:
     recompute(request_id)
     row = get_row(request_id)
@@ -636,6 +650,19 @@ def change_status(user: dict, request_id: str, to: str, note: Optional[str]) -> 
     note = (note or "").strip()[:2000] or None
     if to in NOTE_REQUIRED and not note:
         raise DeError(f"Alasan wajib diisi untuk {STATUS_LABEL[to]}")
+    # Review → Accept / Reject: the approver of the step waiting; the steps before the last keep it in Review
+    approval = approval_state(row) if row["status"] == "REVIEW" and to in ("ACCEPTED", "REJECTED") else None
+    if approval is not None:
+        from app import pengajuan as pg
+        step = {"users": [{"id": i} for i in approval["userIds"]]}
+        if not pg.takes(user, step):
+            raise PermissionError(f"Tahap {approval['label']} bukan bagian Anda (approver: {', '.join(approval['users']) or 'superadmin'})")
+        if to == "ACCEPTED" and approval["position"] < approval["total"]:
+            with db.transaction() as conn:
+                conn.execute(f"UPDATE {P}.de_request SET approval_step = %s, updated_at = now() WHERE id::text = %s",
+                             (approval["position"] + 1, request_id))
+                _event(conn, request_id, user, "STATUS", "REVIEW", "REVIEW", note, {"action": "APPROVE", "step": approval["label"]})
+            return team_full(request_id)
     active = db.fetchrow(f"SELECT count(*)::int AS n FROM {P}.de_assignment WHERE request_id::text = %s AND status = 'ACTIVE'", (request_id,))["n"]
     vendor = row.get("mode") == "VENDOR" and active > 0
     count = lambda kind: db.fetchrow(f"SELECT count(*)::int AS n FROM {P}.de_media WHERE request_id::text = %s AND kind = %s",  # noqa: E731
@@ -664,6 +691,8 @@ def change_status(user: dict, request_id: str, to: str, note: Optional[str]) -> 
                          (request_id,))
         if to == "DONE":
             conn.execute(f"UPDATE {P}.de_request SET approved_by = %s WHERE id::text = %s", (user.get("full_name") or user["username"], request_id))
+        if to == "REVIEW" and row["status"] != "ON_HOLD":  # a new review starts at the first approval step
+            conn.execute(f"UPDATE {P}.de_request SET approval_step = 1 WHERE id::text = %s", (request_id,))
         if row["status"] == "IN_PROGRESS" or to in ("DONE", "REJECTED"):  # the work stops: open technician links close
             conn.execute(f"""UPDATE {P}.de_work_link SET revoked_at = now() WHERE request_id::text = %s AND submitted_at IS NULL
                              AND revoked_at IS NULL""", (request_id,))

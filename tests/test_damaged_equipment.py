@@ -228,3 +228,31 @@ def test_target_needs_a_reason(monkeypatch):
 def test_labor_units():
     assert de._units("HOURLY", 2.2) == 2.5 and de._units("DAILY", 25) == 2 and de._units("WEEKLY", 200) == 2
     assert de._units("MONTHLY", 10) == 1 and de._units("PER_JOB", 0) == 1 and de._units("DAILY", 0) == 0
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_approval_steps(monkeypatch):
+    """No approval step unless a test sets them (the steps live in the database)."""
+    from app import pengajuan as pg
+    monkeypatch.setattr(pg, "flow", lambda kind, form="pengajuan": [])
+
+
+def test_review_waits_for_the_approval_steps(monkeypatch):
+    """Review → Accept follows the approval steps of the kind (2026-10-29); no step = any monitoring account."""
+    from app import damaged_equipment as de
+    from app import pengajuan as pg
+    steps = [{"id": 1, "position": 1, "label": "Ops Manager", "type": "APPROVE", "users": [{"id": "om", "name": "OM"}]},
+             {"id": 2, "position": 2, "label": "Management", "type": "APPROVE", "users": [{"id": "mg", "name": "MG"}]}]
+    monkeypatch.setattr(pg, "flow", lambda kind, form="pengajuan": steps if kind == "REPAIR" else [])
+    row = {"status": "REVIEW", "kind": "REPAIR", "approval_step": 1}
+    st = de.approval_state(row)
+    assert st["label"] == "Ops Manager" and st["position"] == 1 and st["total"] == 2
+    assert de.approval_state({**row, "approval_step": 2})["userIds"] == ["mg"]
+    assert de.approval_state({**row, "kind": "PROCUREMENT"}) is None
+    monkeypatch.setattr(de, "recompute", lambda rid: None)
+    monkeypatch.setattr(de, "get_row", lambda rid: {**row, "id": rid, "hold_from": None})
+    with pytest.raises(PermissionError):
+        de.change_status({"id": "mg", "username": "mg"}, "r1", "ACCEPTED", None)  # not the step waiting

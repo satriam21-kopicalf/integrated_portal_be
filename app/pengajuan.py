@@ -259,10 +259,15 @@ def view(row: dict, full: bool = False) -> dict:
 
 # ---------------------------------------------------------------- approvals and plafon (set by management)
 
-def flow(kind: str) -> list[dict]:
+# the forms with approval steps: their kinds and the page the approvers get (Damaged Equipment: Review → Accept)
+FLOW_FORMS = {"pengajuan": (KINDS, "mon.pengajuan"),
+              "de": ({"REPAIR": "Maintenance", "PROCUREMENT": "Pengadaan (Dekorasi, Tools & Merchandise)"}, "mon.damaged-equipment")}
+
+
+def flow(kind: str, form: str = "pengajuan") -> list[dict]:
     """The steps of one kind in order: the approval steps, then the payment step; each with its users."""
     steps = db.fetch(f"""SELECT s.id, s.position, s.label, s.step_type FROM {P}.approval_step s
-                         WHERE s.form = 'pengajuan' AND s.kind = %s ORDER BY (s.step_type = 'PAY'), s.position""", (kind,))
+                         WHERE s.form = %s AND s.kind = %s ORDER BY (s.step_type = 'PAY'), s.position""", (form, kind))
     users: dict[int, list] = {}
     if steps:
         for r in db.fetch(f"""SELECT su.step_id, u.id::text, COALESCE(NULLIF(u.full_name, ''), u.username) AS name, u.username
@@ -301,15 +306,19 @@ def approver_of_any(user: dict) -> bool:
                                 WHERE s.form = 'pengajuan' AND su.user_id::text = %s LIMIT 1""", (str(user["id"]),)))
 
 
-def set_flow(user: dict, kind: str, steps: list[dict]) -> list[dict]:
+def set_flow(user: dict, kind: str, steps: list[dict], form: str = "pengajuan") -> list[dict]:
     """Replaces the steps of a kind: [{label, userIds}] approval steps in order, then the payment step {label, userIds}
-    (the last entry, type PAY). Requests waiting keep their position (clamped to the new number of steps)."""
-    if kind not in KINDS:
+    (the last entry, type PAY; Form Fund only). Damaged Equipment: approval steps only, none = any monitoring account
+    accepts as before. Requests waiting keep their position (clamped to the new number of steps)."""
+    kinds, page = FLOW_FORMS.get(form, ({}, ""))
+    if kind not in kinds:
         raise PengajuanError("Jenis pengajuan tidak dikenal")
     appr = [s for s in steps if s.get("type") != "PAY"]
     pay = [s for s in steps if s.get("type") == "PAY"]
-    if not appr or len(pay) != 1:
+    if form == "pengajuan" and (not appr or len(pay) != 1):
         raise PengajuanError("Minimal satu tahap approval dan tepat satu tahap pembayaran")
+    if form != "pengajuan" and pay:
+        raise PengajuanError("Damaged Equipment tidak memiliki tahap pembayaran")
     if len(appr) > MAX_STEPS:
         raise PengajuanError(f"Maksimal {MAX_STEPS} tahap approval")
     ids = {str(i) for s in steps for i in (s.get("userIds") or [])}
@@ -318,20 +327,24 @@ def set_flow(user: dict, kind: str, steps: list[dict]) -> list[dict]:
         if ids - known:
             raise PengajuanError("Ada user approver yang tidak aktif atau tidak ditemukan")
     with db.transaction() as conn:
-        conn.execute(f"DELETE FROM {P}.approval_step WHERE form = 'pengajuan' AND kind = %s", (kind,))
+        conn.execute(f"DELETE FROM {P}.approval_step WHERE form = %s AND kind = %s", (form, kind))
         for i, s in enumerate([*appr, *pay], start=1):
             label = " ".join(str(s.get("label") or "").split())[:60] or ("Pembayaran" if s.get("type") == "PAY" else f"Approval {i}")
-            sid = conn.execute(f"""INSERT INTO {P}.approval_step (form, kind, position, label, step_type) VALUES ('pengajuan', %s, %s, %s, %s)
-                                   RETURNING id""", (kind, i, label, "PAY" if s.get("type") == "PAY" else "APPROVE")).fetchone()["id"]
+            sid = conn.execute(f"""INSERT INTO {P}.approval_step (form, kind, position, label, step_type) VALUES (%s, %s, %s, %s, %s)
+                                   RETURNING id""", (form, kind, i, label, "PAY" if s.get("type") == "PAY" else "APPROVE")).fetchone()["id"]
             for uid in dict.fromkeys(str(u) for u in (s.get("userIds") or [])):
                 conn.execute(f"INSERT INTO {P}.approval_step_user (step_id, user_id) VALUES (%s, %s)", (sid, uid))
         # approvers open the monitoring (portal): an exception where their role does not give it
         for uid in ids:
-            conn.execute(f"""INSERT INTO {P}.user_page (user_id, page, allowed) VALUES (%s, 'mon.pengajuan', true)
-                             ON CONFLICT (user_id, page) DO UPDATE SET allowed = true""", (uid,))
-        conn.execute(f"""UPDATE {P}.pengajuan SET approval_step = LEAST(approval_step, %s) WHERE kind = %s AND status = 'SUBMITTED'""",
-                     (len(appr), kind))
-    return flow(kind)
+            conn.execute(f"""INSERT INTO {P}.user_page (user_id, page, allowed) VALUES (%s, %s, true)
+                             ON CONFLICT (user_id, page) DO UPDATE SET allowed = true""", (uid, page))
+        if form == "pengajuan":
+            conn.execute(f"""UPDATE {P}.pengajuan SET approval_step = LEAST(approval_step, %s) WHERE kind = %s AND status = 'SUBMITTED'""",
+                         (len(appr), kind))
+        else:
+            conn.execute(f"""UPDATE {P}.de_request SET approval_step = GREATEST(LEAST(approval_step, %s), 1)
+                             WHERE kind = %s AND status = 'REVIEW'""", (len(appr), kind))
+    return flow(kind, form)
 
 
 def approver_options() -> list[dict]:

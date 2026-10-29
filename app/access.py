@@ -55,8 +55,6 @@ PAGES: list[tuple[str, str, str]] = [
     ("mon.branch-groups", "Branch groups", "Monitoring"),
     # Form Pengajuan (2026-10-28): the monitoring and its two approval steps (not menu entries of their own)
     ("mon.pengajuan", "Pengajuan", "Monitoring"),
-    ("mon.pengajuan.verify", "Pengajuan: verify (Operations)", "Monitoring"),
-    ("mon.pengajuan.finance", "Pengajuan: approve & pay (Finance)", "Monitoring"),
     ("rating.google-maps", "Google Maps", "Aggregator"),
     ("rating.shopeefood", "ShopeeFood", "Aggregator"),
     ("rating.gofood", "GoFood", "Aggregator"),
@@ -70,7 +68,7 @@ FORM_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("form."))
 # is added to the role by its migration); role "outlet" = the shared outlet / HUB CK / HUB WH accounts (2026-10-28)
 DEFAULT_ROLE_PAGES = {
     "user": ["overview", "sales", "stock-opname", "waste", "guide", *FORM_PAGES],
-    "outlet": ["stock-opname", "waste"],
+    "outlet": ["stock-opname", "waste", "form.pengajuan"],
     "cost_control": ["overview", "sales", "stock-opname", "waste", "guide", *CC_PAGES],
 }
 

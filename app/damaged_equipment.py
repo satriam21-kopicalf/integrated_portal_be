@@ -48,7 +48,8 @@ WAGE_UNIT = {"HOURLY": "jam", "DAILY": "hari", "WEEKLY": "minggu", "MONTHLY": "h
 COST_KINDS = ("MATERIAL", "SERVICE", "TRANSPORT", "OTHER")
 MAX_VIDEO_BYTES = 10 * 1024 * 1024
 MAX_ITEMS = 50
-KINDS = {"REPAIR": "Maintenance", "PROCUREMENT": "Pengadaan (Dekorasi & Tools)"}
+KINDS = {"REPAIR": "Maintenance", "PROCUREMENT": "Pengadaan (Dekorasi, Tools & Merchandise)"}
+MERCH_GROUP = "Merchandise"  # category group whose items come from the ESB menu (MERCH; sizes MERCH SIZE)
 URGENCY = ("CRITICAL", "HIGH", "NORMAL", "LOW", "PLANNED")  # most urgent first
 URGENCY_LABEL = {"CRITICAL": "Kritis", "HIGH": "Tinggi", "NORMAL": "Normal", "LOW": "Rendah", "PLANNED": "Dijadwalkan"}
 # hours from sending to done (on hold not counted); PLANNED has no target
@@ -383,8 +384,21 @@ def form_state(user: dict) -> dict:
     branches = branch_options(user)
     return {"user": {"id": str(user["id"]), "name": user.get("full_name") or user["username"]}, "branches": branches,
             "branchGroups": {b["code"]: groups.get(b["code"]) for b in branches},
-            "categories": categories(), "kinds": KINDS, "urgency": URGENCY_LABEL, "requests": out,
+            "categories": categories(), "kinds": KINDS, "urgency": URGENCY_LABEL, "requests": out, "merchandise": merchandise(),
             "limits": {"photos": MAX_PHOTOS, "videoBytes": MAX_VIDEO_BYTES, "items": MAX_ITEMS}}
+
+
+def merchandise() -> dict:
+    """The merchandise sold in the outlets (ESB menu category MERCH, sold in the last 12 months) and the sizes (MERCH SIZE),
+    to pick in Procurement; a T-shirt takes a size."""
+    rows = db.fetch(f"""SELECT category_detail, menu_name, sum(qty) AS qty FROM {P}.agg_menu_monthly
+                        WHERE category_detail IN ('MERCH', 'MERCH SIZE') AND month >= (date_trunc('month', now()) - interval '12 months')::date
+                        GROUP BY 1, 2 ORDER BY 1, 2""")
+    order = ["SMALL", "MEDIUM", "LARGE", "EXTRA LARGE", "DOUBLE EXTRA LARGE", "TRIPLE EXTRA LARGE"]
+    sizes = sorted({r["menu_name"].strip() for r in rows if r["category_detail"] == "MERCH SIZE"},
+                   key=lambda n: (order.index(n.upper()) if n.upper() in order else 99, n))
+    items = [{"name": r["menu_name"].strip(), "sized": "SHIRT" in r["menu_name"].upper()} for r in rows if r["category_detail"] == "MERCH"]
+    return {"items": items, "sizes": sizes}
 
 
 def own_draft(user: dict, request_id: str) -> dict:

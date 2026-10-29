@@ -7,7 +7,7 @@ def test_waste_pages_in_the_catalog():
     assert {"waste", "cc.waste-monitor", "cc.waste-review"} <= set(access.PAGE_KEYS)
     assert {"cc.waste-monitor", "cc.waste-review"} <= set(access.CC_PAGES)
     # the PICs (role user) and the outlet / hub accounts (role outlet) open the input (2026-10-28)
-    assert "waste" in access.DEFAULT_ROLE_PAGES["user"] and access.DEFAULT_ROLE_PAGES["outlet"] == ["stock-opname", "waste"]
+    assert "waste" in access.DEFAULT_ROLE_PAGES["user"] and access.DEFAULT_ROLE_PAGES["outlet"] == ["stock-opname", "waste", "form.pengajuan"]
     assert {"waste", "cc.waste-monitor", "cc.waste-review"} <= set(access.DEFAULT_ROLE_PAGES["cost_control"])
 
 

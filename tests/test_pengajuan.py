@@ -12,7 +12,9 @@ from app import pengajuan as pg
 def _row(**kw):
     base = {"baristas": [{"name": "Budi"}], "period_from": date(2026, 10, 1), "period_to": date(2026, 10, 7),
             "opening_balance": Decimal(500000), "opening_expected": Decimal(500000), "opening_note": None,
-            "income_amount": Decimal(0), "income_note": None, "closing_balance": Decimal(400000), "note": None}
+            "income_amount": Decimal(0), "income_note": None, "closing_balance": Decimal(400000), "note": None, "kind": "PETTY_CASH",
+            "requester_name": "Budi", "requester_phone": "0812 3456 789", "payee_bank": "BCA", "payee_account": "123456",
+            "payee_name": "Budi", "purpose": None, "needed_on": None}
     return {**base, **kw}
 
 
@@ -47,19 +49,50 @@ def test_period_and_baristas():
     assert "Isi periode pengajuan (dari – sampai)" in pg.missing(_row(period_from=None), [LINE], [RECEIPT])
 
 
-def test_flow_steps_follow_the_permissions(monkeypatch):
-    assert pg.allowed_next({"status": "SUBMITTED"}, {"verify"}) == ["VERIFIED", "REVISION", "REJECTED"]
-    assert pg.allowed_next({"status": "SUBMITTED"}, {"finance"}) == []
-    assert pg.allowed_next({"status": "VERIFIED"}, {"finance"}) == ["APPROVED", "REVISION", "REJECTED"]
-    assert pg.allowed_next({"status": "APPROVED"}, {"verify"}) == []
-    assert pg.allowed_next({"status": "PAID"}, {"verify", "finance"}) == []
-    monkeypatch.setattr(pg, "get_row", lambda i: {"status": "SUBMITTED", "id": i})
+STEPS = [{"id": 1, "position": 1, "label": "Area Manager", "type": "APPROVE", "users": [{"id": "am", "name": "AM"}]},
+         {"id": 2, "position": 2, "label": "Finance Manager", "type": "APPROVE", "users": []},
+         {"id": 3, "position": 3, "label": "Pembayaran", "type": "PAY", "users": [{"id": "fin", "name": "Finance"}]}]
+AM, FIN, SA = {"id": "am", "username": "am"}, {"id": "fin", "username": "fin"}, {"id": "sa", "username": "sa", "role": "superadmin"}
+
+
+def test_steps_are_taken_by_their_users(monkeypatch):
+    monkeypatch.setattr(pg, "flow", lambda kind: STEPS)
+    step1 = {"status": "SUBMITTED", "approval_step": 1, "kind": "BILL"}
+    assert pg.allowed_next(AM, step1) == ["APPROVE", "REVISION", "REJECTED"]
+    assert pg.allowed_next(FIN, step1) == []
+    assert pg.allowed_next(SA, step1) == ["APPROVE", "REVISION", "REJECTED"]  # a superadmin may always act
+    step2 = {**step1, "approval_step": 2}  # a step without users: superadmins only
+    assert pg.allowed_next(AM, step2) == [] and pg.allowed_next(SA, step2)
+    paying = {"status": "APPROVED", "approval_step": 2, "kind": "BILL"}
+    assert pg.allowed_next(FIN, paying) == ["PAID", "REVISION"] and pg.allowed_next(AM, paying) == []
+    assert pg.allowed_next(FIN, {"status": "PAID", "approval_step": 2, "kind": "BILL"}) == []
+    monkeypatch.setattr(pg, "get_row", lambda i: {"status": "SUBMITTED", "approval_step": 1, "kind": "BILL", "id": i})
     with pytest.raises(PermissionError):
-        pg.change_status({"id": "u", "username": "x"}, "p", "VERIFIED", None, {"finance"})
+        pg.change_status(FIN, "p", "APPROVE", None)
     with pytest.raises(pg.PengajuanError):
-        pg.change_status({"id": "u", "username": "x"}, "p", "REVISION", " ", {"verify"})  # a revision needs a note
+        pg.change_status(AM, "p", "REVISION", " ")  # a revision needs a note
     with pytest.raises(pg.PengajuanError):
-        pg.change_status({"id": "u", "username": "x"}, "p", "PAID", None, {"finance"})  # not from SUBMITTED
+        pg.change_status(AM, "p", "PAID", None)  # not before the approvals
+
+
+def test_petty_cash_asks_the_top_up_to_the_plafon():
+    # plafon 2 jt, opening 1.5 jt, nothing in, 1.2 jt spent → closing 300 rb → top-up 1.7 jt
+    assert pg.requested("PETTY_CASH", 1500000, 0, 1200000, Decimal(2000000)) == Decimal(1700000)
+    assert pg.requested("PETTY_CASH", 3000000, 0, 100000, Decimal(2000000)) == Decimal(0)  # above the plafon: nothing
+    assert pg.requested("PETTY_CASH", 1500000, 0, 1200000, None) == Decimal(1200000)  # no plafon: the money spent
+    assert pg.requested("BILL", None, 0, 450000, Decimal(2000000)) == Decimal(450000)
+
+
+def test_budget_requests_need_their_purpose_date_and_receipts():
+    bill = _row(kind="BILL", baristas=[], period_from=None, period_to=None, opening_balance=None, closing_balance=None)
+    line = {"id": 1, "spentOn": None, "description": "Listrik Oktober", "amount": 850000.0}
+    assert pg.missing(bill, [line], []) == ["Tulis keperluan pengajuan", "Isi jatuh tempo", "Rincian 1: nota / kwitansi / invoice"]
+    ok = {**bill, "purpose": "Tagihan PLN", "needed_on": date(2026, 11, 5)}
+    assert pg.missing(ok, [line], [RECEIPT]) == []
+    marketing = {**ok, "kind": "MARKETING"}  # an estimate: no receipt needed
+    assert pg.missing(marketing, [line], []) == []
+    assert "Isi rekening tujuan: bank, no. rekening dan nama pemilik" in pg.missing({**ok, "payee_account": ""}, [line], [RECEIPT])
+    assert "Isi no. handphone pribadi pengaju" in pg.missing({**ok, "requester_phone": "0812"}, [line], [RECEIPT])
 
 
 def test_amounts_are_whole_rupiah():

@@ -33,7 +33,7 @@ class UserFields(BaseModel):
     username: Optional[str] = Field(default=None, max_length=32)
     email: Optional[str] = Field(default=None, max_length=254)
     fullName: Optional[str] = Field(default=None, max_length=120)
-    role: Optional[Literal["superadmin", "cost_control", "user"]] = None
+    role: Optional[Literal["superadmin", "cost_control", "user", "outlet"]] = None
     isActive: Optional[bool] = None
     phoneNumber: Optional[str] = Field(default=None, max_length=32)
     jobTitle: Optional[str] = Field(default=None, max_length=80)

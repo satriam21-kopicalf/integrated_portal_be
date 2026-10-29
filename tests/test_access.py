@@ -85,3 +85,10 @@ def test_stock_opname_paths_map_to_pages():
     assert "cc.reports" in access.so_page("GET", "counts") and "cc.reports" not in access.so_page("PUT", "counts/abc/lines")
     assert "stock-opname" in access.so_page("GET", "recipes/active")
     assert access.so_page("GET", "something-else") == ()
+
+
+def test_user_form_accepts_every_role():
+    """The User Accounts form saves an Outlet / Hub account too (2026-10-29: it was refused with 422)."""
+    from app.routes.users import UserFields
+    for role in ("superadmin", "cost_control", "user", "outlet"):
+        assert UserFields(role=role).role == role

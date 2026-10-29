@@ -254,6 +254,8 @@ def view(row: dict, full: bool = False) -> dict:
                         for s in flow(row["kind"])]
         if row["kind"] == "PETTY_CASH" and row["status"] in EDITABLE:
             out["plafon"] = _num(plafon_of(row["branch_code"]))
+        if row["kind"] == "PETTY_CASH":
+            out["purchaseRef"] = purchase_reference(row["branch_code"], row["period_to"])
     return out
 
 
@@ -388,6 +390,23 @@ def requested(kind: str, opening: Any, income: Any, out: Any, plafon: Optional[D
     if kind == "PETTY_CASH" and plafon is not None and opening is not None:
         return max(plafon - (Decimal(str(opening)) + Decimal(str(income or 0)) - out), Decimal(0))
     return out
+
+
+def purchase_reference(branch_code: str, until: Optional[date] = None) -> Optional[dict]:
+    """What the outlet bought itself in ESB (Simple Purchase, the purchases of the outlet, not the head office) over
+    the 13 weeks before `until`: the reference of the weekly petty cash (MoM 2026-10-27)."""
+    end = until or _now().date()
+    b = db.fetchrow("""SELECT branch_id::text, branch_name FROM integration_esb.master_branches WHERE branch_code = %s
+                       AND COALESCE(is_deleted, false) = false LIMIT 1""", (branch_code,))
+    if not b:
+        return None
+    r = db.fetchrow("""SELECT COALESCE(sum(total), 0) AS total, count(*)::int AS docs,
+                              COALESCE(sum(total) FILTER (WHERE doc_date > %(end)s - 7), 0) AS last_week
+                       FROM integration_esb.erp_documents
+                       WHERE module = 'simple_purchase' AND deleted_at IS NULL AND branch_id::text = %(id)s AND branch_name = %(name)s
+                         AND doc_date > %(end)s - 91 AND doc_date <= %(end)s""", {"id": b["branch_id"], "name": b["branch_name"], "end": end})
+    return {"weeks": 13, "until": end.isoformat(), "total": _num(r["total"]), "avgWeek": round(float(r["total"]) / 13),
+            "lastWeek": _num(r["last_week"]), "docs": r["docs"]}
 
 
 # ---------------------------------------------------------------- outlet (form.pengajuan)

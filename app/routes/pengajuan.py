@@ -298,6 +298,12 @@ class FlowIn(BaseModel):
     steps: list[StepIn] = Field(min_length=2, max_length=pg.MAX_STEPS + 1)
 
 
+class SuggestIn(BaseModel):
+    codes: list[str] = Field(..., min_length=1, max_length=500)
+    factor: float = Field(1.2, ge=0.5, le=5)
+    roundTo: int = Field(50_000, ge=1_000, le=1_000_000)
+
+
 class PlafonIn(BaseModel):
     branchCode: str = Field(min_length=1, max_length=40)
     amount: Optional[float] = None
@@ -327,6 +333,25 @@ def set_flow(kind: str, body: FlowIn, request: Request, user: dict = Depends(cur
     activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan",
                     summary=f"Mengatur approval {pg.KINDS.get(kind, kind)}", details={"kind": kind, "steps": [s.model_dump() for s in body.steps]})
     return {"flow": out}
+
+
+@router.get("/api/pengajuan/settings/plafon-suggestions")
+def plafon_suggestions(request: Request, factor: float = Query(1.2, ge=0.5, le=5), roundTo: int = Query(50_000, ge=1_000, le=1_000_000),
+                       user: dict = Depends(current_user)) -> dict:
+    """A plafon per outlet from its Simple Purchase in ESB (weekly average × factor, rounded up)."""
+    if not _plafon_editor(user):
+        deny(request, user)
+    return {"weeks": pg.SP_WEEKS, "factor": factor, "roundTo": roundTo, "data": pg.plafon_suggestions(factor, roundTo)}
+
+
+@router.post("/api/pengajuan/settings/plafon-suggestions")
+def apply_plafon_suggestions(body: SuggestIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    if not _plafon_editor(user):
+        deny(request, user)
+    out = pg.apply_suggestions(user, body.codes, body.factor, body.roundTo)
+    activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan",
+                    summary=f"Plafon dari usulan Simple Purchase: {out['applied']} outlet", details=body.model_dump())
+    return out
 
 
 @router.put("/api/pengajuan/settings/plafon")

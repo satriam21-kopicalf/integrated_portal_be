@@ -156,3 +156,13 @@ def test_roles_of_the_pics_and_the_outlets():
     assert access.so_role({"id": "x", "role": "outlet"}) == "user"  # the outlet accounts count as crew in kopicalf
     from app import accounts
     assert "outlet" in accounts.ROLES and "outlet" not in accounts.GLOBAL_ROLES  # branch scoped like role user
+
+
+def test_plafon_suggested_from_simple_purchase(monkeypatch):
+    """Weekly average of the outlet's Simple Purchase × factor, rounded up; no purchase = no suggestion (2026-10-30)."""
+    monkeypatch.setattr(pg, "outlet_options", lambda: [{"code": "A", "name": "A"}, {"code": "B", "name": "B"}])
+    monkeypatch.setattr(pg, "weekly_averages", lambda codes, until=None: {"A": {"avgWeek": 1005331}, "B": {"avgWeek": 0}})
+    monkeypatch.setattr(pg, "plafons", lambda: {"default": None, "branches": [{"branchCode": "A", "amount": 900000.0}]})
+    out = {s["code"]: s for s in pg.plafon_suggestions(1.2, 50_000)}
+    assert out["A"]["suggested"] == 1_250_000 and out["A"]["current"] == 900000.0
+    assert out["B"]["suggested"] is None

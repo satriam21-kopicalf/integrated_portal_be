@@ -256,6 +256,7 @@ def view(row: dict, full: bool = False) -> dict:
             out["plafon"] = _num(plafon_of(row["branch_code"]))
         if row["kind"] == "PETTY_CASH":
             out["purchaseRef"] = purchase_reference(row["branch_code"], row["period_to"])
+            out["purchaseDocs"] = purchase_docs(row["branch_code"], row["period_from"], row["period_to"])
     return out
 
 
@@ -415,6 +416,83 @@ def purchase_reference(branch_code: str, until: Optional[date] = None) -> Option
                          AND doc_date > %(end)s - 91 AND doc_date <= %(end)s""", {"id": b["branch_id"], "name": b["branch_name"], "end": end})
     return {"weeks": 13, "until": end.isoformat(), "total": _num(r["total"]), "avgWeek": round(float(r["total"]) / 13),
             "lastWeek": _num(r["last_week"]), "docs": r["docs"]}
+
+
+SP_WEEKS = 13
+ABOVE_REF = 2  # a request above this many times the outlet's weekly average is flagged for the approvers
+
+
+def _esb_branches(codes: list[str]) -> dict[str, dict]:
+    """ESB branch id and name of the branch codes (Simple Purchase documents carry them)."""
+    rows = db.fetch("""SELECT DISTINCT ON (branch_code) branch_code, branch_id::text, branch_name FROM integration_esb.master_branches
+                       WHERE branch_code = ANY(%s) AND COALESCE(is_deleted, false) = false ORDER BY branch_code""", (codes,))
+    return {r["branch_code"]: r for r in rows}
+
+
+def weekly_averages(codes: list[str], until: Optional[date] = None) -> dict[str, dict]:
+    """Per branch: the average a week of its Simple Purchase over the SP_WEEKS weeks before `until`, and its last 7 days."""
+    if not codes:
+        return {}
+    end = until or _now().date()
+    br = _esb_branches(codes)
+    if not br:
+        return {}
+    keys = [f"{b['branch_id']}|{b['branch_name']}" for b in br.values()]
+    rows = db.fetch("""SELECT branch_id::text || '|' || branch_name AS k, sum(total) AS total, count(*)::int AS docs,
+                              COALESCE(sum(total) FILTER (WHERE doc_date > %(end)s - 7), 0) AS last_week
+                       FROM integration_esb.erp_documents
+                       WHERE module = 'simple_purchase' AND deleted_at IS NULL AND doc_date > %(end)s - %(days)s AND doc_date <= %(end)s
+                         AND branch_id::text || '|' || branch_name = ANY(%(keys)s)
+                       GROUP BY 1""", {"end": end, "days": SP_WEEKS * 7, "keys": keys})
+    by_key = {r["k"]: r for r in rows}
+    out = {}
+    for code, b in br.items():
+        r = by_key.get(f"{b['branch_id']}|{b['branch_name']}")
+        total = float(r["total"]) if r else 0.0
+        out[code] = {"weeks": SP_WEEKS, "until": end.isoformat(), "total": total, "avgWeek": round(total / SP_WEEKS),
+                     "lastWeek": _num(r["last_week"]) if r else 0.0, "docs": r["docs"] if r else 0}
+    return out
+
+
+def purchase_docs(branch_code: str, date_from: Optional[date], date_to: Optional[date]) -> Optional[dict]:
+    """The outlet's Simple Purchase documents of a period, for the reconciliation with its petty cash."""
+    if not date_from or not date_to:
+        return None
+    b = _esb_branches([branch_code]).get(branch_code)
+    if not b:
+        return None
+    rows = db.fetch("""SELECT doc_num, doc_date, counterparty_name, total, status_name FROM integration_esb.erp_documents
+                       WHERE module = 'simple_purchase' AND deleted_at IS NULL AND branch_id::text = %s AND branch_name = %s
+                         AND doc_date BETWEEN %s AND %s ORDER BY doc_date, doc_num LIMIT 300""",
+                    (b["branch_id"], b["branch_name"], date_from, date_to))
+    return {"from": date_from.isoformat(), "to": date_to.isoformat(), "total": sum(float(r["total"] or 0) for r in rows),
+            "docs": [{"number": r["doc_num"], "date": _iso(r["doc_date"]), "supplier": r["counterparty_name"],
+                      "total": _num(r["total"]), "status": r["status_name"]} for r in rows]}
+
+
+def plafon_suggestions(factor: float = 1.2, round_to: int = 50_000) -> list[dict]:
+    """A plafon for every outlet from its own purchases: the weekly average × factor, rounded up (the outlets that
+    bought nothing in ESB get none)."""
+    outlets = outlet_options()
+    avgs = weekly_averages([o["code"] for o in outlets])
+    have = {b["branchCode"]: b["amount"] for b in plafons()["branches"]}
+    out = []
+    for o in outlets:
+        a = avgs.get(o["code"], {}).get("avgWeek", 0)
+        sug = int(-(-a * factor // round_to) * round_to) if a else None
+        out.append({"code": o["code"], "name": o["name"], "avgWeek": a, "suggested": sug, "current": have.get(o["code"])})
+    return out
+
+
+def apply_suggestions(user: dict, codes: list[str], factor: float, round_to: int) -> dict:
+    """Sets the suggested plafon on the outlets given (Finance adjusts them afterwards one by one)."""
+    sug = {s["code"]: s["suggested"] for s in plafon_suggestions(factor, round_to)}
+    n = 0
+    for code in codes:
+        if sug.get(code):
+            set_plafon(user, code, sug[code])
+            n += 1
+    return {"applied": n, **plafons()}
 
 
 # ---------------------------------------------------------------- outlet (form.pengajuan)
@@ -805,12 +883,17 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]]) -> di
                               FROM {P}.pengajuan_file f WHERE f.pengajuan_id::text = ANY(%s) GROUP BY 1""", (ids,)):
             stats[s["pid"]] = s
     flows = {k: flow(k) for k in {r["kind"] for r in rows}}
+    refs = weekly_averages(sorted({r["branch_code"] for r in rows if r["kind"] == "PETTY_CASH"}))
     data = []
     for r in rows:
         v = view(r)
         step = current_step(r, flows[r["kind"]])
         v["step"] = {"label": step["label"], "users": [u["name"] for u in step["users"]],
                      "userIds": [u["id"] for u in step["users"]]} if step else None
+        ref = refs.get(r["branch_code"]) if r["kind"] == "PETTY_CASH" else None
+        v["purchaseAvgWeek"] = ref["avgWeek"] if ref else None
+        asked = r["approved_amount"] if r["approved_amount"] is not None else r["requested_amount"]
+        v["aboveRef"] = bool(ref and ref["avgWeek"] and asked and float(asked) > ABOVE_REF * ref["avgWeek"])
         v["lines"] = lines.get(r["id"], [])
         v["fileCount"] = stats.get(r["id"], {}).get("files", 0)
         v["reusedFiles"] = stats.get(r["id"], {}).get("reused", 0)

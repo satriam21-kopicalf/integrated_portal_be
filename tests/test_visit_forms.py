@@ -7,11 +7,12 @@ from tests.test_auth import anon, login, store  # noqa: F401 (fixtures)
 def test_items_follow_the_form_visit_workbook():
     product, outlet = vf.all_items("product"), vf.all_items("outlet")
     assert len(product) == 19 + 19 + 6 + 16 + 5 + 9 == 74
-    assert len(outlet) == 10 + 5 + 4 + 3 + 4 + 15 + 8 + 4 + 7 == 60  # + Administrasi & Finance (2026-10-21)
+    # Outlet Cleanliness = the Travel Path SOP (2026-10-30): 24 points in 5 zones instead of the 10 areas
+    assert len(outlet) == 24 + 5 + 4 + 3 + 4 + 15 + 8 + 4 + 7 == 74  # + Administrasi & Finance (2026-10-21)
     assert [g["title"] for g in vf.DEFINITIONS["product"]["groups"]] == ["Availability", "Kualitas Produk"]
     assert [g["title"] for g in vf.DEFINITIONS["outlet"]["groups"]][0] == "Kebersihan dan Rating Outlet"
     assert [g["title"] for g in vf.DEFINITIONS["outlet"]["groups"]][-2:] == ["Kenyamanan Outlet", "Administrasi & Finance"]
-    assert len({i["key"] for i in product}) == 74 and len({i["key"] for i in outlet}) == 60
+    assert len({i["key"] for i in product}) == 74 and len({i["key"] for i in outlet}) == 74
     late = next(i for i in outlet if i["label"] == "Nama Barista Telat")
     assert late["kind"] == "text" and late["required"] is False  # a name, not a rating; optional
     # every item, section and group has its English text (ENG / IDN, 2026-10-27)
@@ -21,6 +22,12 @@ def test_items_follow_the_form_visit_workbook():
             for sec in g["sections"]:
                 assert sec["titleEn"] and all(i["labelEn"] for i in sec["items"])
     assert any(i["label"] == "SO Daily" for i in outlet) and not any(i["label"] == "SO Packaging" for i in outlet)
+    tp = [i for i in outlet if i["section"].startswith("tp-")]
+    assert len(tp) == 24 and all(i["detail"] and i["standard"] and i["category"] in ("Kritikal", "Mayor", "Minor") for i in tp)
+    assert sum(i["category"] == "Kritikal" for i in tp) == 10 and all(i["photo"] == "required" for i in tp)
+    # the old 10 areas stay for the visits sent with them (history), not asked any more
+    old = [i for i in vf.all_items("outlet", retired=True) if i["section"] == "kebersihan"]
+    assert len(old) == 10 and not any(i["section"] == "kebersihan" for i in outlet)
 
 
 def _required(form, group):
@@ -39,7 +46,7 @@ def test_required_items_per_branch_group():
                   "Ketersediaan Set Spork", "Test Food Menu Side Dish", "Kesesuaian Form Request Ice Hot, Rich Gold"):
         assert label not in ctg, label
     outlet = _required("outlet", "CTG")
-    assert len(outlet) == 10 + 5 + 2 + 3 + 4 + 10 + 6 + 3 + 6 == 49
+    assert len(outlet) == 18 + 5 + 2 + 3 + 4 + 10 + 6 + 3 + 6 == 57  # Travel Path: 18 required, 6 areas an outlet may lack
     for label in ("Kedisiplinan Barista", "Lap Gelas", "Sabun Toilet", "Kondisi Merchandise", "Form Selfpickup"):
         assert label not in outlet, label
 
@@ -50,11 +57,11 @@ def test_counts_and_what_blocks_the_submit():
     answers[items[0]["key"]] = {"rating": "UNDER"}
     answers[items[1]["key"]] = {"rating": "EXCEED"}
     c = vf._counts("outlet", answers)
-    assert (c["under"], c["exceed"], c["rated"], c["total"]) == (1, 1, 59, 59) and c["score"] == round(58 * 100 / 59, 1)
+    assert (c["under"], c["exceed"], c["rated"], c["total"]) == (1, 1, 73, 73) and c["score"] == round(72 * 100 / 73, 1)
     required = [i for i in items if vf.is_required(i, "CTG") and not i.get("platform")]
     todo = vf.missing("outlet", answers, [], "CTG")
     by_key = {t["key"]: t["need"] for t in todo}
-    assert len(todo) == len(required) and by_key[items[0]["key"]] == "note+photo"
+    assert len(todo) == len(required) and by_key[items[0]["key"]] == "photo"  # Travel Path: one photo per point
     speed = next(i for i in items if i["label"] == "Speed Of Service")
     assert by_key[speed["key"]] == "note"  # a note, no photo needed
     assert all(i["key"] not in by_key for i in items if not vf.is_required(i, "CTG"))  # optional: no evidence needed
@@ -116,7 +123,7 @@ def test_answers_are_checked_and_merged(monkeypatch):
     saved = {}
     monkeypatch.setattr(vf, "own_draft", lambda form, user, vid: {"answers": {"rating.1": {"rating": "MEET"}}})
     monkeypatch.setattr(vf.db, "fetchrow", lambda q, p=None: saved.update(p=p) or {"id": "x"})
-    out = vf.save_answers("outlet", {"id": "u"}, "v", {"rating.1": {"note": " Rating 4,2 "}, "kebersihan.2": {"rating": "UNDER"}})
+    out = vf.save_answers("outlet", {"id": "u"}, "v", {"rating.1": {"note": " Rating 4,2 "}, "tp-customer.1": {"rating": "UNDER"}})
     assert out["answers"]["rating.1"] == {"rating": "MEET", "note": "Rating 4,2"} and out["counts"]["under"] == 1
     for bad in ({"nope.1": {"rating": "MEET"}}, {"rating.1": {"rating": "GOOD"}}, {"barista.3": {"rating": "MEET"}}):
         try:

@@ -356,6 +356,14 @@ def approver_options() -> list[dict]:
     return [{"id": r["id"], "name": r["name"], "username": r["username"], "role": r["role"], "jobTitle": r["job_title"]} for r in rows]
 
 
+def outlet_options() -> list[dict]:
+    """Every outlet that fills Form Fund (Kopi Calf and Wasgee Tea branches of ESB), for the plafon per outlet."""
+    rows = db.fetch("""SELECT DISTINCT ON (branch_code) branch_code AS code, branch_name AS name FROM integration_esb.master_branches
+                       WHERE COALESCE(branch_code, '') <> '' AND COALESCE(is_deleted, false) = false AND COALESCE(is_active, true)
+                         AND (branch_name ILIKE 'Kopi Calf%%' OR branch_name ILIKE 'Wasgee%%') ORDER BY branch_code, branch_name""")
+    return sorted(({"code": r["code"], "name": r["name"]} for r in rows), key=lambda r: r["name"])
+
+
 def plafon_of(branch_code: str) -> Optional[Decimal]:
     r = db.fetchrow(f"""SELECT amount FROM {P}.pengajuan_plafon WHERE branch_code IN (%s, '*')
                         ORDER BY (branch_code = '*') LIMIT 1""", (branch_code,))

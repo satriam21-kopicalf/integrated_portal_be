@@ -316,7 +316,7 @@ def _superadmin(request: Request, user: dict) -> None:
 @router.get("/api/pengajuan/settings")
 def settings(request: Request, user: dict = Depends(current_user)) -> dict:
     _need(request, user, MON)
-    return {"kinds": pg.KINDS, "flows": {k: pg.flow(k) for k in pg.KINDS}, "users": pg.approver_options(), "plafon": pg.plafons(),
+    return {"kinds": pg.KINDS, "flows": {k: pg.flow(k) for k in pg.KINDS}, "users": pg.approver_options(), "plafon": pg.plafons(), "outlets": pg.outlet_options(),
             "canEdit": user.get("role") == "superadmin", "canPlafon": _plafon_editor(user)}
 
 

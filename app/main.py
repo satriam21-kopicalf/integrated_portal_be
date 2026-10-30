@@ -24,6 +24,7 @@ from app.routes import (auth_router, avatars_router, branches_router, exports_ro
 from app.access import require_page
 from app.routes.access import router as access_router
 from app.routes.ratio import router as ratio_router
+from app.routes.xlsx import router as xlsx_router
 from app.routes.auth import current_user, session_lookup
 from app.routes.stock_opname import router as stock_opname_router
 from app.routes.waste import router as waste_router
@@ -127,6 +128,7 @@ app.include_router(rating_router)  # Aggregator (skeleton): pages rating.*
 app.include_router(access_router)  # pages of roles & users, job titles, departments
 app.include_router(activity_router)  # superadmin reads; any signed-in user reports page views
 app.include_router(realtime_router)
+app.include_router(xlsx_router)  # a table a page shows, as an Excel file
 
 
 @app.exception_handler(StarletteHTTPException)

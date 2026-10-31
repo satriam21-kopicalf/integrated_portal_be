@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     db_password: str = ""
     db_sslmode: str = "require"
     db_pool_min: int = 1
-    db_pool_max: int = 5
+    db_pool_max: int = 10  # per worker (4 workers): sessions are looked up on every request
     db_statement_timeout_ms: int = 120_000
 
     # Server

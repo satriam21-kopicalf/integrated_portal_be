@@ -29,6 +29,9 @@ logger = logging.getLogger("stock_opname")
 router = APIRouter(tags=["stock opname"])
 _facilities = TTLCache()
 _http = requests.Session()
+# stock opname: hundreds of outlets save at once; keep enough reusable connections to the gateway (2026-10-31)
+_http.mount("http://", requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=64))
+_http.mount("https://", requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=64))
 PASS_HEADERS = ("content-type", "content-disposition", "cache-control", "x-content-sha256")
 
 

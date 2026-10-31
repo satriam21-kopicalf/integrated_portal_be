@@ -56,7 +56,6 @@ CREATE INDEX IF NOT EXISTS waste_entry_status_idx ON integration_portal.waste_en
 CREATE INDEX IF NOT EXISTS waste_entry_user_idx ON integration_portal.waste_entry (user_id, created_at DESC);
 
 INSERT INTO integration_portal.waste_item (scope, code, name, unit, sort) VALUES
-    ('waste', 'Product Code', 'Product Name', 'Unit', 0),
     ('waste', 'PCPK-00001', 'ALUMUNIUM FOIL OX 100 ( CUP PUDDING )', 'PCS', 41),
     ('waste', 'RMMT-00003', 'AYAM PAHA FILLET', 'GR', 66),
     ('waste', 'RMKC-00001', 'BAKING POWDER', 'GR', 181),
@@ -252,7 +251,6 @@ INSERT INTO integration_portal.waste_item (scope, code, name, unit, sort) VALUES
     ('waste', 'RMFR-00080', 'WHIPPED CREAM MILLAC GOLD 1LTR', 'GR', 180),
     ('waste', 'RMFR-00053', 'WHIPPING CREAM BROOKFARM 1000ML', 'GR', 174),
     ('waste', 'RMBV-00026', 'YAKULT', 'GR', 175),
-    ('usage', 'Product Code', 'Product Name', 'Unit', 0),
     ('usage', 'AIIR-00001', 'AIR NEW', 'GR', 33),
     ('usage', 'INSU-00005', 'CABLE TIES (NEW)', 'PACK@100PCS', 2),
     ('usage', 'INSU-00008', 'CUP SEALER (NEW)', 'ROLL@1000PCS', 3),

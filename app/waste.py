@@ -8,6 +8,10 @@ An entry is one item of one branch and business day (today or yesterday, WIB):
   * a camera photo as evidence (stamped in the browser with the time and the branch, like the stock opname photos).
 The person who entered it may delete it while Cost Control has not reviewed it. Cost Control approves or rejects
 entries (one by one or many at once) with a note.
+
+Every day (migration 041): Usage Management is a full list, the quantity of every usage item of the branch and day
+(usage_count, saved again to correct it); each branch reports its waste daily, an entry or "no waste today" (waste_day),
+and daily() tells the monitor which branches have not reported.
 """
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
@@ -20,7 +24,10 @@ from app.utils import today
 T = "integration_portal.waste_entry"
 T_ITEM = "integration_portal.waste_item"
 T_CAT = "integration_portal.waste_category"
+T_USAGE = "integration_portal.usage_count"
+T_DAY = "integration_portal.waste_day"
 SCOPES = {"waste": "Waste", "usage": "Usage Management", "premix": "Premix"}
+ENTRY_SCOPES = ("waste", "premix")  # usage is the daily list (save_usage)
 STATUSES = ("submitted", "approved", "rejected")
 MAX_QTY = Decimal("1000000")
 PREMIX = """SELECT code, name, recipe_type FROM kc_recipe.recipe
@@ -97,10 +104,17 @@ def form(user: dict, branch: Optional[str], day: Optional[date]) -> dict:
         rows = db.fetch(f"SELECT {COLUMNS} FROM {T} e WHERE e.branch_code = %s AND e.business_date = %s "
                         "ORDER BY e.created_at DESC", (branch, day or last))
         out["data"] = [_view(r) for r in rows]
+        d = day or last
+        out["usage"] = {r["item_code"]: float(r["qty"]) for r in db.fetch(
+            f"SELECT item_code, qty FROM {T_USAGE} WHERE branch_code = %s AND business_date = %s", (branch, d))}
+        flag = db.fetchrow(f"SELECT no_waste, full_name, username, updated_at FROM {T_DAY} "
+                           "WHERE branch_code = %s AND business_date = %s", (branch, d))
+        out["noWaste"] = None if not flag or not flag["no_waste"] else {
+            "by": flag["full_name"] or flag["username"], "at": flag["updated_at"].isoformat()}
     return out
 
 
-def create(user: dict, body: dict, device: Optional[str], ip: Optional[str]) -> dict:
+def _branch_day(user: dict, body: dict) -> tuple[dict, date]:
     branch = next((b for b in branch_options(user) if b["code"] == body.get("branchCode")), None)
     if branch is None:
         raise WasteError("Cabang tidak tersedia untuk akun Anda")
@@ -108,8 +122,68 @@ def create(user: dict, body: dict, device: Optional[str], ip: Optional[str]) -> 
     day = body.get("businessDate") or last
     if not first <= day <= last:
         raise WasteError("Waste hanya bisa diinput untuk hari ini atau kemarin")
+    return branch, day
+
+
+def save_usage(user: dict, body: dict) -> dict:
+    """The Usage Management list of a branch and day: {itemCode: qty}; an empty quantity removes the item."""
+    branch, day = _branch_day(user, body)
+    items = {i["code"]: i for i in catalog()["items"]["usage"]}
+    lines = body.get("lines") or {}
+    unknown = [c for c in lines if c not in items]
+    if unknown:
+        raise WasteError(f"Item tidak ada di daftar Usage Management: {unknown[0]}")
+    keep, drop = [], []
+    for code, value in lines.items():
+        if value is None or str(value).strip() == "":
+            drop.append(code)
+            continue
+        try:
+            q = Decimal(str(value).replace(",", ".")).quantize(Decimal("0.001"))
+        except (InvalidOperation, ValueError):
+            raise WasteError(f"Jumlah {items[code]['name']} harus angka") from None
+        if q < 0 or q > MAX_QTY:
+            raise WasteError(f"Jumlah {items[code]['name']} tidak valid")
+        keep.append((code, q))
+    with db.transaction() as conn:
+        if drop:
+            conn.execute(f"DELETE FROM {T_USAGE} WHERE branch_code = %s AND business_date = %s AND item_code = ANY(%s)",
+                         (branch["code"], day, drop))
+        for code, q in keep:
+            i = items[code]
+            conn.execute(
+                f"""INSERT INTO {T_USAGE} (branch_code, branch_name, business_date, item_code, item_name, unit, qty,
+                        user_id, username, full_name) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (branch_code, business_date, item_code) DO UPDATE SET qty = EXCLUDED.qty,
+                        user_id = EXCLUDED.user_id, username = EXCLUDED.username, full_name = EXCLUDED.full_name,
+                        updated_at = now()""",
+                (branch["code"], branch["name"], day, code, i["name"], i["unit"], q, user["id"], user["username"],
+                 user.get("full_name")))
+    return {"branchCode": branch["code"], "branchName": branch["name"], "businessDate": day.isoformat(),
+            "saved": len(keep), "removed": len(drop)}
+
+
+def set_no_waste(user: dict, body: dict) -> dict:
+    """"No waste today" for a branch and day (noWaste false withdraws it)."""
+    branch, day = _branch_day(user, body)
+    on = bool(body.get("noWaste", True))
+    with db.transaction() as conn:
+        if on:
+            conn.execute(
+                f"""INSERT INTO {T_DAY} (branch_code, business_date, branch_name, no_waste, user_id, username, full_name)
+                    VALUES (%s, %s, %s, true, %s, %s, %s)
+                    ON CONFLICT (branch_code, business_date) DO UPDATE SET no_waste = true, user_id = EXCLUDED.user_id,
+                        username = EXCLUDED.username, full_name = EXCLUDED.full_name, updated_at = now()""",
+                (branch["code"], day, branch["name"], user["id"], user["username"], user.get("full_name")))
+        else:
+            conn.execute(f"DELETE FROM {T_DAY} WHERE branch_code = %s AND business_date = %s", (branch["code"], day))
+    return {"branchCode": branch["code"], "branchName": branch["name"], "businessDate": day.isoformat(), "noWaste": on}
+
+
+def create(user: dict, body: dict, device: Optional[str], ip: Optional[str]) -> dict:
+    branch, day = _branch_day(user, body)
     scope = body.get("scope")
-    if scope not in SCOPES:
+    if scope not in ENTRY_SCOPES:
         raise WasteError("Jenis waste tidak dikenal")
     item = _item(scope, body.get("itemCode") or "")
     if item is None:
@@ -202,3 +276,51 @@ def review(ids: list[str], status: str, note: Optional[str], user: dict, branche
 def photo_of(entry_id: str) -> Optional[dict]:
     return db.fetchrow(f"SELECT user_id::text, branch_code, photo, photo_type FROM {T} WHERE id::text = %s", (entry_id,))
 
+
+
+def daily(date_from: date, date_to: date, branches: Optional[list[str]]) -> dict:
+    """Per branch and day: waste entries, "no waste today", usage items filled; the branches that have not reported."""
+    every = branch_options({}, every=True)
+    if branches is not None:
+        every = [b for b in every if b["code"] in set(branches)]
+    p = {"a": date_from, "b": date_to, "br": [b["code"] for b in every]}
+    days: dict[tuple, dict] = {}
+
+    def at(code, d):
+        return days.setdefault((code, d), {"entries": 0, "noWaste": False, "usage": 0})
+    for r in db.fetch(f"""SELECT branch_code, business_date, count(*)::int AS n FROM {T} WHERE business_date
+                          BETWEEN %(a)s AND %(b)s AND branch_code = ANY(%(br)s) GROUP BY 1, 2""", p):
+        at(r["branch_code"], r["business_date"])["entries"] = r["n"]
+    for r in db.fetch(f"""SELECT branch_code, business_date FROM {T_DAY} WHERE no_waste AND business_date
+                          BETWEEN %(a)s AND %(b)s AND branch_code = ANY(%(br)s)""", p):
+        at(r["branch_code"], r["business_date"])["noWaste"] = True
+    for r in db.fetch(f"""SELECT branch_code, business_date, count(*)::int AS n FROM {T_USAGE} WHERE business_date
+                          BETWEEN %(a)s AND %(b)s AND branch_code = ANY(%(br)s) GROUP BY 1, 2""", p):
+        at(r["branch_code"], r["business_date"])["usage"] = r["n"]
+    last = min(date_to, today())
+    span = [date_from + timedelta(days=i) for i in range((last - date_from).days + 1)] if last >= date_from else []
+    rows, missing = [], []
+    for b in every:
+        cells = []
+        for d in span:
+            c = days.get((b["code"], d), {"entries": 0, "noWaste": False, "usage": 0})
+            cells.append({"date": d.isoformat(), **c, "reported": c["entries"] > 0 or c["noWaste"]})
+        reported = sum(1 for c in cells if c["reported"])
+        rows.append({"code": b["code"], "name": b["name"], "days": cells, "reported": reported,
+                     "missing": len(cells) - reported, "usageDays": sum(1 for c in cells if c["usage"])})
+        if cells and not cells[-1]["reported"]:
+            missing.append({"code": b["code"], "name": b["name"]})
+    return {"dates": [d.isoformat() for d in span], "branches": rows, "missingLast": missing,
+            "lastDate": span[-1].isoformat() if span else None}
+
+
+def usage_report(date_from: date, date_to: date, branches: Optional[list[str]]) -> list[dict]:
+    """The Usage Management quantities of the period (latest first)."""
+    where = "business_date BETWEEN %(a)s AND %(b)s" + ("" if branches is None else " AND branch_code = ANY(%(br)s)")
+    rows = db.fetch(f"""SELECT branch_code, branch_name, business_date, item_code, item_name, unit, qty::float AS qty,
+                               coalesce(full_name, username) AS by, updated_at FROM {T_USAGE} WHERE {where}
+                        ORDER BY business_date DESC, branch_name, item_name LIMIT 5000""",
+                    {"a": date_from, "b": date_to, "br": branches or []})
+    return [{"branchCode": r["branch_code"], "branchName": r["branch_name"], "businessDate": r["business_date"].isoformat(),
+             "itemCode": r["item_code"], "itemName": r["item_name"], "unit": r["unit"], "qty": r["qty"], "by": r["by"],
+             "updatedAt": r["updated_at"].isoformat()} for r in rows]

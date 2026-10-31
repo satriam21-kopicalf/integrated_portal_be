@@ -11,6 +11,12 @@
     GET    /api/waste/reviews               page cc.waste-review: the entries waiting for review (same filters)
     POST   /api/waste/reviews               page cc.waste-review: {"ids": [...], "status": approved|rejected, "note"}
     GET    /api/waste/entries/{id}/photo    the evidence: the author's branches, or a monitor / review account
+    PUT    /api/waste/usage                 page "waste": the Usage Management list {branchCode, businessDate,
+                                           lines: {itemCode: qty | null}} of the branch and day
+    PUT    /api/waste/no-waste              page "waste": {branchCode, businessDate, noWaste} "no waste today"
+    GET    /api/waste/daily                 monitor / review: per branch and day whether waste was reported, the usage
+                                           list filled, the branches not reported yet (?dateFrom&dateTo&branch&group)
+    GET    /api/waste/usage                 monitor / review: the Usage Management quantities of the period
 
 Role "user" / "outlet" see their own branches only (app/scope.py, app/pic_checkin.branch_options).
 """
@@ -35,7 +41,7 @@ MON, REV = "cc.waste-monitor", "cc.waste-review"
 class EntryIn(BaseModel):
     branchCode: str = Field(min_length=1, max_length=40)
     businessDate: Optional[date] = None
-    scope: Literal["waste", "usage", "premix"]
+    scope: Literal["waste", "premix"]
     itemCode: str = Field(min_length=1, max_length=80)
     qty: float = Field(gt=0, le=1_000_000)
     category: str = Field(min_length=1, max_length=120)
@@ -44,6 +50,18 @@ class EntryIn(BaseModel):
     takenAt: Optional[datetime] = None
     latitude: Optional[float] = Field(None, ge=-90, le=90)
     longitude: Optional[float] = Field(None, ge=-180, le=180)
+
+
+class UsageIn(BaseModel):
+    branchCode: str = Field(min_length=1, max_length=40)
+    businessDate: Optional[date] = None
+    lines: dict[str, Optional[float]] = Field(max_length=500)
+
+
+class NoWasteIn(BaseModel):
+    branchCode: str = Field(min_length=1, max_length=40)
+    businessDate: Optional[date] = None
+    noWaste: bool = True
 
 
 class ReviewIn(BaseModel):
@@ -139,3 +157,41 @@ def photo(entry_id: str, request: Request, user: dict = Depends(current_user)) -
     if not (in_scope and any(has_page(user, p) for p in ("waste", MON, REV))):
         deny(request, user)
     return Response(bytes(row["photo"]), media_type=row["photo_type"], headers={"Cache-Control": "private, max-age=86400"})
+
+
+@router.put("/usage")
+def save_usage(body: UsageIn, request: Request, user: dict = Depends(require_page("waste"))) -> dict:
+    try:
+        out = waste.save_usage(user, body.model_dump())
+    except waste.CheckInError as exc:
+        _refuse(exc)
+    activity.record("waste.usage", user=user, request=request, page="/waste",
+                    summary=f"Usage Management {out['branchName']} {out['businessDate']}: {out['saved']} item",
+                    details=out)
+    return out
+
+
+@router.put("/no-waste")
+def no_waste(body: NoWasteIn, request: Request, user: dict = Depends(require_page("waste"))) -> dict:
+    try:
+        out = waste.set_no_waste(user, body.model_dump())
+    except waste.CheckInError as exc:
+        _refuse(exc)
+    activity.record("waste.no-waste", user=user, request=request, page="/waste",
+                    summary=f"{'Tidak ada waste' if out['noWaste'] else 'Batal tidak ada waste'}: {out['branchName']} "
+                            f"{out['businessDate']}", details=out)
+    return out
+
+
+@router.get("/daily")
+def daily(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
+          group: Optional[str] = Query(None, max_length=60), _user: dict = Depends(require_page(MON, REV))) -> dict:
+    start, end, branches = _period(dateFrom, dateTo, branch, group)
+    return {"period": {"from": start.isoformat(), "to": end.isoformat()}, **waste.daily(start, end, branches)}
+
+
+@router.get("/usage")
+def usage(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
+          group: Optional[str] = Query(None, max_length=60), _user: dict = Depends(require_page(MON, REV))) -> dict:
+    start, end, branches = _period(dateFrom, dateTo, branch, group)
+    return {"period": {"from": start.isoformat(), "to": end.isoformat()}, "data": waste.usage_report(start, end, branches)}

@@ -91,3 +91,58 @@ def test_surveyor_sees_every_branch(anon, store, page_access, monkeypatch):
     r = anon.get("/api/forms/surveyor-check-in")
     assert r.status_code == 200 and seen == {"every": True, "kind": "surveyor"}
     assert anon.get("/api/forms/pic-check-in").status_code == 200 and seen["every"] is False
+
+
+class _Conn:
+    def __init__(self):
+        self.sql = []
+
+    def execute(self, query, params=None):
+        self.sql.append((query, params))
+
+
+def _tx(monkeypatch):
+    from contextlib import contextmanager
+    conn = _Conn()
+    monkeypatch.setattr(waste.db, "transaction", contextmanager(lambda timeout_ms=None: (yield conn)))
+    return conn
+
+
+def test_usage_list_and_no_waste(anon, store, fake_db, page_access, monkeypatch):
+    monkeypatch.setattr(waste, "branch_options", lambda user, every=False: [KEMANG])
+    monkeypatch.setattr(waste, "catalog", lambda: {**CATALOG, "items": {**CATALOG["items"], "usage": [
+        {"code": "INSU-00005", "name": "CABLE TIES", "unit": "PACK"}, {"code": "AIIR-00001", "name": "AIR", "unit": "GR"}]}})
+    monkeypatch.setattr(waste, "today", lambda: date(2026, 10, 31))
+    conn = _tx(monkeypatch)
+    login(anon, "kasir", "Kasir1234")
+    body = {"branchCode": "CCI01", "businessDate": "2026-10-31", "lines": {"INSU-00005": 2, "AIIR-00001": None}}
+    assert anon.put("/api/waste/usage", json={**body, "lines": {"NOPE": 1}}).status_code == 422
+    assert anon.put("/api/waste/usage", json={**body, "businessDate": "2026-10-20"}).status_code == 422
+    r = anon.put("/api/waste/usage", json=body)
+    assert r.status_code == 200 and r.json()["saved"] == 1 and r.json()["removed"] == 1
+    assert any("DELETE" in q for q, _ in conn.sql) and any("ON CONFLICT" in q for q, _ in conn.sql)
+    # usage is the daily list now, not a single waste entry
+    assert anon.post("/api/waste/entries", json={"branchCode": "CCI01", "scope": "usage", "itemCode": "INSU-00005",
+                                                 "qty": 1, "category": "Packaging Rusak", "photo": _jpeg()}).status_code == 422
+    r = anon.put("/api/waste/no-waste", json={"branchCode": "CCI01", "noWaste": True})
+    assert r.status_code == 200 and r.json()["noWaste"] is True
+
+
+def test_daily_lists_branches_not_reported(monkeypatch):
+    other = {**KEMANG, "code": "CCI02", "name": "Kopi Calf Senopati"}
+    monkeypatch.setattr(waste, "branch_options", lambda user, every=False: [KEMANG, other])
+    monkeypatch.setattr(waste, "today", lambda: date(2026, 10, 31))
+    d = date(2026, 10, 31)
+
+    def fetch(q, p=None):
+        if "waste_day" in q:
+            return [{"branch_code": "CCI02", "business_date": date(2026, 10, 30)}]
+        if "usage_count" in q:
+            return [{"branch_code": "CCI01", "business_date": d, "n": 3}]
+        return [{"branch_code": "CCI01", "business_date": d, "n": 2}]
+    monkeypatch.setattr(waste.db, "fetch", fetch)
+    out = waste.daily(date(2026, 10, 30), date(2026, 11, 2), None)
+    assert out["dates"] == ["2026-10-30", "2026-10-31"]  # never past today
+    kemang, seno = out["branches"]
+    assert kemang["reported"] == 1 and kemang["usageDays"] == 1 and seno["reported"] == 1
+    assert out["missingLast"] == [{"code": "CCI02", "name": "Kopi Calf Senopati"}]

@@ -39,8 +39,8 @@ def test_photo_must_be_an_image_and_show_a_face():
 
 
 def test_check_in_flow_and_access(anon, store, fake_db, page_access, monkeypatch):
-    monkeypatch.setattr(pic_checkin, "branch_options", lambda user: [KEMANG])
-    monkeypatch.setattr(pic_checkin, "recent_of", lambda uid, limit=10: [])
+    monkeypatch.setattr(pic_checkin, "branch_options", lambda user, every=False: [KEMANG])
+    monkeypatch.setattr(pic_checkin, "recent_of", lambda uid, limit=10, kind="pic": [])
     saved = {}
 
     def insert(query, params=None):
@@ -106,7 +106,7 @@ def test_risk_signals_of_a_faked_position():
 
 
 def test_outside_radius_needs_a_note_and_risk_is_hidden_from_the_pic(anon, store, fake_db, page_access, monkeypatch):
-    monkeypatch.setattr(pic_checkin, "branch_options", lambda user: [KEMANG])
+    monkeypatch.setattr(pic_checkin, "branch_options", lambda user, every=False: [KEMANG])
     monkeypatch.setattr(pic_checkin, "count_faces", lambda data: 1)
     monkeypatch.setattr(pic_checkin, "previous_positions", lambda uid, limit=300: [])
     saved = {}

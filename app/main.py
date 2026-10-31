@@ -118,7 +118,7 @@ app.include_router(overview_router, dependencies=[Depends(require_page("overview
 app.include_router(live_router, dependencies=[Depends(require_page("overview"))])
 app.include_router(ratio_router)  # /api/cost-control/ratio (page cc.ratio)
 app.include_router(stock_opname_router, dependencies=signed_in)  # stock opname through the kopicalf gateway (pages per path)
-app.include_router(waste_router)  # waste (skeleton): pages waste, cc.waste-monitor, cc.waste-review
+app.include_router(waste_router)  # waste (migration 040): pages waste, cc.waste-monitor, cc.waste-review
 app.include_router(branch_groups_router)  # Monitoring → Branch groups / Overview: before /api/monitoring/{form}
 app.include_router(pic_checkin_router)  # PIC Check In: before the generic form routes
 app.include_router(visit_forms_router)  # Monitoring Product / Outlet forms and monitoring: before the generic routes

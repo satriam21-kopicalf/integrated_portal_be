@@ -11,6 +11,9 @@
                                                (location: outside | low | unlocated | suspect | alert | unreviewed)
     POST /api/monitoring/pic-check-in/{id}/review  page mon.pic-check-in: {"status": valid|invalid, "note"}
     GET  /api/pic-check-in/{id}/photo          the selfie: Monitoring (branches in scope) or the PIC's own check-in
+
+The Surveyor Check In (migration 039) has the same endpoints under surveyor-check-in (pages form.surveyor-check-in,
+mon.surveyor-check-in); its selfies are served by the same photo endpoint.
 """
 from datetime import date, datetime, timedelta
 from typing import Literal, Optional
@@ -29,6 +32,9 @@ from app.utils import parse_branches, today
 router = APIRouter(tags=["pic check in"])
 FORM = "form.pic-check-in"
 MON = "mon.pic-check-in"
+# kind → (slug of the paths, form page, monitoring page, activity action, page path)
+KINDS = {"pic": ("pic-check-in", FORM, MON, "form.pic_check_in"),
+         "surveyor": ("surveyor-check-in", "form.surveyor-check-in", "mon.surveyor-check-in", "form.surveyor_check_in")}
 
 
 class PhotoIn(BaseModel):
@@ -70,63 +76,80 @@ def _refuse(exc: pic_checkin.CheckInError):
     raise HTTPException(status_code=422, detail=str(exc))
 
 
-@router.get("/api/forms/pic-check-in")
-def form(user: dict = Depends(require_page(FORM))) -> dict:
-    return {
-        "user": {"id": str(user["id"]), "username": user["username"], "name": user.get("full_name") or user["username"]},
-        "branches": pic_checkin.branch_options(user),
-        "recent": pic_checkin.recent_of(str(user["id"])),
-        "today": pic_checkin.done_today(str(user["id"])),  # branches already checked in today
-        "serverTime": datetime.now().astimezone().isoformat(),
-    }
+def _add(kind: str) -> None:
+    slug, form_page, mon_page, action = KINDS[kind]
+    title = "Check in" if kind == "pic" else "Check in surveyor"
+
+    @router.get(f"/api/forms/{slug}", name=f"{kind}_form")
+    def form(user: dict = Depends(require_page(form_page))) -> dict:
+        return {
+            "user": {"id": str(user["id"]), "username": user["username"], "name": user.get("full_name") or user["username"]},
+            "branches": pic_checkin.branch_options(user, every=kind == "surveyor"),
+            "recent": pic_checkin.recent_of(str(user["id"]), kind=kind),
+            "today": pic_checkin.done_today(str(user["id"]), kind),  # branches already checked in today
+            "serverTime": datetime.now().astimezone().isoformat(),
+        }
+
+    @router.post(f"/api/forms/{slug}/face-check", name=f"{kind}_face_check")
+    def face_check(body: PhotoIn, _user: dict = Depends(require_page(form_page))) -> dict:
+        try:
+            return {"faces": pic_checkin.face_check(body.photo)}
+        except pic_checkin.CheckInError as exc:
+            _refuse(exc)
+
+    @router.post(f"/api/forms/{slug}", status_code=201, name=f"{kind}_check_in")
+    def check_in(body: CheckInIn, request: Request, user: dict = Depends(require_page(form_page))) -> dict:
+        try:
+            out = pic_checkin.create(user, body.branchCode, body.photo, body.latitude, body.longitude, body.accuracyM,
+                                     body.locatedAt, body.deviceTime, body.note, request.headers.get("user-agent"),
+                                     client_ip(request), sent_at=body.sentAt,
+                                     samples=[x.model_dump() for x in body.samples or []], touch=body.touch,
+                                     webdriver=body.webdriver, kind=kind)
+        except pic_checkin.CheckInError as exc:
+            activity.record(action, user=user, request=request, status="failed", page=f"/forms/{slug}",
+                            summary=f"{title} ditolak: {exc}", details={"branch": body.branchCode})
+            _refuse(exc)
+        activity.record(action, user=user, request=request, page=f"/forms/{slug}",
+                        summary=f"{title} {out['branchName']}"
+                        + (f" · {out['distanceM']} m" if out["distanceM"] is not None else " · outlet tanpa koordinat")
+                        + (" · di luar radius" if out["outsideRadius"] else "")
+                        + (f" · risiko lokasi {out['riskLevel']}" if out["riskLevel"] in ("medium", "high") else ""),
+                        details={k: out[k] for k in ("id", "branchCode", "distanceM", "outsideRadius", "lowAccuracy",
+                                                     "faces", "riskLevel", "riskSignals")})
+        # the PIC is not told which risk signal fired
+        return {k: v for k, v in out.items() if k not in ("riskLevel", "riskSignals")}
+
+    @router.get(f"/api/monitoring/{slug}", name=f"{kind}_monitoring")
+    def monitoring(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None),
+                   branch: Optional[str] = None, userId: Optional[str] = None, location: str = "",
+                   group: Optional[str] = Query(None, max_length=60),
+                   _user: dict = Depends(require_page(mon_page))) -> dict:
+        end = dateTo or today()
+        start = dateFrom or end - timedelta(days=6)
+        if start > end:
+            raise HTTPException(422, detail="Tanggal mulai harus sebelum tanggal akhir")
+        if (end - start).days > 92:
+            raise HTTPException(422, detail="Maksimal 3 bulan sekali tampil")
+        scoped = scoped_branch(branch)
+        branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
+        branches = branch_groups.narrow(branches, group)  # Monitoring → Branch groups (CCI, CTG, CTGP …)
+        return {"period": {"from": start.isoformat(), "to": end.isoformat()},
+                **pic_checkin.monitor(start, end, branches, userId, location, kind=kind)}
+
+    @router.post(f"/api/monitoring/{slug}/{{checkin_id}}/review", name=f"{kind}_review")
+    def review(checkin_id: str, body: ReviewIn, request: Request, user: dict = Depends(require_page(mon_page))) -> dict:
+        row = pic_checkin.review(checkin_id, body.status, body.note, user, allowed_branches(), kind=kind)
+        if row is None:
+            raise HTTPException(404, detail="Check in tidak ditemukan")
+        activity.record(f"{action}_review", user=user, request=request, page=f"/monitoring/{slug}",
+                        summary=f"{title} {row['username']} di {row['branch_name']}: "
+                                f"{'valid' if body.status == 'valid' else 'tidak valid'}",
+                        details={"id": checkin_id, "status": body.status, "note": body.note})
+        return {"id": checkin_id, "status": body.status}
 
 
-@router.post("/api/forms/pic-check-in/face-check")
-def face_check(body: PhotoIn, _user: dict = Depends(require_page(FORM))) -> dict:
-    try:
-        return {"faces": pic_checkin.face_check(body.photo)}
-    except pic_checkin.CheckInError as exc:
-        _refuse(exc)
-
-
-@router.post("/api/forms/pic-check-in", status_code=201)
-def check_in(body: CheckInIn, request: Request, user: dict = Depends(require_page(FORM))) -> dict:
-    try:
-        out = pic_checkin.create(user, body.branchCode, body.photo, body.latitude, body.longitude, body.accuracyM,
-                                 body.locatedAt, body.deviceTime, body.note, request.headers.get("user-agent"),
-                                 client_ip(request), sent_at=body.sentAt,
-                                 samples=[x.model_dump() for x in body.samples or []], touch=body.touch,
-                                 webdriver=body.webdriver)
-    except pic_checkin.CheckInError as exc:
-        activity.record("form.pic_check_in", user=user, request=request, status="failed", page="/forms/pic-check-in",
-                        summary=f"Check in ditolak: {exc}", details={"branch": body.branchCode})
-        _refuse(exc)
-    activity.record("form.pic_check_in", user=user, request=request, page="/forms/pic-check-in",
-                    summary=f"Check in {out['branchName']}"
-                    + (f" · {out['distanceM']} m" if out["distanceM"] is not None else " · outlet tanpa koordinat")
-                    + (" · di luar radius" if out["outsideRadius"] else "")
-                    + (f" · risiko lokasi {out['riskLevel']}" if out["riskLevel"] in ("medium", "high") else ""),
-                    details={k: out[k] for k in ("id", "branchCode", "distanceM", "outsideRadius", "lowAccuracy", "faces",
-                                                 "riskLevel", "riskSignals")})
-    # the PIC is not told which risk signal fired
-    return {k: v for k, v in out.items() if k not in ("riskLevel", "riskSignals")}
-
-
-@router.get("/api/monitoring/pic-check-in")
-def monitoring(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
-               userId: Optional[str] = None, location: str = "", group: Optional[str] = Query(None, max_length=60),
-               _user: dict = Depends(require_page(MON))) -> dict:
-    end = dateTo or today()
-    start = dateFrom or end - timedelta(days=6)
-    if start > end:
-        raise HTTPException(422, detail="Tanggal mulai harus sebelum tanggal akhir")
-    if (end - start).days > 92:
-        raise HTTPException(422, detail="Maksimal 3 bulan sekali tampil")
-    scoped = scoped_branch(branch)
-    branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
-    branches = branch_groups.narrow(branches, group)  # Monitoring → Branch groups (CCI, CTG, CTGP …)
-    return {"period": {"from": start.isoformat(), "to": end.isoformat()},
-            **pic_checkin.monitor(start, end, branches, userId, location)}
+for _kind in KINDS:
+    _add(_kind)
 
 
 @router.get("/api/pic-check-in/{checkin_id}/photo")
@@ -134,20 +157,10 @@ def photo(checkin_id: str, request: Request, user: dict = Depends(current_user))
     row = pic_checkin.photo_of(checkin_id)
     if row is None:
         raise HTTPException(404, detail="Check in tidak ditemukan")
-    own = row["user_id"] == str(user["id"]) and has_page(user, FORM)
+    _, form_page, mon_page, _ = KINDS.get(row.get("kind") or "pic", KINDS["pic"])
+    own = row["user_id"] == str(user["id"]) and has_page(user, form_page)
     scope = allowed_branches()
-    monitor = has_page(user, MON) and (scope is None or row["branch_code"] in scope)
+    monitor = has_page(user, mon_page) and (scope is None or row["branch_code"] in scope)
     if not (own or monitor):
         deny(request, user)
     return Response(bytes(row["photo"]), media_type=row["photo_type"], headers={"Cache-Control": "private, max-age=86400"})
-
-
-@router.post("/api/monitoring/pic-check-in/{checkin_id}/review")
-def review(checkin_id: str, body: ReviewIn, request: Request, user: dict = Depends(require_page(MON))) -> dict:
-    row = pic_checkin.review(checkin_id, body.status, body.note, user, allowed_branches())
-    if row is None:
-        raise HTTPException(404, detail="Check in tidak ditemukan")
-    activity.record("form.pic_check_in_review", user=user, request=request, page="/monitoring/pic-check-in",
-                    summary=f"Check in {row['username']} di {row['branch_name']}: {'valid' if body.status == 'valid' else 'tidak valid'}",
-                    details={"id": checkin_id, "status": body.status, "note": body.note})
-    return {"id": checkin_id, "status": body.status}

@@ -1,38 +1,141 @@
-"""Waste (skeleton): outlets enter the waste of their branch, Cost Control monitors and reviews it.
+"""Waste (app/waste.py, migration 040): outlets enter the waste of their branch, Cost Control monitors and reviews it.
 
-    GET  /api/waste/entries          page "waste": the branches the user enters waste for + its entries
-    GET  /api/waste/monitor          page cc.waste-monitor: progress of every branch
-    GET  /api/waste/reviews          page cc.waste-review: entries waiting for review
-    POST /api/waste/reviews/{id}     page cc.waste-review: approve / send back (not built yet: 501)
+    GET    /api/waste/entries?branch&date   page "waste": branches, days, items (waste / usage / premix), categories and
+                                           the entries of the branch and day
+    POST   /api/waste/entries               page "waste": one item {branchCode, businessDate, scope, itemCode, qty,
+                                           category, note, photo, takenAt, latitude, longitude} (photo and category
+                                           required)
+    DELETE /api/waste/entries/{id}          page "waste": the author removes an entry not reviewed yet
+    GET    /api/waste/monitor               page cc.waste-monitor (or cc.waste-review): ?dateFrom&dateTo&branch&group&
+                                           scope&category&status&userId -> entries, totals per item / branch / category
+    GET    /api/waste/reviews               page cc.waste-review: the entries waiting for review (same filters)
+    POST   /api/waste/reviews               page cc.waste-review: {"ids": [...], "status": approved|rejected, "note"}
+    GET    /api/waste/entries/{id}/photo    the evidence: the author's branches, or a monitor / review account
 
-Only the access rules are final here (app/access.py pages, same as the menu; role "user" sees its own branches only,
-app/scope.py). The data model and the screens come next; until then the lists are empty.
+Role "user" / "outlet" see their own branches only (app/scope.py, app/pic_checkin.branch_options).
 """
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import date, datetime, timedelta
+from typing import Literal, Optional
 
-from app.access import require_page
-from app.scope import allowed_branches
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
+from pydantic import BaseModel, Field
+
+from app import activity, branch_groups, waste
+from app.access import deny, has_page, require_page
+from app.activity import client_ip
+from app.routes.auth import current_user
+from app.scope import NO_BRANCH, allowed_branches, scoped_branch
+from app.utils import parse_branches, today
 
 router = APIRouter(prefix="/api/waste", tags=["waste"])
-SKELETON = {"ready": False, "message": "Waste is being built: only the access rules are in place."}
+MON, REV = "cc.waste-monitor", "cc.waste-review"
 
 
-@router.get("/entries", dependencies=[Depends(require_page("waste"))])
-def entries() -> dict:
+class EntryIn(BaseModel):
+    branchCode: str = Field(min_length=1, max_length=40)
+    businessDate: Optional[date] = None
+    scope: Literal["waste", "usage", "premix"]
+    itemCode: str = Field(min_length=1, max_length=80)
+    qty: float = Field(gt=0, le=1_000_000)
+    category: str = Field(min_length=1, max_length=120)
+    note: Optional[str] = Field(None, max_length=500)
+    photo: str = Field(min_length=20, max_length=5_000_000)
+    takenAt: Optional[datetime] = None
+    latitude: Optional[float] = Field(None, ge=-90, le=90)
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+
+
+class ReviewIn(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=500)
+    status: Literal["approved", "rejected"]
+    note: Optional[str] = Field(None, max_length=500)
+
+
+def _refuse(exc: Exception):
+    raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/entries")
+def entries(branch: Optional[str] = None, day: Optional[date] = Query(None, alias="date"),
+            user: dict = Depends(require_page("waste"))) -> dict:
+    return waste.form(user, branch, day)
+
+
+@router.post("/entries", status_code=201)
+def create(body: EntryIn, request: Request, user: dict = Depends(require_page("waste"))) -> dict:
+    try:
+        out = waste.create(user, body.model_dump(), request.headers.get("user-agent"), client_ip(request))
+    except waste.CheckInError as exc:
+        activity.record("waste.entry", user=user, request=request, status="failed", page="/waste",
+                        summary=f"Waste ditolak: {exc}", details={"branch": body.branchCode, "item": body.itemCode})
+        _refuse(exc)
+    activity.record("waste.entry", user=user, request=request, page="/waste",
+                    summary=f"Waste {out['branchName']}: {out['itemName']} {out['qty']:g} {out['unit']} ({out['category']})",
+                    details={k: out[k] for k in ("id", "branchCode", "businessDate", "scope", "itemCode", "qty", "category")})
+    return out
+
+
+@router.delete("/entries/{entry_id}")
+def remove(entry_id: str, request: Request, user: dict = Depends(require_page("waste"))) -> dict:
+    row = waste.delete(user, entry_id)
+    if row is None:
+        raise HTTPException(404, detail="Waste tidak ditemukan atau sudah direview")
+    activity.record("waste.delete", user=user, request=request, page="/waste",
+                    summary=f"Waste dihapus: {row['branch_name']} {row['item_name']}", details={"id": entry_id})
+    return {"id": entry_id, "deleted": True}
+
+
+def _period(date_from: Optional[date], date_to: Optional[date], branch: Optional[str], group: Optional[str]):
+    end = date_to or today()
+    start = date_from or end - timedelta(days=6)
+    if start > end:
+        raise HTTPException(422, detail="Tanggal mulai harus sebelum tanggal akhir")
+    if (end - start).days > 92:
+        raise HTTPException(422, detail="Maksimal 3 bulan sekali tampil")
+    scoped = scoped_branch(branch)
+    branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
+    return start, end, branch_groups.narrow(branches, group)
+
+
+@router.get("/monitor")
+def monitor(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
+            group: Optional[str] = Query(None, max_length=60), scope: str = "", category: str = "", status: str = "",
+            userId: str = "", _user: dict = Depends(require_page(MON, REV))) -> dict:
+    start, end, branches = _period(dateFrom, dateTo, branch, group)
+    return {"period": {"from": start.isoformat(), "to": end.isoformat()}, "categories": waste.catalog()["categories"],
+            **waste.monitor(start, end, branches, scope, category, status, userId)}
+
+
+@router.get("/reviews")
+def reviews(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
+            group: Optional[str] = Query(None, max_length=60), scope: str = "", category: str = "",
+            status: str = "submitted", _user: dict = Depends(require_page(REV))) -> dict:
+    start, end, branches = _period(dateFrom, dateTo, branch, group)
+    return {"period": {"from": start.isoformat(), "to": end.isoformat()}, "categories": waste.catalog()["categories"],
+            **waste.monitor(start, end, branches, scope, category, status)}
+
+
+@router.post("/reviews")
+def review(body: ReviewIn, request: Request, user: dict = Depends(require_page(REV))) -> dict:
+    rows = waste.review(body.ids, body.status, body.note, user, allowed_branches())
+    if not rows:
+        raise HTTPException(404, detail="Waste tidak ditemukan")
+    verdict = "disetujui" if body.status == "approved" else "ditolak"
+    names = {r["branch_name"] for r in rows}
+    activity.record("waste.review", user=user, request=request, page="/cost-control/waste/reviews",
+                    summary=f"Waste {verdict}: {len(rows)} item" + (f" ({next(iter(names))})" if len(names) == 1 else ""),
+                    details={"ids": [r["id"] for r in rows], "status": body.status, "note": body.note})
+    return {"updated": len(rows), "status": body.status}
+
+
+@router.get("/entries/{entry_id}/photo")
+def photo(entry_id: str, request: Request, user: dict = Depends(current_user)) -> Response:
+    row = waste.photo_of(entry_id)
+    if row is None:
+        raise HTTPException(404, detail="Waste tidak ditemukan")
     scope = allowed_branches()
-    return {**SKELETON, "branches": None if scope is None else sorted(scope), "data": []}
-
-
-@router.get("/monitor", dependencies=[Depends(require_page("cc.waste-monitor"))])
-def monitor() -> dict:
-    return {**SKELETON, "data": []}
-
-
-@router.get("/reviews", dependencies=[Depends(require_page("cc.waste-review"))])
-def reviews() -> dict:
-    return {**SKELETON, "data": []}
-
-
-@router.post("/reviews/{entry_id}", dependencies=[Depends(require_page("cc.waste-review"))])
-def review(entry_id: str) -> dict:
-    raise HTTPException(status_code=501, detail="Review waste belum tersedia")
+    in_scope = scope is None or row["branch_code"] in scope
+    if not (in_scope and any(has_page(user, p) for p in ("waste", MON, REV))):
+        deny(request, user)
+    return Response(bytes(row["photo"]), media_type=row["photo_type"], headers={"Cache-Control": "private, max-age=86400"})

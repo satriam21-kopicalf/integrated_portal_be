@@ -1,4 +1,5 @@
-"""PIC Check In (Form → Visit) and its monitoring (integration_portal.pic_checkin, migration 019).
+"""PIC Check In (Form → Visit) and its monitoring (integration_portal.pic_checkin, migration 019); the Surveyor Check In
+(migration 039) is the same check-in with kind = 'surveyor' (every Kopi Calf branch, its own form and monitoring page).
 
 A PIC checks in at the outlet he visits:
   * who: the signed-in account (name and username, not typed);
@@ -30,6 +31,8 @@ MAX_PHOTO = 3 * 1024 * 1024
 LOW_ACCURACY_M = 100
 ACCURACY_CREDIT_M = 100
 GLOBAL_ROLES = ("superadmin", "cost_control")
+# pic: PIC Check In · surveyor: Surveyor Check In (migration 039, every Kopi Calf branch whatever the account's scope)
+KINDS = ("pic", "surveyor")
 WIB_TZ = ZoneInfo("Asia/Jakarta")
 _DATA_URL = re.compile(r"^data:(image/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=\s]+)$")
 
@@ -88,9 +91,9 @@ def locations(codes: list[str]) -> dict[str, dict]:
     return out
 
 
-def branch_options(user: dict) -> list[dict]:
-    """Branches the user may check in at, with the outlet's location."""
-    if user.get("role") in GLOBAL_ROLES:
+def branch_options(user: dict, every: bool = False) -> list[dict]:
+    """Branches the user may check in at, with the outlet's location (every=True: all Kopi Calf branches)."""
+    if every or user.get("role") in GLOBAL_ROLES:
         rows = db.fetch(
             f"""SELECT branch_code AS code, branch_name AS name FROM {SCHEMA}.master_branches
                 WHERE COALESCE(branch_code, '') <> '' AND COALESCE(is_deleted, false) = false AND COALESCE(is_active, true)
@@ -212,11 +215,11 @@ def assess(user_id: str, lat: float, lng: float, accuracy: Optional[float], outl
 def create(user: dict, branch_code: str, photo: str, lat: float, lng: float, accuracy: Optional[float],
            located_at: Optional[datetime], device_time: Optional[datetime], note: Optional[str],
            device: Optional[str], ip: Optional[str], sent_at: Optional[datetime] = None, samples: Optional[list] = None,
-           touch: Optional[bool] = None, webdriver: Optional[bool] = None) -> dict:
-    branch = next((b for b in branch_options(user) if b["code"] == branch_code), None)
+           touch: Optional[bool] = None, webdriver: Optional[bool] = None, kind: str = "pic") -> dict:
+    branch = next((b for b in branch_options(user, every=kind == "surveyor") if b["code"] == branch_code), None)
     if branch is None:
         raise CheckInError("Cabang tidak tersedia untuk akun Anda")
-    if done_today(str(user["id"])).get(branch["code"]):
+    if done_today(str(user["id"]), kind).get(branch["code"]):
         raise CheckInError(f"Anda sudah check in di {branch['name']} hari ini. Check in berikutnya besok.")
     photo_type, data = parse_photo(photo)
     faces = count_faces(data)
@@ -234,17 +237,17 @@ def create(user: dict, branch_code: str, photo: str, lat: float, lng: float, acc
     row = db.fetchrow(
         f"""INSERT INTO {T} (user_id, username, full_name, role, branch_code, branch_name, device_time, latitude, longitude,
                 accuracy_m, located_at, outlet_latitude, outlet_longitude, radius_m, distance_m, outside_radius, low_accuracy,
-                face_count, photo, photo_type, note, device, ip, risk_level, risk_signals, gps_samples)
+                face_count, photo, photo_type, note, device, ip, risk_level, risk_signals, gps_samples, kind)
             VALUES (%(u)s, %(un)s, %(fn)s, %(role)s, %(bc)s, %(bn)s, %(dt)s, %(lat)s, %(lng)s, %(acc)s, %(la)s, %(olat)s, %(olng)s,
                 %(r)s, %(d)s, %(out)s, %(low)s, %(faces)s, %(photo)s, %(pt)s, %(note)s, %(dev)s, %(ip)s, %(rl)s, %(rs)s::jsonb,
-                %(gs)s::jsonb)
+                %(gs)s::jsonb, %(kind)s)
             RETURNING id::text, visited_at""",
         {"u": user["id"], "un": user["username"], "fn": user.get("full_name"), "role": user["role"], "bc": branch["code"],
          "bn": branch["name"], "dt": device_time, "lat": lat, "lng": lng, "acc": accuracy, "la": located_at,
          "olat": branch["latitude"], "olng": branch["longitude"], "r": branch["radius_m"], "d": j["distance_m"],
          "out": j["outside_radius"], "low": j["low_accuracy"], "faces": faces, "photo": data, "pt": photo_type,
          "note": note, "dev": (device or "")[:300] or None, "ip": ip, "rl": risk["level"],
-         "rs": json.dumps(risk["signals"], ensure_ascii=False), "gs": json.dumps((samples or [])[:30])})
+         "rs": json.dumps(risk["signals"], ensure_ascii=False), "gs": json.dumps((samples or [])[:30]), "kind": kind})
     return {"id": row["id"], "visitedAt": row["visited_at"].isoformat(), "branchCode": branch["code"], "branchName": branch["name"],
             "faces": faces, "outletLocated": branch["latitude"] is not None, "radiusM": branch["radius_m"], **_camel(j),
             "riskLevel": risk["level"], "riskSignals": [s["code"] for s in risk["signals"]]}
@@ -279,10 +282,11 @@ def _view(r: dict, risk: bool = True) -> dict:
     }
 
 
-def recent_of(user_id: str, limit: int = 10) -> list[dict]:
+def recent_of(user_id: str, limit: int = 10, kind: str = "pic") -> list[dict]:
     """The PIC's own list: without the risk signals, with the management's review (valid / not valid and its note)."""
     out = []
-    for r in db.fetch(f"SELECT {COLUMNS} FROM {T} c WHERE c.user_id = %s ORDER BY c.visited_at DESC LIMIT %s", (user_id, limit)):
+    for r in db.fetch(f"SELECT {COLUMNS} FROM {T} c WHERE c.user_id = %s AND c.kind = %s ORDER BY c.visited_at DESC LIMIT %s",
+                      (user_id, kind, limit)):
         v = _view(r, risk=False)
         v["review"] = None if not r.get("review_status") else {
             "status": r["review_status"], "note": r.get("review_note"), "by": r.get("reviewed_by"),
@@ -291,19 +295,19 @@ def recent_of(user_id: str, limit: int = 10) -> list[dict]:
     return out
 
 
-def done_today(user_id: str) -> dict[str, dict]:
+def done_today(user_id: str, kind: str = "pic") -> dict[str, dict]:
     """{branch code: {id, visitedAt}} of the PIC's check-ins today (WIB): one check in per branch per day."""
     rows = db.fetch(f"""SELECT DISTINCT ON (branch_code) branch_code, id::text, visited_at FROM {T}
-                        WHERE user_id = %s AND (visited_at AT TIME ZONE 'Asia/Jakarta')::date = (now() AT TIME ZONE 'Asia/Jakarta')::date
-                        ORDER BY branch_code, visited_at""", (user_id,))
+                        WHERE user_id = %s AND kind = %s AND (visited_at AT TIME ZONE 'Asia/Jakarta')::date = (now() AT TIME ZONE 'Asia/Jakarta')::date
+                        ORDER BY branch_code, visited_at""", (user_id, kind))
     return {r["branch_code"]: {"id": r["id"], "visitedAt": r["visited_at"].isoformat()} for r in rows}
 
 
 def monitor(date_from: date, date_to: date, branches: Optional[list[str]], user_id: Optional[str] = None,
-            location: str = "", limit: int = 1000) -> dict:
+            location: str = "", limit: int = 1000, kind: str = "pic") -> dict:
     """Check-ins of a period (WIB days) for the branches (None = all) with the figures of the period."""
-    where = ["(c.visited_at AT TIME ZONE 'Asia/Jakarta')::date BETWEEN %(a)s AND %(b)s"]
-    params: dict[str, Any] = {"a": date_from, "b": date_to, "lim": limit}
+    where = ["(c.visited_at AT TIME ZONE 'Asia/Jakarta')::date BETWEEN %(a)s AND %(b)s", "c.kind = %(kind)s"]
+    params: dict[str, Any] = {"a": date_from, "b": date_to, "lim": limit, "kind": kind}
     if branches is not None:
         where.append("c.branch_code = ANY(%(br)s)")
         params["br"] = branches
@@ -341,15 +345,16 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], user_
 
 
 def photo_of(checkin_id: str) -> Optional[dict]:
-    return db.fetchrow(f"SELECT user_id::text, branch_code, photo, photo_type FROM {T} WHERE id::text = %s", (checkin_id,))
+    return db.fetchrow(f"SELECT user_id::text, branch_code, kind, photo, photo_type FROM {T} WHERE id::text = %s", (checkin_id,))
 
 
-def review(checkin_id: str, status: str, note: Optional[str], user: dict, branches: Optional[tuple]) -> Optional[dict]:
+def review(checkin_id: str, status: str, note: Optional[str], user: dict, branches: Optional[tuple],
+           kind: str = "pic") -> Optional[dict]:
     """A manager's verdict on a flagged check-in (valid / invalid); None when not found or out of scope."""
     row = db.fetchrow(
         f"""UPDATE {T} SET review_status = %(s)s, review_note = %(n)s, reviewed_by = %(by)s, reviewed_at = now()
-            WHERE id::text = %(id)s AND (%(all)s OR branch_code = ANY(%(br)s))
+            WHERE id::text = %(id)s AND kind = %(kind)s AND (%(all)s OR branch_code = ANY(%(br)s))
             RETURNING id::text, branch_name, username""",
         {"s": status, "n": (note or "").strip()[:500] or None, "by": user.get("full_name") or user["username"],
-         "id": checkin_id, "all": branches is None, "br": list(branches or [])})
+         "id": checkin_id, "kind": kind, "all": branches is None, "br": list(branches or [])})
     return row

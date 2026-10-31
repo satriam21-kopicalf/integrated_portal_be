@@ -28,6 +28,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("waste", "Waste (input)", "Main menu"),
     ("guide", "Guide", "Main menu"),
     ("form.pic-check-in", "PIC Check In (form)", "Form"),
+    ("form.surveyor-check-in", "Surveyor Check In (form)", "Form"),
     ("form.product", "Monitoring Product (form)", "Form"),
     ("form.outlet", "Monitoring Outlet (form)", "Form"),
     ("form.damaged-equipment", "Damaged Equipment (form)", "Form"),
@@ -49,6 +50,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("cc.cogs", "COGS & usage", "Cost Control · Analytics"),
     ("mon.overview", "Overview", "Monitoring"),
     ("mon.pic-check-in", "PIC Check In", "Monitoring"),
+    ("mon.surveyor-check-in", "Surveyor Check In", "Monitoring"),
     ("mon.product", "Monitoring Product", "Monitoring"),
     ("mon.outlet", "Monitoring Outlet", "Monitoring"),
     ("mon.damaged-equipment", "Damaged Equipment", "Monitoring"),
@@ -63,7 +65,9 @@ PAGES: list[tuple[str, str, str]] = [
 PAGE_KEYS = tuple(p[0] for p in PAGES)
 CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))
 EDITABLE_ROLES = ("cost_control", "user", "outlet")
-FORM_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("form."))
+# the Surveyor Check In is given per account (migration 039), not to a role
+PER_USER_FORMS = ("form.surveyor-check-in",)
+FORM_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("form.") and k not in PER_USER_FORMS)
 # role "user" = Area Supervisor / PIC: Dashboard, Sales, Stock Opname, Waste, the Guide and every form (a new form page
 # is added to the role by its migration); role "outlet" = the shared outlet / HUB CK / HUB WH accounts (2026-10-28)
 DEFAULT_ROLE_PAGES = {
@@ -76,7 +80,7 @@ DEFAULT_ROLE_PAGES = {
 # include a form signs in to Operations only; the portal refuses it (the portal sends APP_HEADER: portal on its calls).
 # every Aggregator menu opens in Operations too (2026-10-29)
 OPERATIONS_PAGES = frozenset({"overview", "sales", "rating.grabfood", "rating.google-maps", "rating.shopeefood", "rating.gofood",
-                              "stock-opname", "waste", "guide", *FORM_PAGES})
+                              "stock-opname", "waste", "guide", *FORM_PAGES, *PER_USER_FORMS})
 APP_HEADER = "x-kopicalf-app"
 
 _cache = TTLCache()

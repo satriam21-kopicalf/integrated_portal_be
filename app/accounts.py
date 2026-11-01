@@ -24,7 +24,8 @@ T_USER_BRANCH = "integration_portal.user_branch"
 
 MAX_FAILED_LOGINS = 5
 LOCK_MINUTES = 15
-ROLES = ("superadmin", "cost_control", "user", "outlet")  # outlet = shared outlet / hub accounts (2026-10-28)
+ROLES = ("superadmin", "cost_control", "user", "outlet", "driver")  # outlet = shared outlet / hub accounts (2026-10-28);
+# driver = Calf On The Road driver app only (migration 046)
 # roles that see every branch (no user_branch rows); "user" sees only its branches
 GLOBAL_ROLES = ("superadmin", "cost_control")
 

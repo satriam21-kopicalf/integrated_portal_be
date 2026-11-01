@@ -1,0 +1,241 @@
+"""Calf On The Road (app/cotr.py, migration 046).
+
+Driver app (fe-calfontheroad), accounts of role driver tied to a Master Driver row:
+    GET  /api/cotr/driver/today                 the driver, the menus, today's shift, stock, sales, reloads, requests, recap
+    POST /api/cotr/driver/check-in              {"kind": start|end, "photo", "latitude", "longitude", "accuracyM", "stock", "note"}
+    POST /api/cotr/driver/sales                 {"lines": [{"code", "qty"}], "payment": cash|qris}
+    POST /api/cotr/driver/sales/{id}/void       {"reason"}
+    POST /api/cotr/driver/reloads               {"lines": {code: cups}, "note"}
+    POST /api/cotr/driver/reloads/{id}/receive  an approved reload is on the fleet
+    POST /api/cotr/driver/requests              {"kind": fuel|ice|repair|parking|other, "amount", "note", "photo"}
+Every driver action answers the new state of the day (as GET today).
+
+Portal (Monitoring COTR):
+    GET  /api/cotr/monitor?day=                 page cotr.check-in: shifts of the day, drivers not started, reloads, requests
+    POST /api/cotr/reloads/{id}/decide          page cotr.check-in: {"approve", "note"}
+    POST /api/cotr/requests/{id}/decide         page cotr.check-in: {"approve", "note"} (a rejection needs the note)
+    GET  /api/cotr/masters/{entity}             pools | fleet | menus | boms | drivers (pages below)
+    POST /api/cotr/masters/{entity}             create        PUT /api/cotr/masters/{entity}/{code}   update
+    DELETE /api/cotr/masters/{entity}/{code}
+    GET  /api/cotr/driver-accounts              page cotr.drivers: the accounts of role driver
+    GET  /api/cotr/production?days=&buffer=     page cotr.production: plan from the sales of the last days
+    GET/POST /api/cotr/waste, DELETE /api/cotr/waste/{id}   page cotr.production
+    GET  /api/cotr/photos/{check-in|request}/{id}   the team (cotr.check-in) or the driver it belongs to
+"""
+from datetime import date, timedelta
+from typing import Literal, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
+from pydantic import BaseModel, Field
+
+from app import activity, cotr
+from app.access import deny, has_page, require_page
+from app.pic_checkin import CheckInError
+from app.routes.auth import current_user, require_roles
+from app.utils import today
+
+router = APIRouter(prefix="/api/cotr", tags=["cotr"])
+driver_only = require_roles("driver")
+ENTITY_PAGE = {"pools": "cotr.pools", "fleet": "cotr.fleet", "menus": "cotr.menu", "boms": "cotr.production",
+               "drivers": "cotr.drivers"}
+Entity = Literal["pools", "fleet", "menus", "boms", "drivers"]
+
+
+def _call(fn, *args):
+    try:
+        return fn(*args)
+    except CheckInError as e:  # CotrError, or a photo that cannot be read
+        raise HTTPException(422, detail=str(e)) from None
+
+
+def _log(request: Request, user: dict, action: str, summary: str, details: Optional[dict] = None) -> None:
+    activity.record(action, user=user, request=request, summary=summary, details=details or {})
+
+
+# ---------------------------------------------------------------- driver app
+
+class CheckInIn(BaseModel):
+    kind: Literal["start", "end"]
+    photo: str = Field(min_length=20, max_length=5_000_000)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    accuracyM: Optional[float] = Field(None, ge=0, le=100_000)
+    stock: dict[str, int] = Field(default_factory=dict)
+    note: Optional[str] = Field(None, max_length=500)
+
+
+class SaleLine(BaseModel):
+    code: str = Field(min_length=1, max_length=40)
+    qty: int = Field(ge=1, le=cotr.MAX_QTY)
+
+
+class SaleIn(BaseModel):
+    lines: list[SaleLine] = Field(min_length=1, max_length=50)
+    payment: Literal["cash", "qris"]
+
+
+class ReasonIn(BaseModel):
+    reason: str = Field(min_length=1, max_length=300)
+
+
+class ReloadIn(BaseModel):
+    lines: dict[str, int]
+    note: Optional[str] = Field(None, max_length=300)
+
+
+class RequestIn(BaseModel):
+    kind: Literal["fuel", "ice", "repair", "parking", "other"]
+    amount: float = Field(gt=0, le=100_000_000)
+    note: str = Field(min_length=1, max_length=500)
+    photo: str = Field(min_length=20, max_length=5_000_000)
+
+
+@router.get("/driver/today")
+def driver_today(user: dict = Depends(driver_only)):
+    return _call(cotr.today_of, user)
+
+
+@router.post("/driver/check-in")
+def driver_check_in(body: CheckInIn, request: Request, user: dict = Depends(driver_only)):
+    out = _call(cotr.check_in, user, body.kind, body.photo, body.latitude, body.longitude, body.accuracyM, body.stock, body.note)
+    _log(request, user, f"cotr.check_in.{body.kind}", f"COTR check {'in' if body.kind == 'start' else 'out'}: {out['driver']['code']}",
+         {"stock": body.stock})
+    return out
+
+
+@router.post("/driver/sales")
+def driver_sell(body: SaleIn, user: dict = Depends(driver_only)):
+    return _call(cotr.sell, user, [line.model_dump() for line in body.lines], body.payment)
+
+
+@router.post("/driver/sales/{sale_id}/void")
+def driver_void(sale_id: str, body: ReasonIn, request: Request, user: dict = Depends(driver_only)):
+    out = _call(cotr.void_sale, user, sale_id, body.reason)
+    _log(request, user, "cotr.sale.void", f"COTR transaksi dibatalkan: {body.reason}", {"saleId": sale_id})
+    return out
+
+
+@router.post("/driver/reloads")
+def driver_reload(body: ReloadIn, user: dict = Depends(driver_only)):
+    return _call(cotr.request_reload, user, body.lines, body.note)
+
+
+@router.post("/driver/reloads/{reload_id}/receive")
+def driver_receive(reload_id: str, user: dict = Depends(driver_only)):
+    return _call(cotr.receive_reload, user, reload_id)
+
+
+@router.post("/driver/requests")
+def driver_request(body: RequestIn, request: Request, user: dict = Depends(driver_only)):
+    out = _call(cotr.send_request, user, body.kind, body.amount, body.note, body.photo)
+    _log(request, user, "cotr.request", f"COTR pengajuan {body.kind}: Rp {body.amount:,.0f}")
+    return out
+
+
+# ---------------------------------------------------------------- portal
+
+class DecisionIn(BaseModel):
+    approve: bool
+    note: Optional[str] = Field(None, max_length=300)
+
+
+@router.get("/monitor")
+def monitor(day: Optional[date] = None, _: dict = Depends(require_page("cotr.check-in"))):
+    return cotr.monitor(day or today())
+
+
+@router.post("/reloads/{reload_id}/decide")
+def decide_reload(reload_id: str, body: DecisionIn, request: Request, user: dict = Depends(require_page("cotr.check-in"))):
+    _call(cotr.decide_reload, user, reload_id, body.approve, body.note)
+    _log(request, user, "cotr.reload.decide", f"Reload COTR {'disetujui' if body.approve else 'ditolak'}", {"reloadId": reload_id})
+    return {"ok": True}
+
+
+@router.post("/requests/{request_id}/decide")
+def decide_request(request_id: str, body: DecisionIn, request: Request, user: dict = Depends(require_page("cotr.check-in"))):
+    _call(cotr.decide_request, user, request_id, body.approve, body.note)
+    _log(request, user, "cotr.request.decide", f"Pengajuan COTR {'disetujui' if body.approve else 'ditolak'}",
+         {"requestId": request_id})
+    return {"ok": True}
+
+
+def _master_user(request: Request, entity: str, user: dict = Depends(current_user)) -> dict:
+    if not has_page(user, ENTITY_PAGE[entity]):
+        deny(request, user)
+    return user
+
+
+@router.get("/masters/{entity}")
+def master_list(entity: Entity, user: dict = Depends(_master_user)):
+    return cotr.master_list(entity)
+
+
+@router.post("/masters/{entity}", status_code=201)
+def master_create(entity: Entity, body: dict, request: Request, user: dict = Depends(_master_user)):
+    out = _call(cotr.master_save, user, entity, None, body)
+    _log(request, user, "cotr.master.create", f"COTR {entity}: {out.get('code')} dibuat")
+    return out
+
+
+@router.put("/masters/{entity}/{code}")
+def master_update(entity: Entity, code: str, body: dict, request: Request, user: dict = Depends(_master_user)):
+    out = _call(cotr.master_save, user, entity, code, body)
+    _log(request, user, "cotr.master.update", f"COTR {entity}: {code} diubah")
+    return out
+
+
+@router.delete("/masters/{entity}/{code}")
+def master_delete(entity: Entity, code: str, request: Request, user: dict = Depends(_master_user)):
+    _call(cotr.master_delete, entity, code)
+    _log(request, user, "cotr.master.delete", f"COTR {entity}: {code} dihapus")
+    return {"ok": True}
+
+
+@router.get("/driver-accounts")
+def driver_accounts(_: dict = Depends(require_page("cotr.drivers"))):
+    return cotr.driver_accounts()
+
+
+@router.get("/production")
+def production(days: int = Query(7, ge=1, le=60), buffer: float = Query(10, ge=0, le=100),
+               _: dict = Depends(require_page("cotr.production"))):
+    return cotr.production(days, buffer)
+
+
+class WasteIn(BaseModel):
+    day: Optional[date] = None
+    pool_code: str = Field(min_length=1, max_length=40)
+    item: str = Field(min_length=1, max_length=120)
+    qty: float = Field(gt=0)
+    unit: str = Field(min_length=1, max_length=10)
+    reason: str = Field(min_length=1, max_length=300)
+
+
+@router.get("/waste")
+def waste_list(dateFrom: Optional[date] = None, dateTo: Optional[date] = None, _: dict = Depends(require_page("cotr.production"))):
+    end = dateTo or today()
+    return cotr.waste_list(dateFrom or end - timedelta(days=30), end)
+
+
+@router.post("/waste", status_code=201)
+def waste_add(body: WasteIn, user: dict = Depends(require_page("cotr.production"))):
+    return _call(cotr.waste_add, user, body.model_dump())
+
+
+@router.delete("/waste/{waste_id}")
+def waste_delete(waste_id: str, _: dict = Depends(require_page("cotr.production"))):
+    cotr.waste_delete(waste_id)
+    return {"ok": True}
+
+
+@router.get("/photos/{kind}/{row_id}")
+def photo(kind: Literal["check-in", "request"], row_id: str, request: Request, user: dict = Depends(current_user)):
+    if not has_page(user, "cotr.check-in"):
+        d = cotr.driver_of(user) if user["role"] == "driver" else None
+        if not d or cotr.photo_owner(kind, row_id) != d["code"]:
+            deny(request, user)
+    row = cotr.photo(kind, row_id)
+    if not row or not row["photo"]:
+        raise HTTPException(404, detail="Foto tidak ditemukan")
+    return Response(bytes(row["photo"]), media_type=row["photo_type"], headers={"Cache-Control": "private, max-age=86400"})

@@ -3,11 +3,12 @@
 Driver app (fe-calfontheroad), accounts of role driver tied to a Master Driver row:
     GET  /api/cotr/driver/today                 the driver, the menus, today's shift, stock, sales, reloads, requests, recap
     POST /api/cotr/driver/check-in              {"kind": start|end, "photo", "latitude", "longitude", "accuracyM", "stock", "note"}
+                                                end also {"waste", "cupping": {code: cups}, "cashActual", "cashSpent"}
     POST /api/cotr/driver/sales                 {"lines": [{"code", "qty"}], "payment": cash|qris}
     POST /api/cotr/driver/sales/{id}/void       {"reason"}
     POST /api/cotr/driver/reloads               {"lines": {code: cups}, "note"}
     POST /api/cotr/driver/reloads/{id}/receive  an approved reload is on the fleet
-    POST /api/cotr/driver/requests              {"kind": fuel|ice|repair|parking|other, "amount", "note", "photo"}
+    POST /api/cotr/driver/requests              {"kind": fuel|ice|stall|repair|parking|other, "amount", "note", "photo"}
 Every driver action answers the new state of the day (as GET today).
 
 Portal (Monitoring COTR):
@@ -63,6 +64,11 @@ class CheckInIn(BaseModel):
     accuracyM: Optional[float] = Field(None, ge=0, le=100_000)
     stock: dict[str, int] = Field(default_factory=dict)
     note: Optional[str] = Field(None, max_length=500)
+    # end of the shift ("Report Armada"): cups wasted and given for tasting per menu, the cash counted and spent
+    waste: dict[str, int] = Field(default_factory=dict)
+    cupping: dict[str, int] = Field(default_factory=dict)
+    cashActual: Optional[float] = Field(None, ge=0, le=100_000_000)
+    cashSpent: Optional[float] = Field(None, ge=0, le=100_000_000)
 
 
 class SaleLine(BaseModel):
@@ -85,7 +91,7 @@ class ReloadIn(BaseModel):
 
 
 class RequestIn(BaseModel):
-    kind: Literal["fuel", "ice", "repair", "parking", "other"]
+    kind: Literal["fuel", "ice", "stall", "repair", "parking", "other"]
     amount: float = Field(gt=0, le=100_000_000)
     note: str = Field(min_length=1, max_length=500)
     photo: str = Field(min_length=20, max_length=5_000_000)
@@ -98,7 +104,8 @@ def driver_today(user: dict = Depends(driver_only)):
 
 @router.post("/driver/check-in")
 def driver_check_in(body: CheckInIn, request: Request, user: dict = Depends(driver_only)):
-    out = _call(cotr.check_in, user, body.kind, body.photo, body.latitude, body.longitude, body.accuracyM, body.stock, body.note)
+    out = _call(cotr.check_in, user, body.kind, body.photo, body.latitude, body.longitude, body.accuracyM, body.stock, body.note,
+                body.waste, body.cupping, body.cashActual, body.cashSpent)
     _log(request, user, f"cotr.check_in.{body.kind}", f"COTR check {'in' if body.kind == 'start' else 'out'}: {out['driver']['code']}",
          {"stock": body.stock})
     return out

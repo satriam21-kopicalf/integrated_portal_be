@@ -4,9 +4,11 @@ and monitoring of the COTR team (portal pages cotr.*).
 A driver account (role "driver") is tied to one row of cotr_driver. Its day is one shift: the start check in (photo,
 location, the cups loaded per menu), sales (price of the menu at that moment, cash or QRIS; voided with a reason),
 reloads (asked by the driver, approved or rejected by the pool in the portal, received by the driver) and the end
-check in (the cups counted, set against the stock the system expects; a difference needs a note). The stock on the
-fleet is never stored: start stock + reloads received - sales not voided. Costs on the road (fuel, ice …) are sent
-with the receipt and approved or rejected in the portal.
+check in, as the "Report Armada" sheet of COTR (migration 047): per menu the cups left, wasted and given for tasting
+(cupping), set against the stock the system expects (a difference needs a note), then the cash counted and the cash
+spent on the road from it, which give the balance of the day (- short / + over: "Rekap Minus"). The stock on the
+fleet is never stored: start stock + reloads received - sales not voided. Costs on the road (fuel, ice, stall …) are
+sent with the receipt and approved or rejected in the portal.
 """
 from datetime import date, datetime
 from decimal import Decimal
@@ -20,7 +22,7 @@ from app.utils import today
 
 P = "integration_portal"
 PAYMENTS = ("cash", "qris")
-REQUEST_KINDS = ("fuel", "ice", "repair", "parking", "other")
+REQUEST_KINDS = ("fuel", "ice", "stall", "repair", "parking", "other")
 MAX_QTY = 1000  # cups in one line
 
 
@@ -94,8 +96,27 @@ def difference(counted: Stock, expected: Stock) -> dict[str, int]:
     return {k: counted.get(k, 0) - expected.get(k, 0) for k in sorted(keys) if counted.get(k, 0) != expected.get(k, 0)}
 
 
+def left_expected(stock: Stock, waste: Stock, cupping: Stock) -> Stock:
+    """What should be left at the end: the stock on the fleet minus what was wasted or given for tasting."""
+    keys = set(stock) | set(waste) | set(cupping)
+    return {k: stock.get(k, 0) - waste.get(k, 0) - cupping.get(k, 0) for k in sorted(keys)
+            if stock.get(k, 0) - waste.get(k, 0) - cupping.get(k, 0)}
+
+
+def balance(cash_sales: float, cash_spent: Optional[Any], cash_actual: Optional[Any]) -> Optional[float]:
+    """Cash counted - (cash sales - cash spent on the road); None before the end of the shift."""
+    if cash_actual is None:
+        return None
+    return float(Decimal(str(cash_actual)) - (Decimal(str(cash_sales)) - Decimal(str(cash_spent or 0))))
+
+
+def _num(v: Any) -> Optional[float]:
+    return float(v) if v is not None else None
+
+
 def recap(shift: dict, sales: list[dict], reloads: list[dict], requests: list[dict]) -> dict:
-    """The figures of a shift: cups, cash and QRIS, voids, reloads received, requests, the difference at the end."""
+    """The figures of a shift: cups, cash and QRIS, voids, reloads received, requests, waste and cupping, the
+    difference of the stock and the balance of the cash at the end."""
     ok = [s for s in sales if not s.get("voided_at")]
     by_pay = {p: float(sum(Decimal(s["total"]) for s in ok if s["payment"] == p)) for p in PAYMENTS}
     per_menu: dict[str, dict] = {}
@@ -111,6 +132,11 @@ def recap(shift: dict, sales: list[dict], reloads: list[dict], requests: list[di
         "reloaded": sum(sum(int(v) for v in r["lines"].values()) for r in reloads if r["status"] == "received"),
         "requested": float(sum(Decimal(r["amount"]) for r in requests if r["status"] != "rejected")),
         "difference": diff,
+        "waste": sum(int(v) for v in (shift.get("end_waste") or {}).values()),
+        "cupping": sum(int(v) for v in (shift.get("end_cupping") or {}).values()),
+        "cashSpent": float(shift.get("cash_spent") or 0), "cashActual": _num(shift.get("cash_actual")),
+        "cashExpected": by_pay["cash"] - float(shift.get("cash_spent") or 0),
+        "balance": balance(by_pay["cash"], shift.get("cash_spent"), shift.get("cash_actual")),
     }
 
 
@@ -215,7 +241,8 @@ def today_of(user: dict) -> dict:
     if s:
         shift = {"id": str(s["id"]), "day": _iso(s["day"]), "status": s["status"], "startedAt": _iso(s["started_at"]),
                  "endedAt": _iso(s["ended_at"]), "startStock": s["start_stock"], "endStock": s["end_stock"],
-                 "expectedStock": s["expected_stock"], "endNote": s["end_note"]}
+                 "expectedStock": s["expected_stock"], "endNote": s["end_note"], "endWaste": s.get("end_waste"),
+                 "endCupping": s.get("end_cupping")}
     return {
         "driver": _driver_view(d),
         "menus": [{"code": m["code"], "name": m["name"], "price": float(m["price"])} for m in menus(active_only=True)],
@@ -242,10 +269,13 @@ def _open_shift(d: dict) -> dict:
 
 
 def check_in(user: dict, kind: str, photo: str, lat: float, lng: float, accuracy: Optional[float], stock: dict,
-             note: Optional[str]) -> dict:
+             note: Optional[str], waste: Optional[dict] = None, cupping: Optional[dict] = None,
+             cash_actual: Optional[float] = None, cash_spent: Optional[float] = None) -> dict:
     d = require_driver(user)
     ptype, pdata = parse_photo(photo)
-    counted = clean_stock(stock, _menu_map())
+    menu_codes = _menu_map()
+    counted = clean_stock(stock, menu_codes)
+    wasted, tasted = clean_stock(waste, menu_codes), clean_stock(cupping, menu_codes)
     note = (note or "").strip() or None
     with db.transaction() as conn:
         s = conn.execute(f"SELECT * FROM {P}.cotr_shift WHERE driver_code = %s AND day = %s FOR UPDATE", (d["code"], today())).fetchone()
@@ -263,12 +293,21 @@ def check_in(user: dict, kind: str, photo: str, lat: float, lng: float, accuracy
                 raise CotrError("Belum ada shift yang berjalan")
             sales = conn.execute(f"SELECT * FROM {P}.cotr_sale WHERE shift_id = %s", (s["id"],)).fetchall()
             reloads = conn.execute(f"SELECT * FROM {P}.cotr_reload WHERE shift_id = %s", (s["id"],)).fetchall()
-            expected = stock_now(s["start_stock"], reloads, sales)
+            if cash_actual is None or cash_actual < 0:
+                raise CotrError("Isi uang tunai yang dihitung (actual cash)")
+            if cash_spent is not None and cash_spent < 0:
+                raise CotrError("Operasional tidak valid")
+            on_fleet = stock_now(s["start_stock"], reloads, sales)
+            if any(wasted.get(k, 0) + tasted.get(k, 0) > on_fleet.get(k, 0) for k in set(wasted) | set(tasted)):
+                raise CotrError("Wasting + cupping melebihi stok di armada")
+            expected = left_expected(on_fleet, wasted, tasted)
             if difference(counted, expected) and not note:
                 raise CotrError("Ada selisih dengan stok sistem: tulis penjelasannya di catatan")
             conn.execute(
                 f"""UPDATE {P}.cotr_shift SET status = 'closed', ended_at = now(), end_stock = %s, expected_stock = %s,
-                        end_note = %s WHERE id = %s""", (Jsonb(counted), Jsonb(expected), note, s["id"]))
+                        end_note = %s, end_waste = %s, end_cupping = %s, cash_actual = %s, cash_spent = %s
+                     WHERE id = %s""",
+                (Jsonb(counted), Jsonb(expected), note, Jsonb(wasted), Jsonb(tasted), cash_actual, cash_spent or 0, s["id"]))
         conn.execute(
             f"""INSERT INTO {P}.cotr_check_in (shift_id, kind, latitude, longitude, accuracy_m, photo, photo_type, stock, note)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",

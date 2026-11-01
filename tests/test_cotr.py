@@ -71,3 +71,17 @@ def test_driver_api_is_for_drivers_and_drivers_stay_out_of_the_portal(anon, stor
     assert login(anon, "drv.rizki", "Driver1234").status_code == 200  # the driver app sends no portal header
     assert anon.get("/api/auth/me", headers=portal).status_code == 403
     assert anon.get("/api/cotr/monitor").status_code == 403
+
+
+def test_end_of_shift_follows_the_report_armada():
+    # left = on the fleet - wasted - cupping (sold = taken - left - cupping - waste)
+    assert cotr.left_expected({"EKC": 20, "AMR": 3}, {"EKC": 2}, {"EKC": 1, "AMR": 3}) == {"EKC": 17}
+    # balance = cash counted - (cash sales - cash spent on the road): - short, + over ("Rekap Minus")
+    assert cotr.balance(584000, 25000, 550000) == -9000
+    assert cotr.balance(584000, None, 584000) == 0
+    assert cotr.balance(584000, 0, None) is None  # still on the road
+    shift = {"end_stock": {"EKC": 17}, "expected_stock": {"EKC": 17}, "end_waste": {"EKC": 2}, "end_cupping": {"EKC": 1},
+             "cash_actual": 30000, "cash_spent": 5000}
+    sales = [{"lines": [{"code": "EKC", "name": "Es Kopi Calf", "qty": 2, "price": 15000}], "payment": "cash", "total": 30000, "voided_at": None}]
+    r = cotr.recap(shift, sales, [], [])
+    assert (r["waste"], r["cupping"], r["cashExpected"], r["balance"], r["difference"]) == (2, 1, 25000, 5000, {})

@@ -18,7 +18,7 @@ def _row(**kw):
             "scope": "premix", "item_code": "PREMIX-MAGIC", "item_name": "PREMIX MAGIC", "unit": "GR", "qty": 250,
             "category": "Premix Expired/ Over Stock", "note": None, "photo_taken_at": None, "latitude": None,
             "longitude": None, "status": "submitted", "review_note": None, "reviewed_by": None, "reviewed_at": None,
-            "created_at": datetime(2026, 10, 31, 3, 0, tzinfo=timezone.utc)}
+            "created_at": datetime(2026, 10, 31, 3, 0, tzinfo=timezone.utc), "production_date": None, "expired_date": None}
     return {**base, **kw}
 
 
@@ -41,17 +41,19 @@ def test_entry_needs_category_photo_and_a_known_item(anon, store, fake_db, page_
 
     monkeypatch.setattr(waste.db, "fetchrow", insert)
     body = {"branchCode": "CCI01", "businessDate": "2026-10-31", "scope": "premix", "itemCode": "PREMIX-MAGIC",
-            "qty": 250, "category": "Premix Expired/ Over Stock", "note": "tumpah", "photo": _jpeg()}
+            "qty": 250, "category": "Premix Expired/ Over Stock", "note": "tumpah", "photo": _jpeg(),
+            "productionDate": "2026-10-25", "expiredDate": "2026-11-05"}
     login(anon, "kasir", "Kasir1234")  # role user (a PIC): the waste input is a page of the role, Cost Control is not
     assert anon.get("/api/waste/monitor").status_code == 403 and anon.get("/api/waste/reviews").status_code == 403
     for bad, msg in (({"category": "Lainnya"}, "kategori"), ({"itemCode": "NOPE"}, "Item tidak ada"),
-                     ({"branchCode": "CCI99"}, "Cabang"), ({"businessDate": "2026-10-28"}, "hari ini atau kemarin")):
+                     ({"branchCode": "CCI99"}, "Cabang"), ({"businessDate": "2026-10-28"}, "hari ini atau kemarin"),
+                     ({"productionDate": "2026-10-31", "expiredDate": "2026-10-01"}, "Expired date")):
         r = anon.post("/api/waste/entries", json={**body, **bad})
         assert r.status_code == 422 and msg in r.json()["error"], (bad, r.json())
     assert anon.post("/api/waste/entries", json={**body, "photo": ""}).status_code == 422  # photo required
     assert not saved
     r = anon.post("/api/waste/entries", json=body)
-    assert r.status_code == 201 and r.json()["scope"] == "premix" and saved["unit"] == "GR" and saved["n"] == "tumpah"
+    assert r.status_code == 201 and r.json()["scope"] == "premix" and saved["unit"] == "GR" and saved["n"] == "tumpah" and str(saved["ed"]) == "2026-11-05"
 
 
 def test_monitor_and_review(anon, store, fake_db, page_access, monkeypatch):

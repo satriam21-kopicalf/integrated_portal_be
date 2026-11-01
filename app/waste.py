@@ -75,7 +75,7 @@ def allowed_days() -> tuple[date, date]:
 
 
 COLUMNS = """e.id::text, e.user_id::text, e.username, e.full_name, e.role, e.branch_code, e.branch_name, e.business_date,
-    e.scope, e.item_code, e.item_name, e.unit, e.qty, e.category, e.note, e.photo_taken_at, e.latitude, e.longitude,
+    e.scope, e.item_code, e.item_name, e.unit, e.qty, e.category, e.note, e.production_date, e.expired_date, e.photo_taken_at, e.latitude, e.longitude,
     e.status, e.review_note, e.reviewed_by, e.reviewed_at, e.created_at"""
 
 
@@ -85,6 +85,8 @@ def _view(r: dict) -> dict:
             "branchCode": r["branch_code"], "branchName": r["branch_name"], "businessDate": r["business_date"].isoformat(),
             "scope": r["scope"], "itemCode": r["item_code"], "itemName": r["item_name"], "unit": r["unit"],
             "qty": float(r["qty"]), "category": r["category"], "note": r["note"],
+            "productionDate": r["production_date"].isoformat() if r.get("production_date") else None,
+            "expiredDate": r["expired_date"].isoformat() if r.get("expired_date") else None,
             "photoTakenAt": r["photo_taken_at"].isoformat() if r["photo_taken_at"] else None,
             "latitude": num(r["latitude"]), "longitude": num(r["longitude"]), "status": r["status"],
             "review": None if r["status"] == "submitted" else {
@@ -194,16 +196,19 @@ def create(user: dict, body: dict, device: Optional[str], ip: Optional[str]) -> 
         raise WasteError("Pilih kategori waste")
     if not body.get("photo"):
         raise WasteError("Foto evidence wajib untuk setiap item")
+    made, expires = body.get("productionDate"), body.get("expiredDate")
+    if made and expires and expires < made:
+        raise WasteError("Expired date harus setelah production date")
     photo_type, data = parse_photo(body["photo"])
     row = db.fetchrow(
         f"""INSERT INTO {T} (user_id, username, full_name, role, branch_code, branch_name, business_date, scope, item_code,
-                item_name, unit, qty, category, note, photo, photo_type, photo_taken_at, latitude, longitude, device, ip)
+                item_name, unit, qty, category, note, production_date, expired_date, photo, photo_type, photo_taken_at, latitude, longitude, device, ip)
             VALUES (%(u)s, %(un)s, %(fn)s, %(role)s, %(bc)s, %(bn)s, %(d)s, %(s)s, %(ic)s, %(in)s, %(unit)s, %(q)s, %(c)s,
-                %(n)s, %(p)s, %(pt)s, %(ta)s, %(lat)s, %(lng)s, %(dev)s, %(ip)s)
+                %(n)s, %(pd)s, %(ed)s, %(p)s, %(pt)s, %(ta)s, %(lat)s, %(lng)s, %(dev)s, %(ip)s)
             RETURNING {COLUMNS.replace('e.', '')}""",
         {"u": user["id"], "un": user["username"], "fn": user.get("full_name"), "role": user["role"], "bc": branch["code"],
          "bn": branch["name"], "d": day, "s": scope, "ic": item["code"], "in": item["name"], "unit": item["unit"], "q": qty,
-         "c": category, "n": (body.get("note") or "").strip()[:500] or None, "p": data, "pt": photo_type,
+         "c": category, "n": (body.get("note") or "").strip()[:500] or None, "pd": made, "ed": expires, "p": data, "pt": photo_type,
          "ta": body.get("takenAt"), "lat": body.get("latitude"), "lng": body.get("longitude"),
          "dev": (device or "")[:300] or None, "ip": ip})
     return _view(row)

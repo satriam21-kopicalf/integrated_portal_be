@@ -3,7 +3,7 @@
     GET    /api/waste/entries?branch&date   page "waste": branches, days, items (waste / usage / premix), categories and
                                            the entries of the branch and day
     POST   /api/waste/entries               page "waste": one item {branchCode, businessDate, scope, itemCode, qty,
-                                           category, note, photo, takenAt, latitude, longitude} (photo and category
+                                           category, note, productionDate, expiredDate, photo, takenAt, latitude, longitude} (photo and category
                                            required)
     DELETE /api/waste/entries/{id}          page "waste": the author removes an entry not reviewed yet
     GET    /api/waste/monitor               page cc.waste-monitor (or cc.waste-review): ?dateFrom&dateTo&branch&group&
@@ -46,6 +46,8 @@ class EntryIn(BaseModel):
     qty: float = Field(gt=0, le=1_000_000)
     category: str = Field(min_length=1, max_length=120)
     note: Optional[str] = Field(None, max_length=500)
+    productionDate: Optional[date] = None
+    expiredDate: Optional[date] = None
     photo: str = Field(min_length=20, max_length=5_000_000)
     takenAt: Optional[datetime] = None
     latitude: Optional[float] = Field(None, ge=-90, le=90)

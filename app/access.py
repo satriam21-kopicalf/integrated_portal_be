@@ -61,6 +61,13 @@ PAGES: list[tuple[str, str, str]] = [
     ("rating.shopeefood", "ShopeeFood", "Aggregator"),
     ("rating.gofood", "GoFood", "Aggregator"),
     ("rating.grabfood", "GrabFood", "Aggregator"),
+    # Calf On The Road (prototype 2026-11-01, sample data in the frontend): pages of the COTR team, given per role / user
+    ("cotr.check-in", "Driver Check In", "Monitoring COTR"),
+    ("cotr.drivers", "Master Driver", "Monitoring COTR"),
+    ("cotr.fleet", "Master Fleet", "Monitoring COTR"),
+    ("cotr.pools", "Master Pool / HUB", "Monitoring COTR"),
+    ("cotr.menu", "Master Menu", "Monitoring COTR"),
+    ("cotr.production", "Storage & Production", "Monitoring COTR"),
 ]
 PAGE_KEYS = tuple(p[0] for p in PAGES)
 CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))

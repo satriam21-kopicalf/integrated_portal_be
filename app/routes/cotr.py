@@ -14,7 +14,7 @@ Portal (Monitoring COTR):
     GET  /api/cotr/monitor?day=                 page cotr.check-in: shifts of the day, drivers not started, reloads, requests
     POST /api/cotr/reloads/{id}/decide          page cotr.check-in: {"approve", "note"}
     POST /api/cotr/requests/{id}/decide         page cotr.check-in: {"approve", "note"} (a rejection needs the note)
-    GET  /api/cotr/masters/{entity}             pools | fleet | menus | boms | drivers (pages below)
+    GET  /api/cotr/masters/{entity}             pools | fleet | menus | boms | drivers (any COTR page; writes: the page of it)
     POST /api/cotr/masters/{entity}             create        PUT /api/cotr/masters/{entity}/{code}   update
     DELETE /api/cotr/masters/{entity}/{code}
     GET  /api/cotr/driver-accounts              page cotr.drivers: the accounts of role driver
@@ -160,14 +160,24 @@ def decide_request(request_id: str, body: DecisionIn, request: Request, user: di
     return {"ok": True}
 
 
+COTR_PAGES = tuple(sorted(set(ENTITY_PAGE.values()) | {"cotr.check-in"}))
+
+
 def _master_user(request: Request, entity: str, user: dict = Depends(current_user)) -> dict:
+    """Writes need the page of the master; reading any master needs any COTR page (Master Driver lists the pools …)."""
     if not has_page(user, ENTITY_PAGE[entity]):
         deny(request, user)
     return user
 
 
+def _cotr_reader(request: Request, user: dict = Depends(current_user)) -> dict:
+    if not any(has_page(user, p) for p in COTR_PAGES):
+        deny(request, user)
+    return user
+
+
 @router.get("/masters/{entity}")
-def master_list(entity: Entity, user: dict = Depends(_master_user)):
+def master_list(entity: Entity, user: dict = Depends(_cotr_reader)):
     return cotr.master_list(entity)
 
 

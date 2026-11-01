@@ -54,10 +54,21 @@ class EntryIn(BaseModel):
     longitude: Optional[float] = Field(None, ge=-180, le=180)
 
 
+class UsageLine(BaseModel):
+    qty: Optional[float] = Field(None, ge=0, le=1_000_000)
+    category: Optional[str] = Field(None, max_length=120)
+    note: Optional[str] = Field(None, max_length=500)
+    photo: Optional[str] = Field(None, max_length=5_000_000)
+    takenAt: Optional[datetime] = None
+    latitude: Optional[float] = Field(None, ge=-90, le=90)
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+
+
 class UsageIn(BaseModel):
     branchCode: str = Field(min_length=1, max_length=40)
     businessDate: Optional[date] = None
-    lines: dict[str, Optional[float]] = Field(max_length=500)
+    # a line per SKU (category, reason and photo, migration 045); null removes the SKU
+    lines: dict[str, Optional[UsageLine]] = Field(max_length=500)
 
 
 class NoWasteIn(BaseModel):
@@ -171,6 +182,17 @@ def save_usage(body: UsageIn, request: Request, user: dict = Depends(require_pag
                     summary=f"Usage Management {out['branchName']} {out['businessDate']}: {out['saved']} item",
                     details=out)
     return out
+
+
+@router.get("/usage/{branch_code}/{day}/{item_code}/photo")
+def usage_photo(branch_code: str, day: date, item_code: str, request: Request, user: dict = Depends(current_user)) -> Response:
+    row = waste.usage_photo(branch_code, day, item_code)
+    if row is None:
+        raise HTTPException(404, detail="Foto tidak ditemukan")
+    scope = allowed_branches()
+    if not ((scope is None or branch_code in scope) and any(has_page(user, p) for p in ("waste", MON, REV))):
+        deny(request, user)
+    return Response(bytes(row["photo"]), media_type=row["photo_type"], headers={"Cache-Control": "private, max-age=300"})
 
 
 @router.put("/no-waste")

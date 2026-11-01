@@ -287,7 +287,6 @@ INSERT INTO integration_portal.waste_item (scope, code, name, unit, sort) VALUES
 ON CONFLICT (scope, code) DO UPDATE SET name = EXCLUDED.name, unit = EXCLUDED.unit, sort = EXCLUDED.sort;
 
 INSERT INTO integration_portal.waste_category (name, sort) VALUES
-    ('Category Waste', 1),
     ('Kontaminasi/ Kerusakan Fisik', 2),
     ('Kontaminasi/ Kerusakan Kimia', 3),
     ('Kontaminasi/ Kerusakan Biologi', 4),

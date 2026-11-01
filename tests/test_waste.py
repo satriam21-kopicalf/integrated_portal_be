@@ -118,8 +118,15 @@ def test_usage_list_and_no_waste(anon, store, fake_db, page_access, monkeypatch)
     monkeypatch.setattr(waste, "today", lambda: date(2026, 10, 31))
     conn = _tx(monkeypatch)
     login(anon, "kasir", "Kasir1234")
-    body = {"branchCode": "CCI01", "businessDate": "2026-10-31", "lines": {"INSU-00005": 2, "AIIR-00001": None}}
-    assert anon.put("/api/waste/usage", json={**body, "lines": {"NOPE": 1}}).status_code == 422
+    monkeypatch.setattr(waste.db, "fetch", lambda q, p=None: [])  # no photo saved yet
+    line = {"qty": 2, "category": "Packaging Rusak", "note": "sobek", "photo": _jpeg()}
+    body = {"branchCode": "CCI01", "businessDate": "2026-10-31", "lines": {"INSU-00005": line, "AIIR-00001": None}}
+    assert anon.put("/api/waste/usage", json={**body, "lines": {"NOPE": {"qty": 1}}}).status_code == 422
+    # every SKU needs its category and a photo (migration 045)
+    r = anon.put("/api/waste/usage", json={**body, "lines": {"INSU-00005": {**line, "category": ""}}})
+    assert r.status_code == 422 and "kategori" in r.json()["error"]
+    r = anon.put("/api/waste/usage", json={**body, "lines": {"INSU-00005": {**line, "photo": None}}})
+    assert r.status_code == 422 and "Foto" in r.json()["error"]
     assert anon.put("/api/waste/usage", json={**body, "businessDate": "2026-10-20"}).status_code == 422
     r = anon.put("/api/waste/usage", json=body)
     assert r.status_code == 200 and r.json()["saved"] == 1 and r.json()["removed"] == 1

@@ -178,8 +178,11 @@ def form(user: dict, branch: Optional[str], day: Optional[date]) -> dict:
                         "ORDER BY e.created_at DESC", (branch, day or last))
         out["data"] = [_view(r) for r in rows]
         d = day or last
-        out["usage"] = {r["item_code"]: float(r["qty"]) for r in db.fetch(
-            f"SELECT item_code, qty FROM {T_USAGE} WHERE branch_code = %s AND business_date = %s", (branch, d))}
+        saved = db.fetch(f"""SELECT item_code, qty, category, note, photo IS NOT NULL AS has_photo FROM {T_USAGE}
+                             WHERE branch_code = %s AND business_date = %s""", (branch, d))
+        out["usage"] = {r["item_code"]: float(r["qty"]) for r in saved}
+        out["usageDetail"] = {r["item_code"]: {"qty": float(r["qty"]), "category": r.get("category"), "note": r.get("note"),
+                                               "hasPhoto": bool(r.get("has_photo"))} for r in saved}
         flag = db.fetchrow(f"SELECT no_waste, full_name, username, updated_at FROM {T_DAY} "
                            "WHERE branch_code = %s AND business_date = %s", (branch, d))
         out["noWaste"] = None if not flag or not flag["no_waste"] else {
@@ -199,41 +202,71 @@ def _branch_day(user: dict, body: dict) -> tuple[dict, date]:
 
 
 def save_usage(user: dict, body: dict) -> dict:
-    """The Usage Management list of a branch and day: {itemCode: qty}; an empty quantity removes the item."""
+    """Usage Management lines of a branch and day: {itemCode: {qty, category, note, photo, takenAt, latitude,
+    longitude}} (migration 045: category and photo required, the photo kept when saved again without one); an empty
+    quantity (null) removes the item."""
     branch, day = _branch_day(user, body)
     items = {i["code"]: i for i in catalog()["items"]["usage"]}
+    cats = catalog()["categories"]
     lines = body.get("lines") or {}
     unknown = [c for c in lines if c not in items]
     if unknown:
         raise WasteError(f"Item tidak ada di daftar Usage Management: {unknown[0]}")
     keep, drop = [], []
-    for code, value in lines.items():
+    for code, line in lines.items():
+        line = line if isinstance(line, dict) else {"qty": line}
+        value, name = line.get("qty"), items[code]["name"]
         if value is None or str(value).strip() == "":
             drop.append(code)
             continue
         try:
             q = Decimal(str(value).replace(",", ".")).quantize(Decimal("0.001"))
         except (InvalidOperation, ValueError):
-            raise WasteError(f"Jumlah {items[code]['name']} harus angka") from None
+            raise WasteError(f"Jumlah {name} harus angka") from None
         if q < 0 or q > MAX_QTY:
-            raise WasteError(f"Jumlah {items[code]['name']} tidak valid")
-        keep.append((code, q))
+            raise WasteError(f"Jumlah {name} tidak valid")
+        category = (line.get("category") or "").strip()
+        if category not in cats:
+            raise WasteError(f"Pilih kategori untuk {name}")
+        photo = parse_photo(line["photo"]) if line.get("photo") else None
+        keep.append((code, q, category, (line.get("note") or "").strip()[:500] or None, photo, line))
+    if keep and any(k[4] is None for k in keep):
+        have = {r["item_code"] for r in db.fetch(
+            f"SELECT item_code FROM {T_USAGE} WHERE branch_code = %s AND business_date = %s AND photo IS NOT NULL",
+            (branch["code"], day))}
+        missing = [items[k[0]]["name"] for k in keep if k[4] is None and k[0] not in have]
+        if missing:
+            raise WasteError(f"Foto evidence wajib untuk {missing[0]}")
     with db.transaction() as conn:
         if drop:
             conn.execute(f"DELETE FROM {T_USAGE} WHERE branch_code = %s AND business_date = %s AND item_code = ANY(%s)",
                          (branch["code"], day, drop))
-        for code, q in keep:
+        for code, q, category, note, photo, line in keep:
             i = items[code]
+            pt, data = photo if photo else (None, None)
             conn.execute(
                 f"""INSERT INTO {T_USAGE} (branch_code, branch_name, business_date, item_code, item_name, unit, qty,
-                        user_id, username, full_name) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        category, note, photo, photo_type, photo_taken_at, latitude, longitude,
+                        user_id, username, full_name) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (branch_code, business_date, item_code) DO UPDATE SET qty = EXCLUDED.qty,
+                        category = EXCLUDED.category, note = EXCLUDED.note,
+                        photo = coalesce(EXCLUDED.photo, {T_USAGE}.photo),
+                        photo_type = coalesce(EXCLUDED.photo_type, {T_USAGE}.photo_type),
+                        photo_taken_at = CASE WHEN EXCLUDED.photo IS NULL THEN {T_USAGE}.photo_taken_at ELSE EXCLUDED.photo_taken_at END,
+                        latitude = CASE WHEN EXCLUDED.photo IS NULL THEN {T_USAGE}.latitude ELSE EXCLUDED.latitude END,
+                        longitude = CASE WHEN EXCLUDED.photo IS NULL THEN {T_USAGE}.longitude ELSE EXCLUDED.longitude END,
                         user_id = EXCLUDED.user_id, username = EXCLUDED.username, full_name = EXCLUDED.full_name,
                         updated_at = now()""",
-                (branch["code"], branch["name"], day, code, i["name"], i["unit"], q, user["id"], user["username"],
-                 user.get("full_name")))
+                (branch["code"], branch["name"], day, code, i["name"], i["unit"], q, category, note, data, pt,
+                 line.get("takenAt") if photo else None, line.get("latitude") if photo else None,
+                 line.get("longitude") if photo else None, user["id"], user["username"], user.get("full_name")))
     return {"branchCode": branch["code"], "branchName": branch["name"], "businessDate": day.isoformat(),
             "saved": len(keep), "removed": len(drop)}
+
+
+def usage_photo(branch_code: str, day: date, item_code: str) -> Optional[dict]:
+    return db.fetchrow(f"""SELECT branch_code, photo, photo_type FROM {T_USAGE} WHERE branch_code = %s
+                           AND business_date = %s AND item_code = %s AND photo IS NOT NULL""", (branch_code, day, item_code))
 
 
 def set_no_waste(user: dict, body: dict) -> dict:
@@ -397,9 +430,11 @@ def usage_report(date_from: date, date_to: date, branches: Optional[list[str]]) 
     """The Usage Management quantities of the period (latest first)."""
     where = "business_date BETWEEN %(a)s AND %(b)s" + ("" if branches is None else " AND branch_code = ANY(%(br)s)")
     rows = db.fetch(f"""SELECT branch_code, branch_name, business_date, item_code, item_name, unit, qty::float AS qty,
+                               category, note, photo IS NOT NULL AS has_photo,
                                coalesce(full_name, username) AS by, updated_at FROM {T_USAGE} WHERE {where}
                         ORDER BY business_date DESC, branch_name, item_name LIMIT 5000""",
                     {"a": date_from, "b": date_to, "br": branches or []})
     return [{"branchCode": r["branch_code"], "branchName": r["branch_name"], "businessDate": r["business_date"].isoformat(),
              "itemCode": r["item_code"], "itemName": r["item_name"], "unit": r["unit"], "qty": r["qty"], "by": r["by"],
+             "category": r.get("category"), "note": r.get("note"), "hasPhoto": bool(r.get("has_photo")),
              "updatedAt": r["updated_at"].isoformat()} for r in rows]

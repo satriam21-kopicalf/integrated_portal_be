@@ -3,7 +3,9 @@ reviews it.
 
 An entry is one item of one branch and business day (today or yesterday, WIB):
   * scope: waste / usage (Usage Management) items of integration_portal.waste_item (docs/Daily SO & Waste.xlsx), or
-    premix: an active premix / WIP recipe of the premix calculator (kc_recipe.recipe), counted in grams;
+    premix: a WIP recipe the stock opname offers for the branch's facility type (active recipe with an active version,
+    kc_recipe), entered as in the count: in its count unit (Gram for a weighed premix, Porsi / Pcs …, another unit of
+    the recipe can be picked); the grams and the grams of every ingredient (rounded up) are kept (migration 044);
   * the quantity in the item's unit, a waste category (integration_portal.waste_category), a note / reason;
   * a camera photo as evidence (stamped in the browser with the time and the branch, like the stock opname photos).
 The person who entered it may delete it while Cost Control has not reviewed it. Cost Control approves or rejects
@@ -13,12 +15,13 @@ Every day (migration 041): Usage Management is a full list, the quantity of ever
 (usage_count, saved again to correct it); each branch reports its waste daily, an entry or "no waste today" (waste_day),
 and daily() tells the monitor which branches have not reported.
 """
+import json
 from datetime import date, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from typing import Any, Optional
 
 from app import database as db
-from app.pic_checkin import CheckInError, branch_options, parse_photo
+from app.pic_checkin import SCHEMA, CheckInError, branch_options, parse_photo
 from app.utils import today
 
 T = "integration_portal.waste_entry"
@@ -30,32 +33,98 @@ SCOPES = {"waste": "Waste", "usage": "Usage Management", "premix": "Premix"}
 ENTRY_SCOPES = ("waste", "premix")  # usage is the daily list (save_usage)
 STATUSES = ("submitted", "approved", "rejected")
 MAX_QTY = Decimal("1000000")
-PREMIX = """SELECT code, name, recipe_type FROM kc_recipe.recipe
-            WHERE is_active AND recipe_type IN ('PREMIX', 'WIP')
-              AND (coalesce(cardinality(facility_types), 0) = 0 OR 'OUTLET' = ANY(facility_types))
-            ORDER BY name"""
+# the WIP of the stock opname count (kopicalf_core recipes.count_recipes): active recipe, active version, facility type
+PREMIX = """SELECT r.id::text, r.code, r.name, r.recipe_type, r.count_uom, v.id::text AS version_id, v.output_qty_base AS batch
+            FROM kc_recipe.recipe r JOIN kc_recipe.recipe_version v ON v.recipe_id = r.id AND v.status = 'ACTIVE'
+            WHERE r.is_active AND (coalesce(cardinality(r.facility_types), 0) = 0 OR %(ft)s = ANY(r.facility_types))
+            ORDER BY r.name"""
+PREMIX_UNITS = """SELECT recipe_id::text, uom, qty_base, per_batch FROM kc_recipe.recipe_unit
+                  WHERE recipe_id::text = ANY(%(ids)s) ORDER BY recipe_id, sort, uom"""
+PREMIX_LINES = """SELECT l.version_id::text, it.code, coalesce(it.name, l.component_name) AS name, l.is_stock, l.qty_base
+                  FROM kc_recipe.recipe_line l LEFT JOIN kc_master.item it ON it.id = l.component_item_id
+                  WHERE l.version_id::text = ANY(%(ids)s) ORDER BY l.version_id, l.line_no"""
+
+
+def _gram(uom: str) -> bool:
+    return str(uom or "").strip().lower() == "gram"
+
+
+def premix_recipes(facility_type: str = "OUTLET") -> list[dict]:
+    """The WIP / premix of the stock opname for a facility type: units in grams (Gram always offered), the count unit
+    (recipe count_uom when it is one of its units, else Gram) and the grams of every ingredient per gram of WIP."""
+    recipes = db.fetch(PREMIX, {"ft": facility_type})
+    if not recipes:
+        return []
+    units: dict[str, list[dict]] = {}
+    for u in db.fetch(PREMIX_UNITS, {"ids": [r["id"] for r in recipes]}):
+        units.setdefault(u["recipe_id"], []).append(u)
+    lines: dict[str, list[dict]] = {}
+    for ln in db.fetch(PREMIX_LINES, {"ids": [r["version_id"] for r in recipes]}):
+        lines.setdefault(ln["version_id"], []).append(ln)
+    out = []
+    for r in recipes:
+        batch = Decimal(str(r["batch"]))
+        us = [{"uom": u["uom"], "grams": 1.0 if _gram(u["uom"]) else float(
+            Decimal(str(u["qty_base"])) if u["qty_base"] is not None else batch / Decimal(str(u["per_batch"])))}
+            for u in units.get(r["id"], [])]
+        if not any(_gram(u["uom"]) for u in us):
+            us.append({"uom": "Gram", "grams": 1.0})
+        want = (r["count_uom"] or "").lower()
+        count_uom = next((u["uom"] for u in us if u["uom"].lower() == want), "Gram")
+        out.append({"code": r["code"], "name": r["name"], "unit": count_uom, "type": r["recipe_type"], "units": us,
+                    "components": [{"code": ln["code"], "name": ln["name"], "isStock": ln["is_stock"],
+                                    "perGram": float(Decimal(str(ln["qty_base"])) / batch)}
+                                   for ln in lines.get(r["version_id"], [])]})
+    return out
+
+
+def facility_type(branch_code: str) -> str:
+    """OUTLET / HUB … of a branch (ESB branch through facility_esb_map, or a kopicalf facility code); OUTLET if unknown."""
+    try:
+        rows = db.fetch(
+            f"""SELECT f.facility_type FROM {SCHEMA}.master_branches b
+                JOIN kc_master.facility_esb_map m ON m.company_code = b.company_code AND m.esb_id = b.branch_id::text
+                JOIN kc_master.facility f ON f.id = m.facility_id WHERE b.branch_code = %(c)s
+                UNION ALL SELECT facility_type FROM kc_master.facility WHERE code = %(c)s""", {"c": branch_code})
+    except Exception:  # noqa: BLE001
+        return "OUTLET"
+    return next((r["facility_type"] for r in rows if r.get("facility_type")), "OUTLET")
+
+
+def explode(item: dict, uom: str, qty: Decimal) -> tuple[str, Decimal, list[dict]]:
+    """(unit, grams of WIP, grams per ingredient rounded up as the premix calculator) of `qty` `uom` of a premix."""
+    units = item.get("units") or [{"uom": item["unit"], "grams": 1.0}]
+    unit = next((u for u in units if u["uom"].lower() == str(uom or item["unit"]).lower()), None)
+    if unit is None:
+        raise WasteError(f"Satuan {uom} tidak ada untuk {item['name']}")
+    grams = qty * Decimal(str(unit["grams"]))
+
+    def up(v: Decimal) -> Decimal:
+        return (v - Decimal("0.001")).quantize(Decimal(1), rounding=ROUND_CEILING) if v > 0 else Decimal(0)
+    comps = [{"code": c.get("code"), "name": c["name"], "isStock": c.get("isStock", True),
+              "grams": float(up(grams * Decimal(str(c["perGram"]))))} for c in item.get("components") or []]
+    return unit["uom"], grams.quantize(Decimal("0.001")), comps
 
 
 class WasteError(CheckInError):
     """An entry refused with a message for the user (HTTP 422)."""
 
 
-def catalog() -> dict:
-    """{"items": {scope: [{code, name, unit}]}, "categories": [name]} for the form."""
+def catalog(facility: str = "OUTLET") -> dict:
+    """{"items": {scope: [{code, name, unit}]}, "categories": [name]} for the form (premix of the facility type)."""
     items: dict[str, list[dict]] = {s: [] for s in SCOPES}
     for r in db.fetch(f"SELECT scope, code, name, unit FROM {T_ITEM} WHERE is_active ORDER BY name"):
         items[r["scope"]].append({"code": r["code"], "name": r["name"], "unit": r["unit"]})
     try:
-        items["premix"] = [{"code": r["code"], "name": r["name"], "unit": "GR", "type": r["recipe_type"]}
-                           for r in db.fetch(PREMIX)]
+        items["premix"] = premix_recipes(facility)
     except Exception:  # noqa: BLE001 - kc_recipe unreachable: the form still works for waste and usage
         items["premix"] = []
     cats = [r["name"] for r in db.fetch(f"SELECT name FROM {T_CAT} WHERE is_active ORDER BY sort, name")]
     return {"items": items, "categories": cats, "scopes": SCOPES}
 
 
-def _item(scope: str, code: str) -> Optional[dict]:
-    return next((i for i in catalog()["items"].get(scope, []) if i["code"] == code), None)
+def _item(scope: str, code: str, facility: str = "OUTLET") -> Optional[dict]:
+    return next((i for i in catalog(facility)["items"].get(scope, []) if i["code"] == code), None)
 
 
 def _qty(value: Any) -> Decimal:
@@ -75,7 +144,7 @@ def allowed_days() -> tuple[date, date]:
 
 
 COLUMNS = """e.id::text, e.user_id::text, e.username, e.full_name, e.role, e.branch_code, e.branch_name, e.business_date,
-    e.scope, e.item_code, e.item_name, e.unit, e.qty, e.category, e.note, e.production_date, e.expired_date, e.photo_taken_at, e.latitude, e.longitude,
+    e.scope, e.item_code, e.item_name, e.unit, e.qty, e.category, e.note, e.production_date, e.expired_date, e.qty_base, e.exploded, e.photo_taken_at, e.latitude, e.longitude,
     e.status, e.review_note, e.reviewed_by, e.reviewed_at, e.created_at"""
 
 
@@ -87,6 +156,7 @@ def _view(r: dict) -> dict:
             "qty": float(r["qty"]), "category": r["category"], "note": r["note"],
             "productionDate": r["production_date"].isoformat() if r.get("production_date") else None,
             "expiredDate": r["expired_date"].isoformat() if r.get("expired_date") else None,
+            "grams": num(r.get("qty_base")), "ingredients": r.get("exploded") or None,
             "photoTakenAt": r["photo_taken_at"].isoformat() if r["photo_taken_at"] else None,
             "latitude": num(r["latitude"]), "longitude": num(r["longitude"]), "status": r["status"],
             "review": None if r["status"] == "submitted" else {
@@ -100,8 +170,9 @@ def _view(r: dict) -> dict:
 def form(user: dict, branch: Optional[str], day: Optional[date]) -> dict:
     branches = [{"code": b["code"], "name": b["name"]} for b in branch_options(user)]
     first, last = allowed_days()
-    out = {"branches": branches, "days": {"from": first.isoformat(), "to": last.isoformat()}, **catalog(), "data": []}
     codes = {b["code"] for b in branches}
+    out = {"branches": branches, "days": {"from": first.isoformat(), "to": last.isoformat()},
+           **catalog(facility_type(branch) if branch and branch in codes else "OUTLET"), "data": []}
     if branch and branch in codes:
         rows = db.fetch(f"SELECT {COLUMNS} FROM {T} e WHERE e.branch_code = %s AND e.business_date = %s "
                         "ORDER BY e.created_at DESC", (branch, day or last))
@@ -187,12 +258,14 @@ def create(user: dict, body: dict, device: Optional[str], ip: Optional[str]) -> 
     scope = body.get("scope")
     if scope not in ENTRY_SCOPES:
         raise WasteError("Jenis waste tidak dikenal")
-    item = _item(scope, body.get("itemCode") or "")
+    facility = facility_type(branch["code"]) if scope == "premix" else "OUTLET"
+    item = _item(scope, body.get("itemCode") or "", facility)
     if item is None:
         raise WasteError("Item tidak ada di daftar waste")
     qty = _qty(body.get("qty"))
+    unit, grams, comps = (explode(item, body.get("uom"), qty) if scope == "premix" else (item["unit"], None, None))
     category = (body.get("category") or "").strip()
-    if category not in catalog()["categories"]:
+    if category not in catalog(facility)["categories"]:
         raise WasteError("Pilih kategori waste")
     if not body.get("photo"):
         raise WasteError("Foto evidence wajib untuk setiap item")
@@ -202,12 +275,13 @@ def create(user: dict, body: dict, device: Optional[str], ip: Optional[str]) -> 
     photo_type, data = parse_photo(body["photo"])
     row = db.fetchrow(
         f"""INSERT INTO {T} (user_id, username, full_name, role, branch_code, branch_name, business_date, scope, item_code,
-                item_name, unit, qty, category, note, production_date, expired_date, photo, photo_type, photo_taken_at, latitude, longitude, device, ip)
-            VALUES (%(u)s, %(un)s, %(fn)s, %(role)s, %(bc)s, %(bn)s, %(d)s, %(s)s, %(ic)s, %(in)s, %(unit)s, %(q)s, %(c)s,
+                item_name, unit, qty, qty_base, exploded, category, note, production_date, expired_date, photo, photo_type, photo_taken_at, latitude, longitude, device, ip)
+            VALUES (%(u)s, %(un)s, %(fn)s, %(role)s, %(bc)s, %(bn)s, %(d)s, %(s)s, %(ic)s, %(in)s, %(unit)s, %(q)s, %(g)s, %(x)s::jsonb, %(c)s,
                 %(n)s, %(pd)s, %(ed)s, %(p)s, %(pt)s, %(ta)s, %(lat)s, %(lng)s, %(dev)s, %(ip)s)
             RETURNING {COLUMNS.replace('e.', '')}""",
         {"u": user["id"], "un": user["username"], "fn": user.get("full_name"), "role": user["role"], "bc": branch["code"],
-         "bn": branch["name"], "d": day, "s": scope, "ic": item["code"], "in": item["name"], "unit": item["unit"], "q": qty,
+         "bn": branch["name"], "d": day, "s": scope, "ic": item["code"], "in": item["name"], "unit": unit, "q": qty, "g": grams,
+         "x": json.dumps(comps) if comps is not None else None,
          "c": category, "n": (body.get("note") or "").strip()[:500] or None, "pd": made, "ed": expires, "p": data, "pt": photo_type,
          "ta": body.get("takenAt"), "lat": body.get("latitude"), "lng": body.get("longitude"),
          "dev": (device or "")[:300] or None, "ip": ip})

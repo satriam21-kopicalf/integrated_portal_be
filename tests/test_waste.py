@@ -31,8 +31,9 @@ def test_waste_pages_in_the_catalog():
 
 def test_entry_needs_category_photo_and_a_known_item(anon, store, fake_db, page_access, monkeypatch):
     monkeypatch.setattr(waste, "branch_options", lambda user, every=False: [KEMANG])
-    monkeypatch.setattr(waste, "catalog", lambda: CATALOG)
+    monkeypatch.setattr(waste, "catalog", lambda *a: CATALOG)
     monkeypatch.setattr(waste, "today", lambda: date(2026, 10, 31))
+    monkeypatch.setattr(waste, "facility_type", lambda code: "OUTLET")
     saved = {}
 
     def insert(query, params=None):
@@ -53,12 +54,12 @@ def test_entry_needs_category_photo_and_a_known_item(anon, store, fake_db, page_
     assert anon.post("/api/waste/entries", json={**body, "photo": ""}).status_code == 422  # photo required
     assert not saved
     r = anon.post("/api/waste/entries", json=body)
-    assert r.status_code == 201 and r.json()["scope"] == "premix" and saved["unit"] == "GR" and saved["n"] == "tumpah" and str(saved["ed"]) == "2026-11-05"
+    assert r.status_code == 201 and r.json()["scope"] == "premix" and saved["unit"] == "GR" and saved["g"] == 250 and saved["n"] == "tumpah" and str(saved["ed"]) == "2026-11-05"
 
 
 def test_monitor_and_review(anon, store, fake_db, page_access, monkeypatch):
     calls = []
-    monkeypatch.setattr(waste, "catalog", lambda: CATALOG)
+    monkeypatch.setattr(waste, "catalog", lambda *a: CATALOG)
     monkeypatch.setattr(waste.db, "fetch", lambda q, p=None: calls.append(q) or ([_row(id="a"), _row(id="b")]
                                                                                 if "RETURNING" in q else []))
     monkeypatch.setattr(waste.db, "fetchrow", lambda q, p=None: {"entries": 0})
@@ -112,7 +113,7 @@ def _tx(monkeypatch):
 
 def test_usage_list_and_no_waste(anon, store, fake_db, page_access, monkeypatch):
     monkeypatch.setattr(waste, "branch_options", lambda user, every=False: [KEMANG])
-    monkeypatch.setattr(waste, "catalog", lambda: {**CATALOG, "items": {**CATALOG["items"], "usage": [
+    monkeypatch.setattr(waste, "catalog", lambda *a: {**CATALOG, "items": {**CATALOG["items"], "usage": [
         {"code": "INSU-00005", "name": "CABLE TIES", "unit": "PACK"}, {"code": "AIIR-00001", "name": "AIR", "unit": "GR"}]}})
     monkeypatch.setattr(waste, "today", lambda: date(2026, 10, 31))
     conn = _tx(monkeypatch)
@@ -148,3 +149,20 @@ def test_daily_lists_branches_not_reported(monkeypatch):
     kemang, seno = out["branches"]
     assert kemang["reported"] == 1 and kemang["usageDays"] == 1 and seno["reported"] == 1
     assert out["missingLast"] == [{"code": "CCI02", "name": "Kopi Calf Senopati"}]
+
+
+def test_premix_is_entered_like_the_stock_opname_wip():
+    """Count unit Porsi (115 g), or grams; the ingredient grams follow the recipe and are rounded up per ingredient."""
+    item = {"code": "BASE-PUDING", "name": "BASE PUDING", "unit": "Porsi",
+            "units": [{"uom": "Porsi", "grams": 115.0}, {"uom": "Gram", "grams": 1.0}],
+            "components": [{"code": "RMDA-1", "name": "SUSU", "isStock": True, "perGram": 0.6},
+                           {"code": None, "name": "Air", "isStock": False, "perGram": 0.4}]}
+    unit, grams, comps = waste.explode(item, None, waste.Decimal("3"))
+    assert unit == "Porsi" and grams == 345 and [c["grams"] for c in comps] == [207, 138]
+    unit, grams, comps = waste.explode(item, "gram", waste.Decimal("10.5"))
+    assert unit == "Gram" and grams == waste.Decimal("10.5") and comps[0]["grams"] == 7  # 6.3 g → 7
+    try:
+        waste.explode(item, "Pail", waste.Decimal(1))
+        raise AssertionError("unknown unit accepted")
+    except waste.WasteError as e:
+        assert "Satuan" in str(e)

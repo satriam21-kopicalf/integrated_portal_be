@@ -85,3 +85,34 @@ def test_end_of_shift_follows_the_report_armada():
     sales = [{"lines": [{"code": "EKC", "name": "Es Kopi Calf", "qty": 2, "price": 15000}], "payment": "cash", "total": 30000, "voided_at": None}]
     r = cotr.recap(shift, sales, [], [])
     assert (r["waste"], r["cupping"], r["cashExpected"], r["balance"], r["difference"]) == (2, 1, 25000, 5000, {})
+
+
+def _xlsx(rows: list[list]) -> bytes:
+    from io import BytesIO
+    import openpyxl
+    wb = openpyxl.Workbook()
+    for r in rows:
+        wb.active.append(r)
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_drivers_are_read_from_the_template_or_the_report_armada():
+    template = _xlsx([["Armada", "Nama", "HP"], ["bni 1", "budi  santoso", "0812"], ["BRI 05", "Ade H", None], ["", "tanpa armada", ""]])
+    assert cotr.parse_drivers(template) == [{"armada": "BNI 01", "name": "Budi Santoso", "phone": "0812"},
+                                            {"armada": "BRI 05", "name": "Ade H", "phone": ""}]
+    report = _xlsx([[None, "Calf", "NAMA PRODUK"], [None, "BNI 47\nPESENAN / CUSTOMER POOL", "Calf Premium Cup"],
+                    [None, "BNI 02 RIDWAN", "Calf Premium Cup"], [None, "TOTAL BNI", None], [None, "BRI 19\nLARAS", "Matcha"]])
+    assert cotr.parse_drivers(report) == [{"armada": "BNI 02", "name": "Ridwan", "phone": ""}, {"armada": "BRI 19", "name": "Laras", "phone": ""}]
+    with pytest.raises(cotr.CotrError):
+        cotr.parse_drivers(b"not an excel file")
+
+
+def test_positions_are_thinned_in_time_order():
+    from datetime import datetime, timedelta, timezone
+    t0 = datetime(2026, 11, 1, 8, 0, tzinfo=timezone.utc)
+    pts = [{"at": t0 + timedelta(seconds=s), "lat": -6.18, "lng": 106.84} for s in (30, 0, 5, 60)]
+    pts.append({"at": t0 + timedelta(seconds=90), "lat": 0, "lng": 0})  # no fix
+    assert [int((p["at"] - t0).total_seconds()) for p in cotr.thin(pts, None)] == [0, 30, 60]
+    assert cotr.thin(pts, t0 + timedelta(seconds=45)) == [pts[3]]  # 10 s at least after what was kept before

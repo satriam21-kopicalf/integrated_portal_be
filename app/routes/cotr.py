@@ -9,6 +9,8 @@ Driver app (fe-calfontheroad), accounts of role driver tied to a Master Driver r
     POST /api/cotr/driver/reloads               {"lines": {code: cups}, "note"}
     POST /api/cotr/driver/reloads/{id}/receive  an approved reload is on the fleet
     POST /api/cotr/driver/requests              {"kind": fuel|ice|stall|repair|parking|other, "amount", "note", "photo"}
+    POST /api/cotr/driver/locations             {"points": [{"at", "lat", "lng", "accuracy", "speed", "heading", "battery"}]}
+                                                the GPS of the phone while the shift is open (migration 048)
 Every driver action answers the new state of the day (as GET today).
 
 Portal (Monitoring COTR):
@@ -19,11 +21,17 @@ Portal (Monitoring COTR):
     POST /api/cotr/masters/{entity}             create        PUT /api/cotr/masters/{entity}/{code}   update
     DELETE /api/cotr/masters/{entity}/{code}
     GET  /api/cotr/driver-accounts              page cotr.drivers: the accounts of role driver
+    POST /api/cotr/drivers/import               page cotr.drivers: {"file": base64 xlsx, "pool", "apply"} preview / save
+    GET  /api/cotr/locations?day=               page cotr.check-in: the last position of every driver of the day
+    GET  /api/cotr/locations/{driver}?day=      page cotr.check-in: the route of one driver
     GET  /api/cotr/production?days=&buffer=     page cotr.production: plan from the sales of the last days
     GET/POST /api/cotr/waste, DELETE /api/cotr/waste/{id}   page cotr.production
     GET  /api/cotr/photos/{check-in|request}/{id}   the team (cotr.check-in) or the driver it belongs to
 """
-from datetime import date, timedelta
+import base64
+import binascii
+import re
+from datetime import date, datetime, timedelta
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -140,6 +148,25 @@ def driver_request(body: RequestIn, request: Request, user: dict = Depends(drive
     return out
 
 
+class Point(BaseModel):
+    at: datetime
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+    accuracy: Optional[float] = Field(None, ge=0, le=100_000)
+    speed: Optional[float] = Field(None, ge=0, le=200)
+    heading: Optional[float] = Field(None, ge=0, le=360)
+    battery: Optional[int] = Field(None, ge=0, le=100)
+
+
+class PointsIn(BaseModel):
+    points: list[Point] = Field(min_length=1, max_length=cotr.MAX_POINTS)
+
+
+@router.post("/driver/locations")
+def driver_locations(body: PointsIn, user: dict = Depends(driver_only)):
+    return _call(cotr.record_locations, user, [p.model_dump() for p in body.points])
+
+
 # ---------------------------------------------------------------- portal
 
 class DecisionIn(BaseModel):
@@ -212,6 +239,37 @@ def master_delete(entity: Entity, code: str, request: Request, user: dict = Depe
 @router.get("/driver-accounts")
 def driver_accounts(_: dict = Depends(require_page("cotr.drivers"))):
     return cotr.driver_accounts()
+
+
+class ImportIn(BaseModel):
+    file: str = Field(min_length=10, max_length=14_000_000)  # base64 of the .xlsx (<= 10 MB)
+    pool: str = Field(min_length=1, max_length=40)
+    apply: bool = False
+
+
+@router.post("/drivers/import")
+def drivers_import(body: ImportIn, request: Request, user: dict = Depends(require_page("cotr.drivers"))):
+    try:
+        data = base64.b64decode(re.sub(r"^data:[^,]*,", "", body.file), validate=False)
+    except (binascii.Error, ValueError):
+        raise HTTPException(422, detail="File tidak dapat dibaca") from None
+    rows = _call(cotr.parse_drivers, data)
+    if not rows:
+        raise HTTPException(422, detail="Tidak ada driver ditemukan: pakai kolom Armada, Nama, HP atau sheet Report Armada")
+    out = _call(cotr.import_drivers, user, rows, body.pool, body.apply)
+    if body.apply:
+        _log(request, user, "cotr.drivers.import", f"Import driver COTR: {out['new']} baru, {out['update']} diubah")
+    return out
+
+
+@router.get("/locations")
+def locations(day: Optional[date] = None, _: dict = Depends(require_page("cotr.check-in"))):
+    return cotr.positions(day or today())
+
+
+@router.get("/locations/{driver_code}")
+def driver_track(driver_code: str, day: Optional[date] = None, _: dict = Depends(require_page("cotr.check-in"))):
+    return cotr.track(driver_code, day or today())
 
 
 @router.get("/production")

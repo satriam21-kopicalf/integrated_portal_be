@@ -10,8 +10,10 @@ spent on the road from it, which give the balance of the day (- short / + over: 
 fleet is never stored: start stock + reloads received - sales not voided. Costs on the road (fuel, ice, stall …) are
 sent with the receipt and approved or rejected in the portal.
 """
+import re
 from datetime import date, datetime
 from decimal import Decimal
+from io import BytesIO
 from typing import Any, Iterable, Optional
 
 from psycopg.types.json import Jsonb
@@ -588,3 +590,153 @@ def production(days: int, buffer_pct: float) -> dict:
         per[code] = [int(next((r["qty"] for r in rows if r["code"] == code and r["day"] == d), 0)) for d in seen_days]
     boms = {b["code"]: b for b in db.fetch(f"SELECT * FROM {P}.cotr_bom")}
     return plan([m for m in menus(active_only=True)], per, boms, buffer_pct) | {"days": len(seen_days)}
+
+
+# ---------------------------------------------------------------- import of the drivers (Excel)
+
+_ARMADA = re.compile(r"^\s*(BNI|BRI)\s*0*(\d+)\b[\s./-]*(.*)$", re.I)
+TEMPLATE = ("armada", "nama", "hp")  # the columns of the template sheet (first row), in any order
+
+
+def armada_code(bank: str, number: str) -> str:
+    """BNI 1 / BNI01 / bni 01 -> "BNI 01" (two digits at least, as the armada of migration 047)."""
+    return f"{bank.upper()} {int(number):02d}"
+
+
+def _template_rows(rows, cols: dict) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for r in rows:
+        def cell(k: str) -> str:
+            i = cols[k]
+            return str(r[i]).strip() if i is not None and i < len(r) and r[i] is not None else ""
+        m = _ARMADA.match(cell("armada"))
+        if m and cell("nama"):
+            out.setdefault(armada_code(m.group(1), m.group(2)), {"name": " ".join(cell("nama").split()).title(), "phone": cell("hp")})
+    return out
+
+
+def _report_rows(rows) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for r in rows:
+        for v in r[:3]:
+            if not isinstance(v, str):
+                continue
+            m = _ARMADA.match(" ".join(v.split()))
+            name = m.group(3).strip(" /") if m else ""
+            if m and name and not re.search(r"pesen|customer|total", name, re.I):
+                out.setdefault(armada_code(m.group(1), m.group(2)), {"name": name.title(), "phone": ""})
+    return out
+
+
+def parse_drivers(data: bytes) -> list[dict]:
+    """Drivers of an Excel file: a sheet with the columns Armada, Nama, HP (template), else every cell like
+    "BNI 01 BIYAN" of the "Report Armada" sheet. One row per armada (the first one wins)."""
+    import openpyxl
+
+    try:
+        wb = openpyxl.load_workbook(BytesIO(data), read_only=True, data_only=True)
+    except Exception:
+        raise CotrError("File bukan Excel (.xlsx) yang valid") from None
+    out: dict[str, dict] = {}
+    for ws in wb.worksheets:
+        rows = ws.iter_rows(values_only=True)
+        head = [str(v or "").strip().lower() for v in next(rows, ())]
+        cols = {name: next((i for i, h in enumerate(head) if h.startswith(name)), None) for name in TEMPLATE}
+        found = _template_rows(rows, cols) if cols["armada"] is not None and cols["nama"] is not None else _report_rows(rows)
+        for k, v in found.items():
+            out.setdefault(k, v)
+    return [{"armada": k, **v} for k, v in sorted(out.items())]
+
+
+def import_drivers(user: dict, rows: list[dict], pool_code: str, apply: bool) -> dict:
+    """Preview (apply False) or save the drivers: one per armada (DRV-BNI01), new ones created, the name / phone of
+    the known ones updated; an armada that does not exist yet is created in the pool."""
+    if not db.fetchrow(f"SELECT 1 FROM {P}.cotr_pool WHERE code = %s", (pool_code,)):
+        raise CotrError("Pool tidak ditemukan")
+    fleet = {r["code"] for r in db.fetch(f"SELECT code FROM {P}.cotr_fleet")}
+    known = {r["fleet_code"]: r for r in db.fetch(
+        f"SELECT code, name, phone, fleet_code FROM {P}.cotr_driver WHERE fleet_code IS NOT NULL")}
+    plan = []
+    for r in rows:
+        k = known.get(r["armada"])
+        same = k and k["name"] == r["name"] and (not r["phone"] or k["phone"] == r["phone"])
+        plan.append({**r, "code": k["code"] if k else "DRV-" + r["armada"].replace(" ", ""),
+                     "action": "new" if not k else ("same" if same else "update"),
+                     "newArmada": r["armada"] not in fleet, "current": k["name"] if k else None})
+    if apply:
+        with db.transaction() as conn:
+            for p in plan:
+                if p["newArmada"]:
+                    conn.execute(f"""INSERT INTO {P}.cotr_fleet (code, type, pool_code, updated_by) VALUES (%s, 'sepeda', %s, %s)
+                                     ON CONFLICT (code) DO NOTHING""", (p["armada"], pool_code, user["id"]))
+                if p["action"] == "new":
+                    conn.execute(f"""INSERT INTO {P}.cotr_driver (code, name, phone, pool_code, fleet_code, updated_by)
+                                     VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (code) DO NOTHING""",
+                                 (p["code"], p["name"], p["phone"], pool_code, p["armada"], user["id"]))
+                elif p["action"] == "update":
+                    conn.execute(f"""UPDATE {P}.cotr_driver SET name = %s, phone = COALESCE(NULLIF(%s, ''), phone),
+                                     updated_at = now(), updated_by = %s WHERE code = %s""",
+                                 (p["name"], p["phone"], user["id"], p["code"]))
+    return {"rows": plan, "new": sum(p["action"] == "new" for p in plan), "update": sum(p["action"] == "update" for p in plan),
+            "same": sum(p["action"] == "same" for p in plan), "newArmada": sum(p["newArmada"] for p in plan), "applied": apply}
+
+
+# ---------------------------------------------------------------- where the drivers are (migration 048)
+
+MIN_GAP_S = 10  # positions closer in time are dropped (the app sends every ~30 s)
+MAX_POINTS = 120  # one batch
+
+
+def thin(points: list[dict], last_at: Optional[datetime]) -> list[dict]:
+    """The positions to keep: in time order, valid coordinates, at least MIN_GAP_S after the previous one kept."""
+    out, prev = [], last_at
+    for p in sorted(points, key=lambda x: x["at"]):
+        if not (-90 <= p["lat"] <= 90 and -180 <= p["lng"] <= 180) or (p["lat"] == 0 and p["lng"] == 0):
+            continue
+        if prev is not None and (p["at"] - prev).total_seconds() < MIN_GAP_S:
+            continue
+        out.append(p)
+        prev = p["at"]
+    return out
+
+
+def record_locations(user: dict, points: list[dict]) -> dict:
+    """Positions sent by the driver app while its shift is open (a batch kept on the phone while offline too)."""
+    d = require_driver(user)
+    s = shift_of(d["code"], today())
+    if not s or s["status"] != "open":
+        return {"kept": 0, "tracking": False}
+    last = db.fetchrow(f"SELECT max(at) AS at FROM {P}.cotr_location WHERE driver_code = %s", (d["code"],))
+    kept = thin(points[:MAX_POINTS], last["at"] if last else None)
+    if kept:
+        with db.transaction() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    f"""INSERT INTO {P}.cotr_location (driver_code, shift_id, at, latitude, longitude, accuracy_m, speed_ms,
+                            heading, battery) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    [(d["code"], s["id"], p["at"], p["lat"], p["lng"], p.get("accuracy"), p.get("speed"), p.get("heading"),
+                      p.get("battery")) for p in kept])
+    return {"kept": len(kept), "tracking": True}
+
+
+def _point(r: dict) -> dict:
+    return {"at": _iso(r["at"]), "lat": float(r["latitude"]), "lng": float(r["longitude"]),
+            "accuracy": _num(r["accuracy_m"]), "speed": _num(r["speed_ms"]), "battery": r["battery"]}
+
+
+def positions(day: date) -> list[dict]:
+    """The last position of every driver with a shift on the day, with the status of the shift."""
+    rows = db.fetch(
+        f"""SELECT DISTINCT ON (l.driver_code) l.*, d.name, d.fleet_code, s.status
+              FROM {P}.cotr_location l JOIN {P}.cotr_shift s ON s.id = l.shift_id
+              JOIN {P}.cotr_driver d ON d.code = l.driver_code
+             WHERE s.day = %s ORDER BY l.driver_code, l.at DESC""", (day,))
+    return [{"driver": r["driver_code"], "name": r["name"], "fleet": r["fleet_code"], "shift": r["status"], **_point(r)}
+            for r in rows]
+
+
+def track(driver_code: str, day: date) -> list[dict]:
+    """Every position of one driver on the day, in time order (the route)."""
+    return [_point(r) for r in db.fetch(
+        f"""SELECT l.* FROM {P}.cotr_location l JOIN {P}.cotr_shift s ON s.id = l.shift_id
+             WHERE l.driver_code = %s AND s.day = %s ORDER BY l.at""", (driver_code, day))]

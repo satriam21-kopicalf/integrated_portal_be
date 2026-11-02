@@ -25,8 +25,8 @@ MASTERS = {"jobTitle": "integration_portal.job_title", "department": "integratio
 PAGES: list[tuple[str, str, str]] = [
     ("overview", "Dashboard", "Main menu"),
     ("sales", "Sales Transactions", "Main menu"),
-    ("stock-opname", "Stock Opname (count)", "Main menu"),
-    ("waste", "Waste (input)", "Main menu"),
+    ("stock-opname", "Stock Opname (count)", "Form"),
+    ("waste", "Waste (input)", "Form"),
     ("guide", "Guide", "Main menu"),
     ("form.pic-check-in", "PIC Check In (form)", "Form"),
     ("form.surveyor-check-in", "Cost Control Check In (form)", "Form"),

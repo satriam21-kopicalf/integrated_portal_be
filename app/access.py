@@ -69,6 +69,8 @@ PAGES: list[tuple[str, str, str]] = [
     ("cotr.pools", "Master Pool / HUB", "Monitoring COTR"),
     ("cotr.menu", "Master Menu", "Monitoring COTR"),
     ("cotr.production", "Storage & Production", "Monitoring COTR"),
+    # not a menu entry: salary, bank account and NIK of the drivers in Master Driver (migration 050)
+    ("cotr.management", "COTR Management (salary & bank)", "Monitoring COTR"),
 ]
 PAGE_KEYS = tuple(p[0] for p in PAGES)
 CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))

@@ -464,27 +464,56 @@ def send_request(user: dict, kind: str, amount: Any, note: str, photo: str) -> d
 
 # entity -> (table, key column, columns written from the payload, ordering)
 MASTERS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
-    "pools": ("cotr_pool", "code", ("code", "name", "kind", "parent_code", "city", "address", "storage", "is_active"), "kind, name"),
-    "fleet": ("cotr_fleet", "code", ("code", "type", "plate", "pool_code", "capacity", "condition", "last_service", "is_active"), "code"),
+    "pools": ("cotr_pool", "code", ("code", "name", "kind", "parent_code", "city", "address", "storage", "is_active",
+                                    "latitude", "longitude", "radius_m", "pic_name", "phone", "open_time", "close_time", "note"),
+              "kind, name"),
+    "fleet": ("cotr_fleet", "code", ("code", "name", "type", "plate", "pool_code", "capacity", "condition", "last_service",
+                                     "is_active", "brand", "model", "frame_no", "acquired_on", "qris_bank", "qris_nmid",
+                                     "qris_merchant", "note"), "code"),
+    "fleet-types": ("cotr_fleet_type", "code", ("code", "name", "sort"), "sort, name"),
     "menus": ("cotr_menu", "code", ("code", "name", "category", "price", "bom_code", "is_active", "sort"), "sort, name"),
     "boms": ("cotr_bom", "code", ("code", "name", "output", "yield_qty", "yield_unit", "lines"), "name"),
-    "drivers": ("cotr_driver", "code", ("code", "name", "phone", "pool_code", "fleet_code", "status", "joined_on", "user_id"), "code"),
+    "drivers": ("cotr_driver", "code", ("code", "name", "phone", "pool_code", "fleet_code", "status", "joined_on", "user_id",
+                                        "nik", "birth_place", "birth_date", "gender", "address", "emergency_name",
+                                        "emergency_phone", "employment_status", "position", "contract_end", "salary_monthly",
+                                        "allowance_monthly", "bank_name", "bank_account", "bank_holder", "note"), "code"),
 }
+# read and written only by superadmins and the COTR management (page cotr.management, migration 050)
+SENSITIVE = {"drivers": ("nik", "salary_monthly", "allowance_monthly", "bank_name", "bank_account", "bank_holder")}
+# pictures of a master row: slot -> (column of the bytes, column of the type)
+IMAGES = {"drivers": {"photo": ("photo", "photo_type")},
+          "fleet": {"photo": ("photo", "photo_type"), "qris": ("qris_image", "qris_image_type")}}
+_BYTES = {"photo", "photo_type", "qris_image", "qris_image_type", "updated_by"}
+UPPER_CODES = {"pools", "fleet", "menus", "boms", "drivers"}  # fleet types keep their code as typed (sepeda_listrik)
 
 
 def _plain(row: dict) -> dict:
-    return {k: (float(v) if isinstance(v, Decimal) else _iso(v)) for k, v in row.items()
-            if k not in ("updated_by",)}
+    out = {k: (float(v) if isinstance(v, Decimal) else _iso(v)) for k, v in row.items() if k not in _BYTES}
+    for k in ("open_time", "close_time"):
+        if out.get(k):
+            out[k] = str(out[k])[:5]
+    if "photo" in row:
+        out["has_photo"] = row["photo"] is not None
+    if "qris_image" in row:
+        out["has_qris"] = row["qris_image"] is not None
+    return out
 
 
-def master_list(entity: str) -> list[dict]:
+def _hide(entity: str, row: dict, sensitive: bool) -> dict:
+    if not sensitive:
+        for k in SENSITIVE.get(entity, ()):
+            row.pop(k, None)
+    return row
+
+
+def master_list(entity: str, sensitive: bool = False) -> list[dict]:
     table, _, _, order = MASTERS[entity]
     if entity == "drivers":
         rows = db.fetch(f"""SELECT d.*, u.username AS account FROM {P}.cotr_driver d
                               LEFT JOIN {P}.user_account u ON u.id = d.user_id ORDER BY d.code""")
     else:
         rows = db.fetch(f"SELECT * FROM {P}.{table} ORDER BY {order}")
-    out = [_plain(r) for r in rows]
+    out = [_hide(entity, _plain(r), sensitive) for r in rows]
     for r in out:
         if "user_id" in r and r["user_id"] is not None:
             r["user_id"] = str(r["user_id"])
@@ -505,13 +534,15 @@ def _value(col: str, v: Any) -> Any:
     return v
 
 
-def master_save(user: dict, entity: str, key: Optional[str], data: dict) -> dict:
-    """Create (key None) or update one master row; the code may change (references follow it)."""
+def master_save(user: dict, entity: str, key: Optional[str], data: dict, sensitive: bool = False) -> dict:
+    """Create (key None) or update one master row; the code may change (references follow it). Without the COTR
+    management page the salary, bank and NIK of a driver are left as they are."""
     table, pk, cols, _ = MASTERS[entity]
-    row = {c: _value(c, data.get(c)) for c in cols if c in data}
+    hidden = set() if sensitive else set(SENSITIVE.get(entity, ()))
+    row = {c: _value(c, data.get(c)) for c in cols if c in data and c not in hidden}
     if not (row.get(pk) or key):
         raise CotrError("Kode wajib diisi")
-    if "code" in row and row["code"]:
+    if row.get("code") and entity in UPPER_CODES:
         row["code"] = str(row["code"]).strip().upper()
     names = list(row)
     try:
@@ -527,7 +558,24 @@ def master_save(user: dict, entity: str, key: Optional[str], data: dict) -> dict
         raise CotrError(_db_message(e)) from None
     if not saved:
         raise CotrError("Data tidak ditemukan")
-    return _plain(saved)
+    return _hide(entity, _plain(saved), sensitive)
+
+
+def set_image(user: dict, entity: str, code: str, slot: str, data_url: Optional[str]) -> None:
+    """Puts (or removes, data_url None) the picture of a master row: driver photo, armada photo or its QRIS."""
+    data_col, type_col = IMAGES[entity][slot]
+    table, pk, _, _ = MASTERS[entity]
+    kind, data = parse_photo(data_url) if data_url else (None, None)
+    row = db.fetchrow(f"""UPDATE {P}.{table} SET {data_col} = %s, {type_col} = %s, updated_at = now(), updated_by = %s
+                           WHERE {pk} = %s RETURNING {pk}""", (data, kind, user["id"], code))
+    if not row:
+        raise CotrError("Data tidak ditemukan")
+
+
+def image(entity: str, code: str, slot: str) -> Optional[dict]:
+    data_col, type_col = IMAGES[entity][slot]
+    table, pk, _, _ = MASTERS[entity]
+    return db.fetchrow(f"SELECT {data_col} AS data, {type_col} AS type FROM {P}.{table} WHERE {pk} = %s", (code,))
 
 
 def master_delete(entity: str, key: str) -> None:

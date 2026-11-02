@@ -130,3 +130,12 @@ def test_assignment_and_reload_checks():
     stock = cotr.stock_now({"EKC": 10}, [{**asked, "approved_lines": {"EKC": 40}, "received_lines": {"EKC": 38}},
                                          {"status": "disputed", "lines": {"EKC": 20}}], [])
     assert stock == {"EKC": 48}  # a reload in dispute is not on the fleet yet
+
+
+def test_salary_bank_and_nik_only_for_the_cotr_management():
+    row = {"code": "DRV-BNI01", "name": "Budi", "salary_monthly": 3500000, "bank_account": "123", "nik": "317", "photo": b"x",
+           "photo_type": "image/jpeg", "updated_by": "u"}
+    shown = cotr._hide("drivers", cotr._plain(row), sensitive=False)
+    assert shown == {"code": "DRV-BNI01", "name": "Budi", "has_photo": True}  # no bytes, no salary / bank / NIK
+    full = cotr._hide("drivers", cotr._plain(row), sensitive=True)
+    assert (full["salary_monthly"], full["bank_account"], full["nik"]) == (3500000.0, "123", "317")

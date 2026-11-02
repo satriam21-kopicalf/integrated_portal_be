@@ -24,7 +24,9 @@ Portal (Monitoring COTR):
     POST /api/cotr/reloads/{id}/decide          page cotr.storage: {"approve", "note", "lines"} the cups sent
     POST /api/cotr/reloads/{id}/resolve         page cotr.storage: {"lines", "note"} the cups received of a difference
     POST /api/cotr/requests/{id}/decide         page cotr.check-in: {"approve", "note"} (a rejection needs the note)
-    GET  /api/cotr/masters/{entity}             pools | fleet | menus | boms | drivers (any COTR page; writes: the page of it)
+    GET  /api/cotr/masters/{entity}             pools | fleet | fleet-types | menus | boms | drivers (any COTR page; writes:
+                                                the page of it); salary, bank and NIK of drivers with page cotr.management only
+    PUT/GET /api/cotr/masters/{drivers|fleet}/{code}/image/{photo|qris}   the photo of a driver / armada, the QRIS
     POST /api/cotr/masters/{entity}             create        PUT /api/cotr/masters/{entity}/{code}   update
     DELETE /api/cotr/masters/{entity}/{code}
     GET  /api/cotr/driver-accounts              page cotr.drivers: the accounts of role driver
@@ -53,9 +55,10 @@ from app.utils import today
 
 router = APIRouter(prefix="/api/cotr", tags=["cotr"])
 driver_only = require_roles("driver")
-ENTITY_PAGE = {"pools": "cotr.pools", "fleet": "cotr.fleet", "menus": "cotr.menu", "boms": "cotr.production",
-               "drivers": "cotr.drivers"}
-Entity = Literal["pools", "fleet", "menus", "boms", "drivers"]
+ENTITY_PAGE = {"pools": "cotr.pools", "fleet": "cotr.fleet", "fleet-types": "cotr.fleet", "menus": "cotr.menu",
+               "boms": "cotr.production", "drivers": "cotr.drivers"}
+Entity = Literal["pools", "fleet", "fleet-types", "menus", "boms", "drivers"]
+MANAGEMENT = "cotr.management"  # salary, bank and NIK of the drivers (migration 050)
 
 
 def _call(fn, *args):
@@ -252,7 +255,7 @@ def decide_request(request_id: str, body: DecisionIn, request: Request, user: di
     return {"ok": True}
 
 
-COTR_PAGES = tuple(sorted(set(ENTITY_PAGE.values()) | {"cotr.check-in", "cotr.storage"}))
+COTR_PAGES = tuple(sorted(set(ENTITY_PAGE.values()) | {"cotr.check-in", "cotr.storage", MANAGEMENT}))
 
 
 def _master_user(request: Request, entity: str, user: dict = Depends(current_user)) -> dict:
@@ -270,19 +273,19 @@ def _cotr_reader(request: Request, user: dict = Depends(current_user)) -> dict:
 
 @router.get("/masters/{entity}")
 def master_list(entity: Entity, user: dict = Depends(_cotr_reader)):
-    return cotr.master_list(entity)
+    return cotr.master_list(entity, has_page(user, MANAGEMENT))
 
 
 @router.post("/masters/{entity}", status_code=201)
 def master_create(entity: Entity, body: dict, request: Request, user: dict = Depends(_master_user)):
-    out = _call(cotr.master_save, user, entity, None, body)
+    out = _call(cotr.master_save, user, entity, None, body, has_page(user, MANAGEMENT))
     _log(request, user, "cotr.master.create", f"COTR {entity}: {out.get('code')} dibuat")
     return out
 
 
 @router.put("/masters/{entity}/{code}")
 def master_update(entity: Entity, code: str, body: dict, request: Request, user: dict = Depends(_master_user)):
-    out = _call(cotr.master_save, user, entity, code, body)
+    out = _call(cotr.master_save, user, entity, code, body, has_page(user, MANAGEMENT))
     _log(request, user, "cotr.master.update", f"COTR {entity}: {code} diubah")
     return out
 
@@ -292,6 +295,28 @@ def master_delete(entity: Entity, code: str, request: Request, user: dict = Depe
     _call(cotr.master_delete, entity, code)
     _log(request, user, "cotr.master.delete", f"COTR {entity}: {code} dihapus")
     return {"ok": True}
+
+
+class ImageIn(BaseModel):
+    image: Optional[str] = Field(None, max_length=5_000_000)  # data URL; null removes the picture
+
+
+@router.put("/masters/{entity}/{code}/image/{slot}")
+def master_image_put(entity: Literal["drivers", "fleet"], code: str, slot: Literal["photo", "qris"], body: ImageIn,
+                     request: Request, user: dict = Depends(_master_user)):
+    if slot not in cotr.IMAGES[entity]:
+        raise HTTPException(404, detail="Gambar tidak dikenal")
+    _call(cotr.set_image, user, entity, code, slot, body.image)
+    _log(request, user, "cotr.master.image", f"COTR {entity} {code}: {slot} {'diganti' if body.image else 'dihapus'}")
+    return {"ok": True}
+
+
+@router.get("/masters/{entity}/{code}/image/{slot}")
+def master_image(entity: Literal["drivers", "fleet"], code: str, slot: Literal["photo", "qris"], user: dict = Depends(_cotr_reader)):
+    row = cotr.image(entity, code, slot) if slot in cotr.IMAGES[entity] else None
+    if not row or not row["data"]:
+        raise HTTPException(404, detail="Gambar tidak ditemukan")
+    return Response(bytes(row["data"]), media_type=row["type"], headers={"Cache-Control": "private, max-age=300"})
 
 
 @router.get("/driver-accounts")

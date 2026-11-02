@@ -471,7 +471,9 @@ MASTERS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
               "kind, name"),
     "fleet": ("cotr_fleet", "code", ("code", "name", "type", "plate", "pool_code", "capacity", "condition", "last_service",
                                      "is_active", "brand", "model", "frame_no", "acquired_on", "qris_bank", "qris_nmid",
-                                     "qris_merchant", "note"), "code"),
+                                     "qris_merchant", "note", "asset_no", "color", "year_made", "battery_no", "stnk_no",
+                                     "stnk_expires", "insurance_no", "insurance_expires", "odometer_km", "next_service",
+                                     "gps_id"), "code"),
     "fleet-types": ("cotr_fleet_type", "code", ("code", "name", "sort"), "sort, name"),
     "incentive-schemes": ("cotr_incentive_scheme", "code", ("code", "name", "valid_from", "tiers", "product_bonus",
                                                             "late_penalty", "absent_penalty", "min_attendance_pct",
@@ -1498,3 +1500,61 @@ def pool_stock(pool: str, day: date) -> dict:
               "daysLeft": (r["expires_on"] - day).days, "sentAt": _iso(r["sent_at"]), "receivedAt": _iso(r["received_at"])} for r in rows]
     return {"pool": pool, "day": day.isoformat(), "received": [i for i in items if i["status"] == "received"],
             "incoming": [i for i in items if i["status"] == "sent"]}
+
+
+# ---------------------------------------------------------------- information label of an armada (migration 063)
+
+# what a scan without sign-in shows of the armada: not the papers, the tracker, the QRIS nor the notes
+FLEET_PUBLIC = ("code", "name", "type", "brand", "model", "color", "year_made", "plate", "capacity", "condition",
+                "is_active", "last_service", "next_service", "acquired_on", "asset_no", "has_photo", "updated_at")
+DRIVER_PUBLIC = ("code", "name", "nickname", "employee_id", "department", "position", "status", "joined_on", "has_photo",
+                 "updated_at")
+
+
+def fleet_by_token(token: str) -> Optional[dict]:
+    return db.fetchrow(f"SELECT code FROM {P}.cotr_fleet WHERE label_token = %s", (token,))
+
+
+def fleet_card(code: str, full: bool) -> Optional[dict]:
+    """The armada as its label QR shows it: the vehicle, its pool, the driver(s) on it and today's shift. `full` (a
+    signed-in COTR user) adds the papers, the tracker, the QRIS details, the notes and the phone numbers."""
+    f = db.fetchrow(f"""SELECT f.*, t.name AS type_name FROM {P}.cotr_fleet f
+                          LEFT JOIN {P}.cotr_fleet_type t ON t.code = f.type WHERE f.code = %s""", (code,))
+    if not f:
+        return None
+    fleet = _plain(f)
+    fleet.pop("label_token", None)
+    type_name = fleet.pop("type_name", None)
+    if not full:
+        fleet = {k: fleet.get(k) for k in FLEET_PUBLIC}
+    fleet["type_name"] = type_name
+    pool = db.fetchrow(f"""SELECT code, name, kind, city, address, pic_name, phone, open_time, close_time FROM {P}.cotr_pool
+                            WHERE code = %s""", (f["pool_code"],))
+    drivers = [_plain(d) for d in db.fetch(f"""SELECT d.*, p.name AS pool_name FROM {P}.cotr_driver d
+                                                LEFT JOIN {P}.cotr_pool p ON p.code = d.pool_code
+                                               WHERE d.fleet_code = %s AND d.status <> 'inactive' ORDER BY d.status, d.code""", (code,))]
+    if not full:
+        drivers = [{k: d.get(k) for k in (*DRIVER_PUBLIC, "pool_name")} for d in drivers]
+    else:
+        drivers = [_hide("drivers", d, False) for d in drivers]
+    shift = db.fetchrow(f"""SELECT s.driver_code, d.name, d.nickname, s.status, s.started_at, s.ended_at FROM {P}.cotr_shift s
+                              JOIN {P}.cotr_driver d ON d.code = s.driver_code
+                             WHERE s.fleet_code = %s AND s.day = %s ORDER BY s.started_at DESC LIMIT 1""", (code, today()))
+    pool_out = _plain(pool) if pool else None
+    if pool_out:
+        for k in ("open_time", "close_time"):
+            if pool_out.get(k):
+                pool_out[k] = str(pool_out[k])[:5]
+        if not full:
+            pool_out.pop("phone", None)
+    return {"full": full, "fleet": fleet, "pool": pool_out, "drivers": drivers,
+            "today": ({"driver": shift["driver_code"], "name": shift["nickname"] or shift["name"], "status": shift["status"],
+                       "startedAt": _iso(shift["started_at"]), "endedAt": _iso(shift["ended_at"])} if shift else None)}
+
+
+def renew_label_token(code: str) -> str:
+    row = db.fetchrow(f"""UPDATE {P}.cotr_fleet SET label_token = substr(replace(gen_random_uuid()::text, '-', ''), 1, 20),
+                                  updated_at = now() WHERE code = %s RETURNING label_token""", (code,))
+    if not row:
+        raise CotrError("Armada tidak ditemukan")
+    return row["label_token"]

@@ -44,6 +44,10 @@ Portal (Monitoring COTR):
                                                 production at a hub (produced / expires on) and its parts sent to pools (062)
     POST /api/cotr/transfers/{id}/receive       page cotr.storage: a part received at the pool
     GET  /api/cotr/pool-stock?pool=&day=        page cotr.storage: the batches of a pool, first expired first
+    GET  /api/cotr/fleet/{code}/card            any COTR page: the armada as its label QR shows it, in full (063)
+    POST /api/cotr/fleet/{code}/label-token     page cotr.fleet: a new label QR (the printed labels stop opening)
+    GET  /api/public/fleet/{token}[/photo|/driver/{code}/photo]   no sign-in: the label QR of an armada, without the
+                                                papers, the QRIS and the phone numbers
     GET  /api/cotr/incentives?month=YYYY-MM&scheme=&pool=   page cotr.incentive: incentive per driver (053)
     GET/POST /api/cotr/waste, DELETE /api/cotr/waste/{id}   page cotr.production
     GET  /api/cotr/photos/{check-in|signature|request}/{id}   the team (cotr.check-in) or the driver it belongs to
@@ -331,6 +335,21 @@ def master_image(entity: Literal["drivers", "fleet"], code: str, slot: Literal["
     return Response(bytes(row["data"]), media_type=row["type"], headers={"Cache-Control": "private, max-age=300"})
 
 
+@router.get("/fleet/{code}/card")
+def fleet_card(code: str, _: dict = Depends(_cotr_reader)):
+    out = cotr.fleet_card(code, True)
+    if out is None:
+        raise HTTPException(404, detail="Armada tidak ditemukan")
+    return out
+
+
+@router.post("/fleet/{code}/label-token")
+def renew_label_token(code: str, request: Request, user: dict = Depends(require_page("cotr.fleet"))):
+    token = _call(cotr.renew_label_token, code)
+    _log(request, user, "cotr.fleet.label", f"Label armada {code}: QR baru (label lama tidak berlaku)")
+    return {"label_token": token}
+
+
 @router.get("/driver-accounts")
 def driver_accounts(_: dict = Depends(require_page("cotr.drivers"))):
     return cotr.driver_accounts()
@@ -531,3 +550,38 @@ def photo(kind: Literal["check-in", "signature", "request"], row_id: str, reques
     if not row or not row["photo"]:
         raise HTTPException(404, detail="Foto tidak ditemukan")
     return Response(bytes(row["photo"]), media_type=row["photo_type"], headers={"Cache-Control": "private, max-age=86400"})
+
+
+# ---------------------------------------------------------------- label QR of an armada (no sign-in, migration 063)
+
+public_router = APIRouter()
+
+
+def _fleet_of(token: str) -> str:
+    row = cotr.fleet_by_token(token)
+    if not row:
+        raise HTTPException(404, detail="Label tidak dikenal atau sudah diganti")
+    return row["code"]
+
+
+@public_router.get("/api/public/fleet/{token}")
+def public_fleet(token: str):
+    return cotr.fleet_card(_fleet_of(token), False)
+
+
+@public_router.get("/api/public/fleet/{token}/photo")
+def public_fleet_photo(token: str):
+    row = cotr.image("fleet", _fleet_of(token), "photo")
+    if not row or not row["data"]:
+        raise HTTPException(404, detail="Foto tidak ada")
+    return Response(bytes(row["data"]), media_type=row["type"], headers={"Cache-Control": "public, max-age=300"})
+
+
+@public_router.get("/api/public/fleet/{token}/driver/{driver}/photo")
+def public_driver_photo(token: str, driver: str):
+    code = _fleet_of(token)
+    d = cotr.db.fetchrow(f"SELECT 1 FROM {cotr.P}.cotr_driver WHERE code = %s AND fleet_code = %s AND status <> 'inactive'", (driver, code))
+    row = cotr.image("drivers", driver, "photo") if d else None
+    if not row or not row["data"]:
+        raise HTTPException(404, detail="Foto tidak ada")
+    return Response(bytes(row["data"]), media_type=row["type"], headers={"Cache-Control": "public, max-age=300"})

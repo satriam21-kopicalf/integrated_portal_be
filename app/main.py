@@ -35,7 +35,7 @@ from app.routes.pengajuan import router as pengajuan_router
 from app.routes.visit_forms import router as visit_forms_router
 from app.routes.branch_groups import router as branch_groups_router
 from app.routes.rating import router as rating_router
-from app.routes.cotr import router as cotr_router
+from app.routes.cotr import public_router as cotr_public_router, router as cotr_router
 from app.scope import branch_scope, company_of_request, company_scope
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -129,6 +129,7 @@ app.include_router(damaged_equipment_router)  # Form & Monitoring → Damaged Eq
 app.include_router(pengajuan_router)  # Form & Monitoring → Pengajuan (petty cash)
 app.include_router(rating_router)  # Aggregator (skeleton): pages rating.*
 app.include_router(cotr_router)  # Calf On The Road: driver app (role driver) and Monitoring COTR (pages cotr.*)
+app.include_router(cotr_public_router)  # /api/public/fleet/{token}: the label QR of an armada (no sign-in)
 app.include_router(access_router)  # pages of roles & users, job titles, departments
 app.include_router(activity_router)  # superadmin reads; any signed-in user reports page views
 app.include_router(realtime_router)

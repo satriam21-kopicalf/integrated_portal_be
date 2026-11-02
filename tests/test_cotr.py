@@ -221,3 +221,27 @@ def test_assignment_advice_from_the_last_days():
     b = cotr.advise({"PRM": 100}, {"PRM": 40}, {}, 5)  # waste 28.6 %: no buffer
     assert b["sell"] == {"PRM": 20}
     assert cotr.advise({}, {}, {}, 0)["sell"] == {}
+
+
+def test_label_qr_without_sign_in_hides_papers_qris_and_phones(monkeypatch):
+    fleet = {"code": "BNI 01", "name": "Armada BNI 01", "type": "sepeda_listrik", "type_name": "Sepeda listrik", "plate": None,
+             "pool_code": "POOL-TBT", "capacity": 80, "condition": "good", "is_active": True, "stnk_no": "B 1", "frame_no": "F1",
+             "gps_id": "G1", "qris_nmid": "ID123", "qris_image": b"q", "qris_image_type": "image/png", "photo": None,
+             "photo_type": None, "note": "kunci di pool", "label_token": "t" * 20, "updated_at": None}
+    pool = {"code": "POOL-TBT", "name": "Pool Tebet", "kind": "pool", "city": "Jakarta", "address": None, "pic_name": "Andi",
+            "phone": "0812", "open_time": None, "close_time": None}
+    driver = {"code": "DRV-1", "name": "Budi", "nickname": "Bud", "phone": "0813", "nik": "317", "salary_monthly": 1,
+              "address": "Jl. X", "status": "active", "photo": b"p", "photo_type": "image/jpeg", "pool_name": "Pool Tebet"}
+    rows = iter([fleet, pool, None, fleet, pool, None])
+    monkeypatch.setattr(cotr.db, "fetchrow", lambda *a: next(rows))
+    monkeypatch.setattr(cotr.db, "fetch", lambda *a: [dict(driver)])
+    public = cotr.fleet_card("BNI 01", False)
+    for k in ("stnk_no", "frame_no", "gps_id", "qris_nmid", "has_qris", "note", "label_token"):
+        assert k not in public["fleet"]
+    assert public["fleet"]["type_name"] == "Sepeda listrik" and "phone" not in public["pool"]
+    assert public["drivers"] == [{"code": "DRV-1", "name": "Budi", "nickname": "Bud", "employee_id": None, "department": None,
+                                  "position": None, "status": "active", "joined_on": None, "has_photo": True,
+                                  "updated_at": None, "pool_name": "Pool Tebet"}]
+    full = cotr.fleet_card("BNI 01", True)
+    assert full["fleet"]["stnk_no"] == "B 1" and "label_token" not in full["fleet"] and full["pool"]["phone"] == "0812"
+    assert full["drivers"][0]["phone"] == "0813" and "nik" not in full["drivers"][0] and "salary_monthly" not in full["drivers"][0]

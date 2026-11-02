@@ -585,7 +585,8 @@ def monitor(day: date) -> dict:
         f"""SELECT d.*, p.name AS pool_name FROM {P}.cotr_driver d JOIN {P}.cotr_pool p ON p.code = d.pool_code ORDER BY d.code""")}
     shifts = db.fetch(f"SELECT * FROM {P}.cotr_shift WHERE day = %s", (day,))
     ids = [s["id"] for s in shifts]
-    checkins = db.fetch(f"""SELECT id, shift_id, kind, at, latitude, longitude, accuracy_m, stock, note, photo IS NOT NULL AS has_photo
+    checkins = db.fetch(f"""SELECT id, shift_id, kind, at, latitude, longitude, accuracy_m, stock, note, photo IS NOT NULL AS has_photo,
+                                   signature IS NOT NULL AS has_signature
                               FROM {P}.cotr_check_in WHERE shift_id = ANY(%s) ORDER BY at""", (ids,)) if ids else []
     sales = db.fetch(f"SELECT * FROM {P}.cotr_sale WHERE shift_id = ANY(%s)", (ids,)) if ids else []
     reloads = db.fetch(f"SELECT * FROM {P}.cotr_reload WHERE shift_id = ANY(%s) ORDER BY at", (ids,)) if ids else []
@@ -603,7 +604,8 @@ def monitor(day: date) -> dict:
             "checkIns": [{"id": str(c["id"]), "kind": c["kind"], "at": _iso(c["at"]),
                           "lat": float(c["latitude"]) if c["latitude"] is not None else None,
                           "lng": float(c["longitude"]) if c["longitude"] is not None else None,
-                          "stock": c["stock"], "note": c["note"], "hasPhoto": c["has_photo"]} for c in by(checkins, s)],
+                          "stock": c["stock"], "note": c["note"], "hasPhoto": c["has_photo"],
+                          "hasSignature": c["has_signature"]} for c in by(checkins, s)],
             "recap": recap(s, sal, rel, [r for r in reqs if r["shift_id"] == s["id"]]),
         })
     started = {s["driver_code"] for s in shifts}

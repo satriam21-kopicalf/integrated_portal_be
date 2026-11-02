@@ -8,6 +8,8 @@
     DELETE /api/cost-control/sales-calc/recipes/{code}
     GET    /api/cost-control/sales-calc/menus?days=             ESB POS menus sold lately and their card
     GET    /api/cost-control/sales-calc/wips                    WIP / premix recipes (production calculator)
+    GET/POST /api/cost-control/sales-calc/extras, PUT/DELETE /.../extras/{id}   items outside the cards (cable ties,
+                                                                plastic …) per bill / portion / outlet-day (migration 057)
     GET    /api/cost-control/sales-calc/report?dateFrom&dateTo&branch&horizon&buffer
                                                                 MRP, usage actual vs system, COGS bahan baku
 A role "user" given a page sees only its own branches (app/scope.py).
@@ -107,6 +109,40 @@ def menus(days: int = Query(90, ge=7, le=365), _: dict = Depends(require_page(CA
 @router.get("/sales-calc/wips")
 def wips(_: dict = Depends(require_page(CALC))) -> dict:
     return {"data": list(mc.wips().values())}
+
+
+@router.get("/sales-calc/extras")
+def extras(_: dict = Depends(require_page(CALC))) -> dict:
+    return {"data": mc.extras()}
+
+
+def _save_extra(extra_id: Optional[int], body: dict, request: Request, user: dict) -> dict:
+    try:
+        out = mc.save_extra(extra_id, body, user)
+    except mc.CostingError as exc:
+        _refuse(exc)
+    activity.record("cc.extra-item", user=user, request=request, page="/cost-control/sales-calculator",
+                    summary=f"Item tambahan {out['name']} {'ditambah' if extra_id is None else 'diubah'}", details=out)
+    return out
+
+
+@router.post("/sales-calc/extras", status_code=201)
+def create_extra(body: dict, request: Request, user: dict = Depends(require_page(CALC))) -> dict:
+    return _save_extra(None, body, request, user)
+
+
+@router.put("/sales-calc/extras/{extra_id}")
+def update_extra(extra_id: int, body: dict, request: Request, user: dict = Depends(require_page(CALC))) -> dict:
+    return _save_extra(extra_id, body, request, user)
+
+
+@router.delete("/sales-calc/extras/{extra_id}")
+def delete_extra(extra_id: int, request: Request, user: dict = Depends(require_page(CALC))) -> dict:
+    if not mc.delete_extra(extra_id):
+        raise HTTPException(404, detail="Item tambahan tidak ditemukan")
+    activity.record("cc.extra-item", user=user, request=request, page="/cost-control/sales-calculator",
+                    summary=f"Item tambahan #{extra_id} dihapus", details={"id": extra_id})
+    return {"ok": True}
 
 
 @router.get("/sales-calc/report")

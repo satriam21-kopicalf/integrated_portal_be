@@ -141,13 +141,19 @@ def _lines(lines: list[dict]) -> list[dict]:
         kind, code = ln.get("type"), str(ln.get("code") or "").strip()
         if not code:
             continue
-        if kind not in ("item", "wip"):
-            raise CostingError("Baris resep harus bahan baku atau WIP")
+        if kind not in ("item", "wip", "other"):
+            raise CostingError("Baris resep harus bahan baku / packaging, WIP atau item lain")
         qty = _f(ln.get("qty"))
         if qty <= 0:
             raise CostingError(f"Qty {ln.get('name') or code} harus lebih dari 0")
-        out.append({"type": kind, "code": code, "name": str(ln.get("name") or code)[:160], "qty": qty,
-                    "unit": "GR" if kind == "wip" else str(ln.get("unit") or "")[:20]})
+        line = {"type": kind, "code": code, "name": str(ln.get("name") or code)[:160], "qty": qty,
+                "unit": "GR" if kind == "wip" else str(ln.get("unit") or "")[:20]}
+        if kind == "other":  # a free item: its own unit and price (not in kc_master)
+            price = ln.get("price")
+            line["price"] = _f(price) if price not in (None, "") else None
+            if line["price"] is not None and line["price"] < 0:
+                raise CostingError("Harga tidak boleh negatif")
+        out.append(line)
     return out
 
 
@@ -197,6 +203,11 @@ def menus(days: int = 90) -> list[dict]:
 def explode(card: dict, portions: float, wip: dict[str, dict], out: dict[str, dict]) -> None:
     """Raw materials of `portions` portions of a card: item lines in their unit, WIP lines (grams) per ingredient."""
     for ln in card.get("lines") or []:
+        if ln["type"] == "other":
+            row = out.setdefault(f"o:{ln['name'].lower()}", {"code": None, "name": ln["name"], "unit": ln.get("unit") or "",
+                                                             "price": ln.get("price")})
+            row["qty"] = row.get("qty", 0.0) + ln["qty"] * portions
+            continue
         if ln["type"] == "item":
             row = out.setdefault(ln["code"], {"code": ln["code"], "name": ln["name"], "unit": ln.get("unit") or ""})
             row["qty"] = row.get("qty", 0.0) + ln["qty"] * portions
@@ -210,6 +221,51 @@ def explode(card: dict, portions: float, wip: dict[str, dict], out: dict[str, di
             key = c["code"] or f"n:{c['name']}"
             row = out.setdefault(key, {"code": c["code"], "name": c["name"], "unit": c["unit"], "isStock": c["isStock"]})
             row["qty"] = row.get("qty", 0.0) + ln["qty"] * portions * c["perGram"]
+
+
+BASES = ("bill", "portion", "day")
+
+
+def extras() -> list[dict]:
+    return [{"id": r["id"], "code": r["item_code"], "name": r["name"], "unit": r["unit"],
+             "price": _f(r["price"]) if r["price"] is not None else None, "basis": r["basis"], "qty": _f(r["qty"]),
+             "note": r["note"], "isActive": r["is_active"]}
+            for r in db.fetch(f"SELECT * FROM {P}.cc_extra_item ORDER BY is_active DESC, name")]
+
+
+def save_extra(extra_id: Optional[int], data: dict, user: dict) -> dict:
+    code = (data.get("code") or "").strip() or None
+    name = " ".join(str(data.get("name") or "").split())
+    unit = str(data.get("unit") or "").strip()
+    if data.get("basis") not in BASES:
+        raise CostingError("Dasar hitung: per bill, per porsi atau per hari")
+    if _f(data.get("qty")) <= 0:
+        raise CostingError("Qty harus lebih dari 0")
+    if code:
+        it = db.fetchrow("SELECT name, base_uom FROM kc_master.item WHERE code = %s", (code,))
+        if not it:
+            raise CostingError(f"Item tidak dikenal: {code}")
+        name, unit = name or it["name"], it["base_uom"]
+    if not name or not unit:
+        raise CostingError("Nama dan satuan item wajib diisi")
+    price = data.get("price")
+    row = (code, name[:160], unit[:20], None if code or price in (None, "") else _f(price), data["basis"], _f(data["qty"]),
+           (data.get("note") or "").strip() or None, bool(data.get("isActive", True)), user.get("full_name") or user["username"])
+    with db.transaction() as conn:
+        if extra_id is None:
+            new = conn.execute(f"""INSERT INTO {P}.cc_extra_item (item_code, name, unit, price, basis, qty, note, is_active, updated_by)
+                                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""", row).fetchone()
+            extra_id = new["id"]
+        elif conn.execute(f"""UPDATE {P}.cc_extra_item SET item_code = %s, name = %s, unit = %s, price = %s, basis = %s, qty = %s,
+                              note = %s, is_active = %s, updated_by = %s, updated_at = now() WHERE id = %s""",
+                          (*row, extra_id)).rowcount == 0:
+            raise CostingError("Item tambahan tidak ditemukan")
+    return next(e for e in extras() if e["id"] == extra_id)
+
+
+def delete_extra(extra_id: int) -> bool:
+    with db.transaction() as conn:
+        return conn.execute(f"DELETE FROM {P}.cc_extra_item WHERE id = %s", (extra_id,)).rowcount > 0
 
 
 def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int = 7, buffer_pct: float = 10) -> dict:
@@ -236,15 +292,34 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
         explode(cards[code], qty / days * horizon * (1 + buffer_pct / 100), wip, plan)
         per_menu.append({"id": s["menu_id"], "name": s["name"], "recipe": code, "recipeName": cards[code]["name"],
                          "qty": qty, "sales": _f(s["sales"])})
-    codes = [k for k in system if not k.startswith(("wip:", "n:"))]
+    # items outside the cards: per bill, per portion sold (menus with a card) or per day of an outlet with sales
+    base = db.fetchrow(
+        f"""SELECT coalesce(sum(bills) FILTER (WHERE tx_type = 'sales'), 0) AS bills,
+                   count(DISTINCT (branch_code, sales_date)) FILTER (WHERE tx_type = 'sales' AND subtotal > 0) AS days
+              FROM {P}.agg_sales_daily WHERE sales_date BETWEEN %(a)s AND %(b)s
+               AND (%(br)s::text[] IS NULL OR branch_code = ANY(%(br)s))""", {"a": d_from, "b": d_to, "br": branches}) or {}
+    counts = {"bill": _f(base.get("bills")), "portion": sum(m["qty"] for m in per_menu), "day": _f(base.get("days"))}
+    extra_rows = []
+    for e in (x for x in extras() if x["isActive"]):
+        used = e["qty"] * counts[e["basis"]]
+        key = e["code"] or f"o:{e['name'].lower()}"
+        for target, amount in ((system, used), (plan, used / days * horizon * (1 + buffer_pct / 100))):
+            row = target.setdefault(key, {"code": e["code"], "name": e["name"], "unit": e["unit"], "price": e["price"], "extra": True})
+            row["qty"] = row.get("qty", 0.0) + amount
+        extra_rows.append({**e, "count": counts[e["basis"]], "used": round(used, 3)})
+    codes = [k for k in system if not k.startswith(("wip:", "n:", "o:"))]
     price = prices_on(d_to, codes or None)
     # HPP of a portion of every card used
     hpp: dict[str, Optional[float]] = {}
     for code in {m["recipe"] for m in per_menu}:
         one: dict[str, dict] = {}
         explode(cards[code], 1, wip, one)
-        missing = [v for v in one.values() if v.get("code") and v.get("isStock", True) and v["code"] not in price]
-        hpp[code] = None if missing else sum(v["qty"] * price.get(v["code"] or "", 0.0) for v in one.values())
+        def cost(v: dict) -> Optional[float]:
+            if v.get("code"):
+                return price.get(v["code"])
+            return v.get("price") if v.get("price") is not None else (0.0 if not v.get("isStock", True) else None)
+        missing = [v for v in one.values() if (v.get("code") or "price" in v) and cost(v) is None]
+        hpp[code] = None if missing else sum(v["qty"] * (cost(v) or 0.0) for v in one.values())
     for m in per_menu:
         unit = hpp.get(m["recipe"])
         m["hpp"] = round(unit, 2) if unit is not None else None
@@ -259,20 +334,25 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
     usage = []
     for k, v in sorted(system.items(), key=lambda kv: kv[1]["name"]):
         a = actual.get(v["code"] or "")
-        p = price.get(v["code"] or "")
-        usage.append({"code": v["code"], "name": v["name"], "unit": v["unit"], "isStock": v.get("isStock", True),
+        p = price.get(v["code"]) if v["code"] else v.get("price")
+        usage.append({"code": v["code"], "name": v["name"], "unit": v["unit"], "isStock": v.get("isStock", True), "extra": v.get("extra", False),
                       "system": round(v["qty"], 3), "actual": round(_f(a["actual"]), 3) if a else None,
                       "variance": round(_f(a["actual"]) - v["qty"], 3) if a else None,
                       "price": p, "systemValue": round(v["qty"] * p, 2) if p is not None else None,
                       "actualValue": round(_f(a["actual"]) * p, 2) if a and p is not None else None})
-    mrp = [{"code": v["code"], "name": v["name"], "unit": v["unit"], "isStock": v.get("isStock", True),
-            "qty": math.ceil(round(v["qty"], 6)), "value": round(math.ceil(round(v["qty"], 6)) * price[v["code"]], 2)
-            if v["code"] in price else None} for v in sorted(plan.values(), key=lambda x: x["name"])]
+    def unit_price(v: dict) -> Optional[float]:
+        return price.get(v["code"]) if v["code"] else v.get("price")
+    mrp = [{"code": v["code"], "name": v["name"], "unit": v["unit"], "isStock": v.get("isStock", True), "extra": v.get("extra", False),
+            "qty": math.ceil(round(v["qty"], 6)),
+            "value": round(math.ceil(round(v["qty"], 6)) * unit_price(v), 2) if unit_price(v) is not None else None}
+           for v in sorted(plan.values(), key=lambda x: x["name"])]
+    extra_cost = sum((e["used"] * (unit_price({"code": e["code"], "price": e["price"]}) or 0.0)) for e in extra_rows)
     sales = sum(m["sales"] for m in per_menu)
     cogs = sum(m["cogs"] or 0 for m in per_menu)
     return {"period": {"from": d_from.isoformat(), "to": d_to.isoformat(), "days": days, "horizon": horizon, "buffer": buffer_pct},
-            "menus": per_menu, "unmapped": unmapped, "usage": usage, "mrp": mrp,
-            "total": {"sales": sales, "cogs": cogs, "ratio": round(cogs / sales, 6) if sales else None,
+            "menus": per_menu, "unmapped": unmapped, "usage": usage, "mrp": mrp, "extras": extra_rows, "counts": counts,
+            "total": {"sales": sales, "cogs": cogs + extra_cost, "menuCogs": cogs, "extraCogs": round(extra_cost, 2),
+                      "ratio": round((cogs + extra_cost) / sales, 6) if sales else None,
                       "menusMapped": len(per_menu), "menusUnmapped": len(unmapped),
                       "unpriced": sum(1 for m in per_menu if m["hpp"] is None),
                       "systemValue": sum(u["systemValue"] or 0 for u in usage),

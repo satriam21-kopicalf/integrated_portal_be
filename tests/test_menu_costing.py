@@ -26,3 +26,11 @@ def test_lines_are_checked():
         mc._lines([{"type": "item", "code": "PK-CUP", "qty": 0}])
     with pytest.raises(mc.CostingError):
         mc._lines([{"type": "menu", "code": "X", "qty": 1}])
+
+
+def test_free_items_in_a_card():
+    lines = mc._lines([{"type": "other", "code": "x", "name": "Stiker", "qty": 1, "unit": "PCS", "price": 150}])
+    assert lines[0]["price"] == 150.0
+    out: dict = {}
+    mc.explode({"lines": lines}, 4, WIP, out)
+    assert out["o:stiker"]["qty"] == 4 and out["o:stiker"]["price"] == 150.0

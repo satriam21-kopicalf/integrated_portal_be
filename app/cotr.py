@@ -466,7 +466,8 @@ def send_request(user: dict, kind: str, amount: Any, note: str, photo: str) -> d
 # entity -> (table, key column, columns written from the payload, ordering)
 MASTERS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
     "pools": ("cotr_pool", "code", ("code", "name", "kind", "parent_code", "city", "address", "storage", "is_active",
-                                    "latitude", "longitude", "radius_m", "pic_name", "phone", "open_time", "close_time", "note"),
+                                    "latitude", "longitude", "radius_m", "pic_name", "phone", "open_time", "close_time", "note",
+                                    "is_production"),
               "kind, name"),
     "fleet": ("cotr_fleet", "code", ("code", "name", "type", "plate", "pool_code", "capacity", "condition", "last_service",
                                      "is_active", "brand", "model", "frame_no", "acquired_on", "qris_bank", "qris_nmid",
@@ -477,7 +478,7 @@ MASTERS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
                                                             "is_active", "note"), "valid_from DESC, code"),
     "shift-templates": ("cotr_shift_template", "code", ("code", "name", "start_time", "end_time", "break_min", "grace_min",
                                                         "color", "is_active", "sort", "pay_rate"), "sort, start_time"),
-    "menus": ("cotr_menu", "code", ("code", "name", "category", "price", "bom_code", "is_active", "sort"), "sort, name"),
+    "menus": ("cotr_menu", "code", ("code", "name", "category", "price", "bom_code", "is_active", "sort", "shelf_life_days"), "sort, name"),
     "boms": ("cotr_bom", "code", ("code", "name", "output", "yield_qty", "yield_unit", "lines", "kind", "units", "note"),
              "kind DESC, name"),
     "items": ("cotr_item", "code", ("code", "name", "category", "unit", "pack_unit", "pack_qty", "cost", "is_stock",
@@ -1403,3 +1404,97 @@ def suggestions(day: date, codes: list[str]) -> dict[str, dict]:
         if r["code"] not in out and r["pool_code"] in pool_avg:
             out[r["code"]] = pool_avg[r["pool_code"]]
     return out
+
+
+# ---------------------------------------------------------------- production batches and distribution (migration 062)
+
+def _batch_view(b: dict, sent: int, received: int) -> dict:
+    return {"id": str(b["id"]), "batchNo": b["batch_no"], "hub": b["hub_code"], "menu": b["menu_code"], "qty": b["qty"],
+            "producedOn": _iso(b["produced_on"]), "expiresOn": _iso(b["expires_on"]), "note": b["note"],
+            "sent": sent, "received": received, "atHub": b["qty"] - sent, "createdAt": _iso(b["created_at"])}
+
+
+def batches(d_from: date, d_to: date, hub: Optional[str]) -> dict:
+    """The batches produced in a period (a hub or every hub) with what was sent to the pools and is left at the hub."""
+    rows = db.fetch(f"""SELECT * FROM {P}.cotr_batch WHERE produced_on BETWEEN %s AND %s AND (%s::text IS NULL OR hub_code = %s)
+                         ORDER BY produced_on DESC, created_at DESC""", (d_from, d_to, hub, hub))
+    ids = [r["id"] for r in rows]
+    tr_rows = db.fetch(f"""SELECT t.*, p.name AS pool_name FROM {P}.cotr_transfer t JOIN {P}.cotr_pool p ON p.code = t.pool_code
+                            WHERE t.batch_id = ANY(%s) ORDER BY t.sent_at""", (ids,)) if ids else []
+    per: dict[str, list[dict]] = {}
+    for t in tr_rows:
+        per.setdefault(str(t["batch_id"]), []).append({"id": str(t["id"]), "pool": t["pool_code"], "poolName": t["pool_name"], "qty": t["qty"],
+                                                      "status": t["status"], "note": t["note"], "sentAt": _iso(t["sent_at"]),
+                                                      "receivedAt": _iso(t["received_at"])})
+    out = []
+    for b in rows:
+        ts = per.get(str(b["id"]), [])
+        out.append({**_batch_view(b, sum(t["qty"] for t in ts), sum(t["qty"] for t in ts if t["status"] == "received")), "transfers": ts})
+    return {"from": d_from.isoformat(), "to": d_to.isoformat(), "data": out}
+
+
+def add_batch(user: dict, data: dict) -> dict:
+    hub = db.fetchrow(f"SELECT code FROM {P}.cotr_pool WHERE code = %s", (data.get("hub"),))
+    menu = db.fetchrow(f"SELECT code, shelf_life_days FROM {P}.cotr_menu WHERE code = %s", (data.get("menu"),))
+    if not hub or not menu:
+        raise CotrError("Hub dan menu wajib dipilih")
+    qty = int(data.get("qty") or 0)
+    if qty <= 0:
+        raise CotrError("Jumlah produksi harus lebih dari 0")
+    made = data.get("producedOn") or today()
+    expires = data.get("expiresOn") or (made + timedelta(days=menu["shelf_life_days"]) if menu["shelf_life_days"] else None)
+    if expires is None:
+        raise CotrError("Isi tanggal expired (atau umur simpan menu di Master Menu)")
+    if expires < made:
+        raise CotrError("Tanggal expired harus setelah tanggal produksi")
+    with db.transaction() as conn:
+        n = conn.execute(f"SELECT nextval('{P}.cotr_batch_no') AS n").fetchone()["n"]
+        no = f"PRD-{made:%y%m%d}-{n:04d}"
+        row = conn.execute(f"""INSERT INTO {P}.cotr_batch (batch_no, hub_code, menu_code, qty, produced_on, expires_on, note, created_by)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+                           (no, hub["code"], menu["code"], qty, made, expires, (data.get("note") or "").strip() or None, user["id"])).fetchone()
+    return _batch_view(row, 0, 0)
+
+
+def delete_batch(batch_id: str) -> None:
+    with db.transaction() as conn:
+        if conn.execute(f"SELECT 1 FROM {P}.cotr_transfer WHERE batch_id::text = %s", (batch_id,)).fetchone():
+            raise CotrError("Batch sudah dikirim ke pool dan tidak dapat dihapus")
+        if conn.execute(f"DELETE FROM {P}.cotr_batch WHERE id::text = %s", (batch_id,)).rowcount == 0:
+            raise CotrError("Batch tidak ditemukan")
+
+
+def send_batch(user: dict, batch_id: str, pool: str, qty: int, note: Optional[str]) -> dict:
+    """A part of a batch sent from the hub to a pool, at most what is left at the hub."""
+    with db.transaction() as conn:
+        b = conn.execute(f"SELECT * FROM {P}.cotr_batch WHERE id::text = %s FOR UPDATE", (batch_id,)).fetchone()
+        if not b:
+            raise CotrError("Batch tidak ditemukan")
+        if not conn.execute(f"SELECT 1 FROM {P}.cotr_pool WHERE code = %s", (pool,)).fetchone():
+            raise CotrError("Pool tidak ditemukan")
+        sent = conn.execute(f"SELECT coalesce(sum(qty), 0) AS n FROM {P}.cotr_transfer WHERE batch_id = %s", (b["id"],)).fetchone()["n"]
+        if qty <= 0 or qty > b["qty"] - sent:
+            raise CotrError(f"Jumlah kirim 1 sampai {b['qty'] - sent}")
+        row = conn.execute(f"""INSERT INTO {P}.cotr_transfer (batch_id, pool_code, qty, note, sent_by) VALUES (%s, %s, %s, %s, %s)
+                               RETURNING id::text""", (b["id"], pool, qty, (note or "").strip() or None, user["id"])).fetchone()
+    return {"id": row["id"]}
+
+
+def receive_transfer(user: dict, transfer_id: str, pools: Optional[tuple] = None) -> None:
+    row = db.fetchrow(f"""UPDATE {P}.cotr_transfer SET status = 'received', received_at = now(), received_by = %s
+                           WHERE id::text = %s AND status = 'sent' RETURNING pool_code""", (user["id"], transfer_id))
+    if not row:
+        raise CotrError("Kiriman tidak ditemukan atau sudah diterima")
+
+
+def pool_stock(pool: str, day: date) -> dict:
+    """What a pool received from the hubs, per batch (first expired first) with the days left; and what is on the way."""
+    rows = db.fetch(f"""SELECT t.id::text AS transfer, t.qty, t.status, t.sent_at, t.received_at, b.batch_no, b.menu_code, b.produced_on, b.expires_on,
+                               m.name AS menu_name
+                          FROM {P}.cotr_transfer t JOIN {P}.cotr_batch b ON b.id = t.batch_id JOIN {P}.cotr_menu m ON m.code = b.menu_code
+                         WHERE t.pool_code = %s AND b.expires_on >= %s - 3 ORDER BY b.expires_on, b.produced_on""", (pool, day))
+    items = [{"transfer": r["transfer"], "batchNo": r["batch_no"], "menu": r["menu_code"], "menuName": r["menu_name"], "qty": r["qty"],
+              "status": r["status"], "producedOn": _iso(r["produced_on"]), "expiresOn": _iso(r["expires_on"]),
+              "daysLeft": (r["expires_on"] - day).days, "sentAt": _iso(r["sent_at"]), "receivedAt": _iso(r["received_at"])} for r in rows]
+    return {"pool": pool, "day": day.isoformat(), "received": [i for i in items if i["status"] == "received"],
+            "incoming": [i for i in items if i["status"] == "sent"]}

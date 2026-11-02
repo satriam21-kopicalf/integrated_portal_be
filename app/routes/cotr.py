@@ -40,6 +40,10 @@ Portal (Monitoring COTR):
     GET  /api/cotr/schedule?dateFrom=&dateTo=&pool=   page cotr.schedule: roster, check ins, attendance, recap (052)
     PUT  /api/cotr/schedule                     page cotr.schedule: {"entries": [{driver, day, status, template, pool, note}]}
     POST /api/cotr/schedule/copy                page cotr.schedule: {"source", "target", "days", "drivers"}
+    GET/POST /api/cotr/batches, DELETE /api/cotr/batches/{id}, POST /api/cotr/batches/{id}/send   page cotr.production:
+                                                production at a hub (produced / expires on) and its parts sent to pools (062)
+    POST /api/cotr/transfers/{id}/receive       page cotr.storage: a part received at the pool
+    GET  /api/cotr/pool-stock?pool=&day=        page cotr.storage: the batches of a pool, first expired first
     GET  /api/cotr/incentives?month=YYYY-MM&scheme=&pool=   page cotr.incentive: incentive per driver (053)
     GET/POST /api/cotr/waste, DELETE /api/cotr/waste/{id}   page cotr.production
     GET  /api/cotr/photos/{check-in|signature|request}/{id}   the team (cotr.check-in) or the driver it belongs to
@@ -411,6 +415,61 @@ def schedule_copy(body: ScheduleCopyIn, request: Request, user: dict = Depends(r
     n = _call(cotr.schedule_copy, user, body.source, body.target, body.days, body.drivers)
     _log(request, user, "cotr.schedule.copy", f"Jadwal COTR disalin {body.source} → {body.target} ({n} sel)")
     return {"ok": True, "copied": n}
+
+
+class BatchIn(BaseModel):
+    hub: str = Field(min_length=1, max_length=40)
+    menu: str = Field(min_length=1, max_length=40)
+    qty: int = Field(gt=0, le=100_000)
+    producedOn: Optional[date] = None
+    expiresOn: Optional[date] = None
+    note: Optional[str] = Field(None, max_length=300)
+
+
+class SendIn(BaseModel):
+    pool: str = Field(min_length=1, max_length=40)
+    qty: int = Field(gt=0, le=100_000)
+    note: Optional[str] = Field(None, max_length=300)
+
+
+@router.get("/batches")
+def batches(dateFrom: Optional[date] = None, dateTo: Optional[date] = None, hub: Optional[str] = None,
+            _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    end = dateTo or today()
+    return cotr.batches(dateFrom or end - timedelta(days=13), end, hub)
+
+
+@router.post("/batches", status_code=201)
+def add_batch(body: BatchIn, request: Request, user: dict = Depends(require_page("cotr.production"))):
+    out = _call(cotr.add_batch, user, body.model_dump())
+    _log(request, user, "cotr.batch.add", f"Produksi COTR {out['batchNo']}: {body.menu} {body.qty}", out)
+    return out
+
+
+@router.delete("/batches/{batch_id}")
+def delete_batch(batch_id: str, request: Request, user: dict = Depends(require_page("cotr.production"))):
+    _call(cotr.delete_batch, batch_id)
+    _log(request, user, "cotr.batch.delete", "Batch produksi COTR dihapus", {"id": batch_id})
+    return {"ok": True}
+
+
+@router.post("/batches/{batch_id}/send")
+def send_batch(batch_id: str, body: SendIn, request: Request, user: dict = Depends(require_page("cotr.production"))):
+    out = _call(cotr.send_batch, user, batch_id, body.pool, body.qty, body.note)
+    _log(request, user, "cotr.batch.send", f"Kiriman batch ke {body.pool}: {body.qty}", {"batch": batch_id, **body.model_dump()})
+    return out
+
+
+@router.post("/transfers/{transfer_id}/receive")
+def receive_transfer(transfer_id: str, request: Request, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    _call(cotr.receive_transfer, user, transfer_id)
+    _log(request, user, "cotr.transfer.receive", "Kiriman produksi diterima pool", {"id": transfer_id})
+    return {"ok": True}
+
+
+@router.get("/pool-stock")
+def pool_stock(pool: str, day: Optional[date] = None, _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    return cotr.pool_stock(pool, day or today())
 
 
 @router.get("/incentives")

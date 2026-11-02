@@ -43,7 +43,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("cc.lists", "Count Lists", "Cost Control · Stock opname settings"),
     ("cc.groups", "Items Groups", "Cost Control · Stock opname settings"),
     ("cc.types", "Count Types", "Cost Control · Stock opname settings"),
-    ("cc.premix", "Premix calculator", "Cost Control · Stock opname settings"),
+    ("cc.premix", "Production calculator", "Cost Control · Stock opname settings"),
     ("cc.locations", "Outlet locations", "Cost Control · Stock opname settings"),
     ("cc.waste-monitor", "Waste monitor", "Cost Control · Waste"),
     ("cc.waste-review", "Waste review", "Cost Control · Waste"),

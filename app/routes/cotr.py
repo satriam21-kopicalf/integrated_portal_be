@@ -39,6 +39,7 @@ Portal (Monitoring COTR):
     GET  /api/cotr/schedule?dateFrom=&dateTo=&pool=   page cotr.schedule: roster, check ins, attendance, recap (052)
     PUT  /api/cotr/schedule                     page cotr.schedule: {"entries": [{driver, day, status, template, pool, note}]}
     POST /api/cotr/schedule/copy                page cotr.schedule: {"source", "target", "days", "drivers"}
+    GET  /api/cotr/incentives?month=YYYY-MM&scheme=&pool=   page cotr.incentive: incentive per driver (053)
     GET/POST /api/cotr/waste, DELETE /api/cotr/waste/{id}   page cotr.production
     GET  /api/cotr/photos/{check-in|signature|request}/{id}   the team (cotr.check-in) or the driver it belongs to
 """
@@ -60,9 +61,9 @@ from app.utils import today
 
 router = APIRouter(prefix="/api/cotr", tags=["cotr"])
 driver_only = require_roles("driver")
-ENTITY_PAGE = {"pools": "cotr.pools", "fleet": "cotr.fleet", "fleet-types": "cotr.fleet", "shift-templates": "cotr.schedule", "menus": "cotr.menu",
+ENTITY_PAGE = {"pools": "cotr.pools", "fleet": "cotr.fleet", "fleet-types": "cotr.fleet", "shift-templates": "cotr.schedule", "incentive-schemes": "cotr.incentive", "menus": "cotr.menu",
                "boms": "cotr.production", "items": "cotr.production", "drivers": "cotr.drivers"}
-Entity = Literal["pools", "fleet", "fleet-types", "shift-templates", "menus", "boms", "items", "drivers"]
+Entity = Literal["pools", "fleet", "fleet-types", "shift-templates", "incentive-schemes", "menus", "boms", "items", "drivers"]
 MANAGEMENT = "cotr.management"  # salary, bank and NIK of the drivers (migration 050)
 
 
@@ -260,7 +261,7 @@ def decide_request(request_id: str, body: DecisionIn, request: Request, user: di
     return {"ok": True}
 
 
-COTR_PAGES = tuple(sorted(set(ENTITY_PAGE.values()) | {"cotr.check-in", "cotr.storage", "cotr.schedule", MANAGEMENT}))
+COTR_PAGES = tuple(sorted(set(ENTITY_PAGE.values()) | {"cotr.check-in", "cotr.storage", "cotr.schedule", "cotr.incentive", MANAGEMENT}))
 
 
 def _master_user(request: Request, entity: str, user: dict = Depends(current_user)) -> dict:
@@ -399,6 +400,16 @@ def schedule_copy(body: ScheduleCopyIn, request: Request, user: dict = Depends(r
     n = _call(cotr.schedule_copy, user, body.source, body.target, body.days, body.drivers)
     _log(request, user, "cotr.schedule.copy", f"Jadwal COTR disalin {body.source} → {body.target} ({n} sel)")
     return {"ok": True, "copied": n}
+
+
+@router.get("/incentives")
+def incentives(month: Optional[str] = None, scheme: Optional[str] = None, pool: Optional[str] = None,
+               _: dict = Depends(require_page("cotr.incentive"))):
+    try:
+        day = date.fromisoformat(f"{month}-01") if month else today().replace(day=1)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Bulan harus YYYY-MM")
+    return _call(cotr.incentives, day, scheme, pool)
 
 
 @router.get("/usage")

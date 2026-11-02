@@ -164,3 +164,23 @@ def test_attendance_against_the_roster():
     assert cotr.attendance({"status": "leave"}, None, "07:00", None) == "unscheduled"
     assert cotr.attendance(None, None, "07:00", None) == "unscheduled"
     assert cotr.attendance(None, None, None, None) == "none"
+
+
+DEFAULT = {"tiers": [{"from": 1500, "to": 2000, "rate": 500}, {"from": 2000, "to": 3000, "rate": 1000},
+                     {"from": 3000, "to": 4500, "rate": 1500}, {"from": 4500, "to": None, "rate": 2000}]}
+
+
+def test_incentive_progressive_per_cup():
+    assert cotr.incentive(1400, {}, {}, DEFAULT)["total"] == 0
+    assert cotr.incentive(2600, {}, {}, DEFAULT)["total"] == 500 * 500 + 600 * 1000
+    assert cotr.incentive(5000, {}, {}, DEFAULT)["total"] == 500 * 500 + 1000 * 1000 + 1500 * 1500 + 500 * 2000
+
+
+def test_incentive_bonus_deductions_and_minimum():
+    scheme = {**DEFAULT, "product_bonus": [{"menu": "KS", "rate": 200}], "late_penalty": 10000, "absent_penalty": 50000,
+              "min_attendance_pct": 80}
+    att = {"scheduled": 26, "worked": 25, "late": 2, "absent": 1}
+    r = cotr.incentive(2000, {"KS": 300}, att, scheme)
+    assert r["eligible"] and r["total"] == 250000 + 60000 - 20000 - 50000
+    assert cotr.incentive(2000, {}, {"scheduled": 26, "worked": 10}, scheme)["total"] == 0
+    assert cotr.incentive(1500, {}, {"scheduled": 1, "worked": 1, "absent": 5}, {**scheme, "absent_penalty": 50000})["total"] == 0

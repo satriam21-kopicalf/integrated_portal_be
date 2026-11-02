@@ -471,6 +471,9 @@ MASTERS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
                                      "is_active", "brand", "model", "frame_no", "acquired_on", "qris_bank", "qris_nmid",
                                      "qris_merchant", "note"), "code"),
     "fleet-types": ("cotr_fleet_type", "code", ("code", "name", "sort"), "sort, name"),
+    "incentive-schemes": ("cotr_incentive_scheme", "code", ("code", "name", "valid_from", "tiers", "product_bonus",
+                                                            "late_penalty", "absent_penalty", "min_attendance_pct",
+                                                            "is_active", "note"), "valid_from DESC, code"),
     "shift-templates": ("cotr_shift_template", "code", ("code", "name", "start_time", "end_time", "break_min", "grace_min",
                                                         "color", "is_active", "sort"), "sort, start_time"),
     "menus": ("cotr_menu", "code", ("code", "name", "category", "price", "bom_code", "is_active", "sort"), "sort, name"),
@@ -489,7 +492,7 @@ SENSITIVE = {"drivers": ("nik", "salary_monthly", "allowance_monthly", "bank_nam
 IMAGES = {"drivers": {"photo": ("photo", "photo_type")},
           "fleet": {"photo": ("photo", "photo_type"), "qris": ("qris_image", "qris_image_type")}}
 _BYTES = {"photo", "photo_type", "qris_image", "qris_image_type", "updated_by"}
-UPPER_CODES = {"pools", "fleet", "menus", "boms", "drivers", "items", "shift-templates"}  # fleet types keep their code as typed (sepeda_listrik)
+UPPER_CODES = {"pools", "fleet", "menus", "boms", "drivers", "items", "shift-templates", "incentive-schemes"}  # fleet types keep their code as typed (sepeda_listrik)
 
 
 def _plain(row: dict) -> dict:
@@ -536,6 +539,20 @@ def _value(col: str, v: Any) -> Any:
         return Jsonb(lines)
     if col == "storage":
         return [s.strip() for s in (v.split(",") if isinstance(v, str) else (v or [])) if str(s).strip()]
+    if col == "tiers":  # [{from, to | null, rate}] sorted, not overlapping
+        tiers = sorted(({"from": int(t.get("from") or 0), "to": int(t["to"]) if t.get("to") not in (None, "") else None,
+                         "rate": float(t.get("rate") or 0)} for t in (v or [])), key=lambda t: t["from"])
+        for a, b in zip(tiers, tiers[1:]):
+            if a["to"] is None or a["to"] > b["from"]:
+                raise CotrError("Tier insentif tumpang tindih")
+        if any(t["to"] is not None and t["to"] <= t["from"] for t in tiers) or any(t["rate"] < 0 for t in tiers):
+            raise CotrError("Tier insentif tidak valid")
+        return Jsonb(tiers)
+    if col == "product_bonus":
+        return Jsonb([{"menu": str(b.get("menu", "")).strip().upper(), "rate": float(b.get("rate") or 0)}
+                      for b in (v or []) if str(b.get("menu", "")).strip()])
+    if col == "valid_from" and v:
+        return str(v)[:7] + "-01"
     if col == "units":  # the containers of a premix: [{name, grams}]
         units = [{"name": str(u.get("name", "")).strip(), "grams": float(u.get("grams") or 0)} for u in (v or []) if str(u.get("name", "")).strip()]
         if any(u["grams"] <= 0 for u in units):
@@ -1127,3 +1144,69 @@ def schedule_copy(user: dict, src: date, dst: date, days: int, drivers: Optional
                     updated_at = now(), updated_by = EXCLUDED.updated_by""",
             (offset, user["id"], src, date.fromordinal(src.toordinal() + days), *args))
         return cur.rowcount
+
+
+# ---------------------------------------------------------------- incentives (migration 053)
+
+def tier_pay(cups: int, tiers: list[dict]) -> list[dict]:
+    """The cups of every segment of the tiers and their pay: 2600 cups on the default = 500 × 500 + 600 × 1000."""
+    out = []
+    for t in tiers:
+        top = cups if t.get("to") is None else min(cups, int(t["to"]))
+        n = max(0, top - int(t["from"]))
+        out.append({"from": int(t["from"]), "to": t.get("to"), "rate": float(t["rate"]), "cups": n, "pay": n * float(t["rate"])})
+    return out
+
+
+def incentive(cups: int, by_menu: dict[str, int], att: dict, scheme: dict) -> dict:
+    """The incentive of one driver for one month: tiers + product bonus − late / absent deductions (never below 0);
+    nothing when the attendance (worked / scheduled) is under the minimum of the scheme."""
+    tiers = tier_pay(cups, scheme.get("tiers") or [])
+    bonus = [{"menu": b["menu"], "rate": float(b["rate"]), "cups": int(by_menu.get(b["menu"], 0)),
+              "pay": int(by_menu.get(b["menu"], 0)) * float(b["rate"])} for b in scheme.get("product_bonus") or []]
+    gross = sum(t["pay"] for t in tiers) + sum(b["pay"] for b in bonus)
+    deduction = att.get("late", 0) * float(scheme.get("late_penalty") or 0) + att.get("absent", 0) * float(scheme.get("absent_penalty") or 0)
+    scheduled = att.get("scheduled", 0)
+    pct = round(att.get("worked", 0) * 100 / scheduled, 1) if scheduled else None
+    minimum = float(scheme.get("min_attendance_pct") or 0)
+    eligible = not minimum or (pct is not None and pct >= minimum)
+    total = max(0.0, gross - deduction) if eligible else 0.0
+    return {"cups": cups, "tiers": tiers, "bonus": bonus, "gross": gross, "deduction": deduction,
+            "attendancePct": pct, "eligible": eligible, "total": total}
+
+
+def scheme_for(month: date, code: Optional[str]) -> dict:
+    if code:
+        row = db.fetchrow(f"SELECT * FROM {P}.cotr_incentive_scheme WHERE code = %s", (code,))
+    else:
+        row = db.fetchrow(f"""SELECT * FROM {P}.cotr_incentive_scheme WHERE is_active AND valid_from <= %s
+                               ORDER BY valid_from DESC LIMIT 1""", (month,))
+    if not row:
+        raise CotrError("Belum ada skema insentif untuk bulan ini")
+    return _plain(row)
+
+
+def incentives(month: date, code: Optional[str], pool: Optional[str]) -> dict:
+    """The incentives of every driver for a month: cups sold (not voided) per menu, attendance of Master Schedule."""
+    start = month.replace(day=1)
+    end = date(start.year + (start.month == 12), start.month % 12 + 1, 1)
+    last = date.fromordinal(end.toordinal() - 1)
+    scheme = scheme_for(start, code)
+    sold = db.fetch(f"""SELECT sh.driver_code, l->>'code' AS code, sum((l->>'qty')::int) AS qty FROM {P}.cotr_sale s
+                          JOIN {P}.cotr_shift sh ON sh.id = s.shift_id, jsonb_array_elements(s.lines) l
+                         WHERE s.voided_at IS NULL AND sh.day >= %s AND sh.day < %s GROUP BY 1, 2""", (start, end))
+    per: dict[str, dict[str, int]] = {}
+    for r in sold:
+        per.setdefault(r["driver_code"], {})[r["code"]] = int(r["qty"])
+    roster = schedule(start, last, pool) if (last - start).days <= 62 else {"drivers": [], "recap": []}
+    att = {r["driver"]: r for r in roster["recap"]}
+    rows = []
+    for d in roster["drivers"]:
+        by_menu = per.get(d["code"], {})
+        a = att.get(d["code"], {})
+        rows.append({"driver": d["code"], "name": d["name"], "pool": d["pool_code"],
+                     "attendance": {k: a.get(k, 0) for k in ("scheduled", "worked", "late", "absent")},
+                     **incentive(sum(by_menu.values()), by_menu, a, scheme)})
+    rows.sort(key=lambda r: -r["total"])
+    return {"month": start.isoformat()[:7], "scheme": scheme, "rows": rows,
+            "total": sum(r["total"] for r in rows), "cups": sum(r["cups"] for r in rows)}

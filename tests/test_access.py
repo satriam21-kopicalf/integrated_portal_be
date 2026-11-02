@@ -92,3 +92,8 @@ def test_user_form_accepts_every_role():
     from app.routes.users import UserFields
     for role in ("superadmin", "cost_control", "user", "outlet"):
         assert UserFields(role=role).role == role
+
+
+def test_hidden_pages_keep_known_pages_only():
+    assert access.clean_hidden(["cotr.schedule", "nope", "cotr.schedule"]) == ["cotr.schedule"]
+    assert access.clean_hidden(None) == []

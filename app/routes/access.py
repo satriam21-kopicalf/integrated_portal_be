@@ -2,6 +2,9 @@
 
     GET    /api/access/pages                     catalog + pages per role (superadmin)
     PUT    /api/access/roles/{role}              {"pages": [...]} (superadmin; role cost_control or user)
+    GET    /api/access/platforms                 menus per platform: catalog with the platforms each page exists on and
+                                                 the set ones (superadmin; migration 054)
+    PUT    /api/access/platforms                 {"platforms": {page: [portal|operations|cotr] | null}} (null = default)
     GET    /api/access/masters/{kind}            kind = jobTitle | department (any signed-in user: profile form)
     POST   /api/access/masters/{kind}            {"name": "..."} add (superadmin)
     PATCH  /api/access/masters/{kind}/{id}       {"name"?, "isActive"?} rename / (de)activate (superadmin)
@@ -27,6 +30,28 @@ def catalog() -> list[dict]:
 @router.get("/pages")
 def pages(_user: dict = Depends(require_superadmin)) -> dict:
     return {"pages": catalog(), "roles": access.role_pages(), "defaults": access.DEFAULT_ROLE_PAGES}
+
+
+@router.get("/platforms")
+def platforms(_user: dict = Depends(require_superadmin)) -> dict:
+    pages = catalog() + [{"key": k, "label": label, "group": "Calf On The Road (driver)"} for k, label in access.DRIVER_MENU]
+    return {"pages": [{**p, "available": access.available(p["key"])} for p in pages], "platforms": access.page_platforms()}
+
+
+class PlatformsIn(BaseModel):
+    platforms: dict[str, Optional[list[str]]]
+
+
+@router.put("/platforms")
+def put_platforms(body: PlatformsIn, request: Request, user: dict = Depends(require_superadmin)) -> dict:
+    try:
+        out = access.set_page_platforms(str(user["id"]), body.platforms)
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e)) from None
+    activity.record("access.platforms", user=user, request=request, summary="Mengatur menu per platform",
+                    details={"platforms": body.platforms})
+    forget_sessions()
+    return {"platforms": out}
 
 
 class RolePages(BaseModel):

@@ -8,6 +8,7 @@ that scripts cannot read. API clients may send the same token as
     POST /api/auth/login     {"identifier", "password", "method": "username"|"email", "remember"}
     POST /api/auth/logout
     GET  /api/auth/me
+    PUT   /api/auth/me/menu  {"hidden": [page]} pages left out of the own sidebar (display only, migration 054)
     PATCH /api/auth/me       own profile: fullName, phoneNumber, jobTitle, department, employeeNumber,
                              gender, birthDate, address, city, workBranchCode (not username/email/role)
     POST /api/auth/password  {"currentPassword", "newPassword"}
@@ -109,7 +110,8 @@ def require_roles(*roles: str):
 
 def signed_in_user(row: dict) -> dict:
     """The user as the app keeps it after sign-in: the account plus the pages it opens."""
-    return {**accounts.public_user(row), "pages": access.pages_for(row)}
+    # platforms: {page: [portal | operations | cotr]} where the superadmins set the menus (display only, 054)
+    return {**accounts.public_user(row), "pages": access.pages_for(row), "platforms": access.page_platforms()}
 
 
 def forget_sessions() -> None:
@@ -226,6 +228,16 @@ def update_me(body: dict, request: Request, user: dict = Depends(current_user)):
     updated = accounts.update_profile(str(user["id"]), data)
     activity.record("profile.update", user=user, request=request, summary="Memperbarui profil sendiri",
                     details={"fields": sorted(data)})
+    forget_sessions()
+    return {"user": signed_in_user(updated)}
+
+
+@router.put("/me/menu")
+def update_my_menu(body: dict, request: Request, user: dict = Depends(current_user)):
+    """The pages the user leaves out of the own sidebar (migration 054); display only, the access stays."""
+    hidden = access.clean_hidden(body.get("hidden"))
+    updated = accounts.update_user(str(user["id"]), {"hiddenPages": hidden}, str(user["id"]))
+    activity.record("profile.menu", user=user, request=request, summary="Mengatur tampilan menu", details={"hidden": hidden})
     forget_sessions()
     return {"user": signed_in_user(updated)}
 

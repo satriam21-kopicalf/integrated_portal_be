@@ -45,11 +45,12 @@ class MemoryAccounts:
     def get_password_hash(self, user_id):
         return self.users[str(user_id)]["password_hash"]
 
-    def list_users(self, search="", role="", status="", limit=20, offset=0, branch=""):
+    def list_users(self, search="", role="", status="", limit=20, offset=0, branch="", line=""):
         rows = [u for u in self.users.values()
                 if (not search or search.lower() in (u["username"] + u["email"] + u["full_name"]).lower())
                 and (not branch or u["role"] == "superadmin" or branch in (u.get("branch_codes") or []))
                 and (not role or u["role"] == role)
+                and (not line or u.get("business_line", "kopicalf") == line)
                 and (status != "active" or u["is_active"]) and (status != "inactive" or not u["is_active"])]
         rows.sort(key=lambda u: u["full_name"] or u["username"])
         return rows[offset:offset + limit], len(rows)

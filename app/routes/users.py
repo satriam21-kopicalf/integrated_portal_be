@@ -1,6 +1,6 @@
 """User account management (superadmin only).
 
-    GET    /api/users?search=&role=&status=&page=&pageSize=
+    GET    /api/users?search=&role=&status=&line=&page=&pageSize=   line: kopicalf | wasgee | cotr (migration 054)
     POST   /api/users
     GET    /api/users/{id}
     PATCH  /api/users/{id}          (any subset of fields; "password" resets it)
@@ -50,6 +50,9 @@ class UserFields(BaseModel):
     branches: Optional[list[str]] = Field(default=None, max_length=500)
     # pages added (true) or removed (false) on top of the role (app/access.py); None = leave as is
     pageOverrides: Optional[dict[str, bool]] = None
+    businessLine: Optional[Literal["kopicalf", "wasgee", "cotr"]] = None
+    # pages left out of the sidebar of the account (display only; migration 054)
+    hiddenPages: Optional[list[str]] = Field(default=None, max_length=200)
 
 
 def _error(message: str, status: int = 422, field: Optional[str] = None) -> JSONResponse:
@@ -67,6 +70,8 @@ def _clean(body: UserFields, creating: bool, user_id: Optional[str] = None,
         return None, _error(str(exc), field=exc.field)
     if "notes" in data:
         data["notes"] = (data["notes"] or "").strip() or None
+    if "hiddenPages" in data:
+        data["hiddenPages"] = access.clean_hidden(data["hiddenPages"])
     if "username" in data:
         data["username"] = (data["username"] or "").strip().lower()
         if not USERNAME_RE.match(data["username"]):
@@ -97,6 +102,8 @@ def _clean(body: UserFields, creating: bool, user_id: Optional[str] = None,
     if role in accounts.GLOBAL_ROLES or role == "driver":  # superadmin / cost_control see every branch; drivers none (COTR)
         if creating or "branches" in data or (current or {}).get("branch_codes"):
             data["branches"] = []
+    elif (data.get("businessLine") or (current or {}).get("business_line")) == "cotr":
+        pass  # the COTR team works with pools, an ESB branch is optional
     else:
         branches = data["branches"] if "branches" in data else list((current or {}).get("branch_codes") or [])
         if not branches:
@@ -114,9 +121,9 @@ def _password(body: UserFields, required: bool) -> tuple[Optional[str], Optional
 
 
 @router.get("")
-def list_users(search: str = "", role: str = "", status: str = "", branch: str = "",
+def list_users(search: str = "", role: str = "", status: str = "", branch: str = "", line: str = "",
                page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100)):
-    rows, total = accounts.list_users(search, role, status, pageSize, (page - 1) * pageSize, branch)
+    rows, total = accounts.list_users(search, role, status, pageSize, (page - 1) * pageSize, branch, line)
     return {"data": [_view(r) for r in rows], "total": total, "page": page, "pageSize": pageSize}
 
 
@@ -131,7 +138,8 @@ def users_summary():
     return {"total": c.get("total", 0), "active": c.get("active", 0), "inactive": c.get("inactive", 0),
             "locked": c.get("locked", 0), "superadmins": c.get("superadmins", 0), "users": c.get("users", 0), "outlets": c.get("outlets", 0),
             "withoutBranch": c.get("without_branch", 0), "neverSignedIn": c.get("never_signed_in", 0),
-            "active7d": c.get("active_7d", 0), "branchesCovered": c.get("branches_covered", 0)}
+            "active7d": c.get("active_7d", 0), "branchesCovered": c.get("branches_covered", 0),
+            "lines": {k: c.get(f"line_{k}", 0) for k in accounts.LINES}}
 
 
 @router.post("", status_code=201)

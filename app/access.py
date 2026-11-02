@@ -16,6 +16,7 @@ from app import activity
 from app import database as db
 from app.utils import TTLCache
 
+P = "integration_portal"
 T_ROLE_PAGE = "integration_portal.role_page"
 T_USER_PAGE = "integration_portal.user_page"
 MASTERS = {"jobTitle": "integration_portal.job_title", "department": "integration_portal.department"}
@@ -75,6 +76,61 @@ PAGES: list[tuple[str, str, str]] = [
     ("cotr.management", "COTR Management (salary & bank)", "Monitoring COTR"),
 ]
 PAGE_KEYS = tuple(p[0] for p in PAGES)
+
+
+# the menus a page can be shown on (migration 054): portal (integrated_portal), operations (fe-operations), cotr (the
+# driver app fe-calfontheroad, its tabs as pages of their own); AVAILABLE = where an app has the page
+PLATFORMS = ("portal", "operations", "cotr")
+DRIVER_MENU = (("driver.transaksi", "Transaksi"), ("driver.reload", "Reload"), ("driver.pengajuan", "Pengajuan"))
+OPERATIONS_PAGES = ("overview", "sales", "rating.grabfood", "rating.google-maps", "rating.shopeefood", "rating.gofood",
+                    "form.pic-check-in", "form.surveyor-check-in", "form.product", "form.outlet",
+                    "form.damaged-equipment", "stock-opname", "waste", "form.pengajuan")
+MENU_KEYS = PAGE_KEYS + tuple(k for k, _ in DRIVER_MENU)
+
+
+def available(page: str) -> list[str]:
+    if page.startswith("driver."):
+        return ["cotr"]
+    return ["portal"] + (["operations"] if page in OPERATIONS_PAGES else [])
+
+
+_platforms: dict = {}
+
+
+def page_platforms() -> dict[str, list[str]]:
+    """{page: [platforms]} of the pages the superadmins set (no entry = the default of each app). Display only: when
+    the table cannot be read the apps keep their default menus (cached 60 s)."""
+    import time
+    if _platforms and time.monotonic() - _platforms["at"] < 60:
+        return _platforms["value"]
+    try:
+        value = {r["page"]: list(r["platforms"]) for r in db.fetch(f"SELECT page, platforms FROM {P}.page_platform")}
+    except Exception:  # noqa: BLE001 - the menus fall back to the defaults
+        return {}
+    _platforms.update(at=time.monotonic(), value=value)
+    return value
+
+
+def set_page_platforms(user_id: str, config: dict[str, Optional[list[str]]]) -> dict[str, list[str]]:
+    """Set (a list, only the platforms that have the page) or reset (None) the platforms of pages."""
+    with db.transaction() as conn:
+        for page, platforms in config.items():
+            if page not in MENU_KEYS:
+                raise ValueError(f"Halaman tidak dikenal: {page}")
+            if platforms is None:
+                conn.execute(f"DELETE FROM {P}.page_platform WHERE page = %s", (page,))
+                continue
+            keep = [p for p in PLATFORMS if p in platforms and p in available(page)]
+            conn.execute(f"""INSERT INTO {P}.page_platform (page, platforms, updated_by) VALUES (%s, %s, %s)
+                             ON CONFLICT (page) DO UPDATE SET platforms = EXCLUDED.platforms, updated_at = now(),
+                                                              updated_by = EXCLUDED.updated_by""", (page, keep, user_id))
+    _platforms.clear()
+    return page_platforms()
+
+
+def clean_hidden(pages) -> list[str]:
+    """Pages an account leaves out of its sidebar (migration 054): known pages only; display only, never access."""
+    return sorted({str(p) for p in (pages or []) if str(p) in PAGE_KEYS})
 CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))
 EDITABLE_ROLES = ("cost_control", "user", "outlet")
 # the Surveyor Check In is given per account (migration 039), not to a role

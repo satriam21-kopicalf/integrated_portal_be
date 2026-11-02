@@ -28,11 +28,15 @@ ROLES = ("superadmin", "cost_control", "user", "outlet", "driver")  # outlet = s
 # driver = Calf On The Road driver app only (migration 046)
 # roles that see every branch (no user_branch rows); "user" sees only its branches
 GLOBAL_ROLES = ("superadmin", "cost_control")
+# business lines of the accounts (migration 054) and the ESB company of their branches (cotr: pools, no ESB branch)
+LINES = ("kopicalf", "wasgee", "cotr")
+LINE_COMPANY = {"kopicalf": "CALF", "wasgee": "CALF7", "cotr": None}
 
 USER_COLUMNS = """u.id, u.username, u.email, u.full_name, u.role, u.is_active, u.phone_number, u.job_title,
     u.department, u.notes, u.must_change_password, u.last_login_at, u.last_login_ip,
     u.failed_login_attempts, u.locked_until, u.password_changed_at, u.created_at, u.updated_at, u.avatar_updated_at,
     u.employee_number, u.gender, u.birth_date, u.address, u.city, u.work_branch_code, u.profile_updated_at,
+    u.business_line, u.hidden_pages,
     (SELECT b.branch_name FROM integration_esb.master_branches b WHERE b.branch_code = u.work_branch_code
      ORDER BY COALESCE(b.is_deleted, false) LIMIT 1) AS work_branch_name,
     (SELECT array_agg(x.branch_code ORDER BY x.branch_code) FROM integration_portal.user_branch x
@@ -45,7 +49,8 @@ USER_FROM = f"""{T_USER} u
 # API field name -> column (fields an admin may set); users edit only PROFILE_FIELDS themselves
 EDITABLE = {
     "username": "username", "email": "email", "role": "role", "isActive": "is_active", "notes": "notes",
-    "mustChangePassword": "must_change_password", **PROFILE_FIELDS,
+    "mustChangePassword": "must_change_password", "businessLine": "business_line", "hiddenPages": "hidden_pages",
+    **PROFILE_FIELDS,
 }
 
 
@@ -82,6 +87,9 @@ def public_user(row: Optional[dict]) -> Optional[dict]:
         "workBranchName": row.get("work_branch_name"),
         # branches a "user" may see (superadmins see every branch)
         "branches": list(row.get("branch_codes") or []),
+        # the business line (tabs of User Accounts, migration 054) and the pages left out of the sidebar
+        "businessLine": row.get("business_line") or "kopicalf",
+        "hiddenPages": list(row.get("hidden_pages") or []),
         "profileComplete": is_complete(row),
         "profileUpdatedAt": _iso(row.get("profile_updated_at")),
         "mustChangePassword": row.get("must_change_password", False),
@@ -118,8 +126,11 @@ def get_password_hash(user_id: str) -> Optional[str]:
 
 
 def list_users(search: str = "", role: str = "", status: str = "", limit: int = 20, offset: int = 0,
-               branch: str = "") -> tuple[list[dict], int]:
+               branch: str = "", line: str = "") -> tuple[list[dict], int]:
     where, params = ["TRUE"], {}
+    if line in LINES:
+        where.append("u.business_line = %(line)s")
+        params["line"] = line
     if search:
         where.append("(u.username ILIKE %(q)s OR u.email ILIKE %(q)s OR u.full_name ILIKE %(q)s "
                      "OR u.employee_number ILIKE %(q)s OR u.phone_number ILIKE %(q)s OR u.job_title ILIKE %(q)s)")
@@ -161,6 +172,9 @@ def user_counts() -> dict:
                count(*) FILTER (WHERE u.role IN ('user', 'outlet') AND NOT EXISTS (
                    SELECT 1 FROM {T_USER_BRANCH} x WHERE x.user_id = u.id))::int AS without_branch,
                count(*) FILTER (WHERE u.last_login_at IS NULL)::int AS never_signed_in,
+               count(*) FILTER (WHERE u.business_line = 'kopicalf')::int AS line_kopicalf,
+               count(*) FILTER (WHERE u.business_line = 'wasgee')::int AS line_wasgee,
+               count(*) FILTER (WHERE u.business_line = 'cotr')::int AS line_cotr,
                count(*) FILTER (WHERE u.last_login_at > now() - interval '7 days')::int AS active_7d,
                (SELECT count(DISTINCT x.branch_code)::int FROM {T_USER_BRANCH} x
                 JOIN {T_USER} xu ON xu.id = x.user_id AND xu.role IN ('user', 'outlet') AND xu.is_active) AS branches_covered

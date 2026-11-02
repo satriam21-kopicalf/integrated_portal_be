@@ -30,7 +30,8 @@ Portal (Monitoring COTR):
     POST /api/cotr/masters/{entity}             create        PUT /api/cotr/masters/{entity}/{code}   update
     DELETE /api/cotr/masters/{entity}/{code}
     GET  /api/cotr/driver-accounts              page cotr.drivers: the accounts of role driver
-    POST /api/cotr/drivers/import               page cotr.drivers: {"file": base64 xlsx, "pool", "apply"} preview / save
+    POST /api/cotr/drivers/import               page cotr.drivers: {"file": base64 xlsx, "pool", "apply"} preview / save;
+                                                the workbook "DATA COTR" (migration 060): every employee, pool by placement
     GET  /api/cotr/locations?day=               page cotr.check-in: the last position of every driver of the day
     GET  /api/cotr/locations/{driver}?day=      page cotr.check-in: the route of one driver
     GET  /api/cotr/production?days=&buffer=     page cotr.production: plan from the sales of the last days
@@ -332,7 +333,7 @@ def driver_accounts(_: dict = Depends(require_page("cotr.drivers"))):
 
 class ImportIn(BaseModel):
     file: str = Field(min_length=10, max_length=14_000_000)  # base64 of the .xlsx (<= 10 MB)
-    pool: str = Field(min_length=1, max_length=40)
+    pool: Optional[str] = Field(None, max_length=40)  # the "DATA COTR" workbook takes the pool of each placement
     apply: bool = False
 
 
@@ -342,6 +343,15 @@ def drivers_import(body: ImportIn, request: Request, user: dict = Depends(requir
         data = base64.b64decode(re.sub(r"^data:[^,]*,", "", body.file), validate=False)
     except (binascii.Error, ValueError):
         raise HTTPException(422, detail="File tidak dapat dibaca") from None
+    team = _call(cotr.parse_team, data)
+    if team:  # the workbook "DATA COTR" (migration 060): every employee with its pool, department, bike and armada
+        out = _call(cotr.import_team, user, team, body.apply)
+        if body.apply:
+            _log(request, user, "cotr.team.import", f"Impor tim COTR: {out['new']} baru, {out['update']} diperbarui",
+                 {"new": out["new"], "update": out["update"], "skipped": len(out["skipped"])})
+        return out
+    if not body.pool:
+        raise HTTPException(422, detail="Pilih pool untuk file armada")
     rows = _call(cotr.parse_drivers, data)
     if not rows:
         raise HTTPException(422, detail="Tidak ada driver ditemukan: pakai kolom Armada, Nama, HP atau sheet Report Armada")

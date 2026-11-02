@@ -475,7 +475,7 @@ MASTERS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
                                                             "late_penalty", "absent_penalty", "min_attendance_pct",
                                                             "is_active", "note"), "valid_from DESC, code"),
     "shift-templates": ("cotr_shift_template", "code", ("code", "name", "start_time", "end_time", "break_min", "grace_min",
-                                                        "color", "is_active", "sort"), "sort, start_time"),
+                                                        "color", "is_active", "sort", "pay_rate"), "sort, start_time"),
     "menus": ("cotr_menu", "code", ("code", "name", "category", "price", "bom_code", "is_active", "sort"), "sort, name"),
     "boms": ("cotr_bom", "code", ("code", "name", "output", "yield_qty", "yield_unit", "lines", "kind", "units", "note"),
              "kind DESC, name"),
@@ -484,7 +484,8 @@ MASTERS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
     "drivers": ("cotr_driver", "code", ("code", "name", "phone", "pool_code", "fleet_code", "status", "joined_on", "user_id",
                                         "nik", "birth_place", "birth_date", "gender", "address", "emergency_name",
                                         "emergency_phone", "employment_status", "position", "contract_end", "salary_monthly",
-                                        "allowance_monthly", "bank_name", "bank_account", "bank_holder", "note"), "code"),
+                                        "allowance_monthly", "bank_name", "bank_account", "bank_holder", "note",
+                                        "employee_id", "nickname", "department", "bike_code"), "code"),
 }
 # read and written only by superadmins and the COTR management (page cotr.management, migration 050)
 SENSITIVE = {"drivers": ("nik", "salary_monthly", "allowance_monthly", "bank_name", "bank_account", "bank_holder")}
@@ -1075,6 +1076,7 @@ def schedule(d_from: date, d_to: date, pool: Optional[str]) -> dict:
     cells, recap = [], []
     for d in drivers:
         tally = {k: 0 for k in ("scheduled", "worked", "on_time", "late", "absent", "off", "leave", "sick", "unscheduled")}
+        pay = 0.0  # the day rate of the shift of every day worked (migration 060: N / H / LS of the payroll sheets)
         day = d_from
         while day <= d_to:
             e, sh = entries.get((d["code"], day)), shifts.get((d["code"], day))
@@ -1091,10 +1093,12 @@ def schedule(d_from: date, d_to: date, pool: Optional[str]) -> dict:
                 tally["scheduled"] += 1
             if sh:
                 tally["worked"] += 1
+                if t and t.get("pay_rate") is not None:
+                    pay += float(t["pay_rate"])
             if state in tally:
                 tally[state] += 1
             day = date.fromordinal(day.toordinal() + 1)
-        recap.append({"driver": d["code"], **tally})
+        recap.append({"driver": d["code"], **tally, "pay": pay})
     return {"from": d_from.isoformat(), "to": d_to.isoformat(), "templates": list(templates.values()),
             "drivers": [{k: d[k] for k in ("code", "name", "pool_code", "fleet_code", "status")} for d in drivers],
             "cells": cells, "recap": recap}
@@ -1210,3 +1214,114 @@ def incentives(month: date, code: Optional[str], pool: Optional[str]) -> dict:
     rows.sort(key=lambda r: -r["total"])
     return {"month": start.isoformat()[:7], "scheme": scheme, "rows": rows,
             "total": sum(r["total"] for r in rows), "cups": sum(r["cups"] for r in rows)}
+
+
+# ---------------------------------------------------------------- the team of the sample "DATA COTR" (migration 060)
+
+# Placement of the sheets -> pool
+PLACEMENT = {"palmer": "POOL-PLM", "palmerah": "POOL-PLM", "tebet": "POOL-TBT", "kwitang": "POOL-KWI", "pasming": "POOL-PSM",
+             "pasar minggu": "POOL-PSM", "cipete": "POOL-CPT", "ratna": "POOL-RTN"}
+
+
+def _pool_of(placement: str) -> Optional[str]:
+    return PLACEMENT.get(" ".join(str(placement or "").lower().split()))
+
+
+def parse_team(data: bytes) -> list[dict]:
+    """The employees of the workbook "DATA COTR": sheet DATA COTR (placement, department, employee id, names), the bike
+    of DATA SEPEDA ARMADA, and the QRIS armada of the Report <pool> sheets matched by the nickname within the pool
+    ("BNI 01 BIYAN" -> BIYAN). Empty when the workbook is not that format."""
+    import openpyxl
+
+    try:
+        wb = openpyxl.load_workbook(BytesIO(data), read_only=True, data_only=True)
+    except Exception:
+        raise CotrError("File bukan Excel (.xlsx) yang valid") from None
+
+    def table(name: str) -> list[dict]:
+        ws = next((w for w in wb.worksheets if w.title.strip().upper() == name), None)
+        if ws is None:
+            return []
+        rows = list(ws.iter_rows(values_only=True))
+        h = next((i for i, r in enumerate(rows[:10]) if any(str(v).strip().upper() == "ID EMPLOYEE" for v in r if v)), None)
+        if h is None:
+            return []
+        head = [" ".join(str(v or "").upper().split()) for v in rows[h]]
+        out = []
+        for r in rows[h + 1:]:
+            row = {head[i]: (" ".join(str(r[i]).split()) if r[i] is not None else "") for i in range(min(len(head), len(r))) if head[i]}
+            if row.get("ID EMPLOYEE"):
+                out.append(row)
+        return out
+
+    team = table("DATA COTR")
+    if not team:
+        return []
+    bikes = {r["ID EMPLOYEE"].upper(): r.get("KODE SEPEDA", "") for r in table("DATA SEPEDA ARMADA")}
+    armada: dict[tuple[str, str], str] = {}  # (pool, NICKNAME) -> "BNI 01"
+    for ws in wb.worksheets:
+        if not ws.title.upper().startswith("REPORT"):
+            continue
+        pool = _pool_of(ws.title[6:])
+        for r in ws.iter_rows(values_only=True):
+            for v in r[:3]:
+                m = _ARMADA.match(" ".join(str(v).split())) if isinstance(v, str) else None
+                nick = m.group(3).strip(" /").upper() if m else ""
+                if m and nick and pool and not re.search(r"pesen|customer|total", nick, re.I):
+                    armada.setdefault((pool, nick), armada_code(m.group(1), m.group(2)))
+    out, seen = [], set()
+    for r in team:
+        emp = r["ID EMPLOYEE"].upper()
+        if emp in seen or not re.match(r"^[A-Z]{2,}\d{3,}$", emp):
+            continue
+        seen.add(emp)
+        pool = _pool_of(r.get("PLACEMENT", ""))
+        nick = r.get("NAMA PANGGILAN", "")
+        out.append({"employeeId": emp, "name": (r.get("NAMA LENGKAP") or nick).title(), "nickname": nick.title(),
+                    "placement": r.get("PLACEMENT", ""), "pool": pool, "department": r.get("DEPARTMENT", ""),
+                    "bike": bikes.get(emp, "") or "", "armada": armada.get((pool or "", nick.upper()))})
+    return out
+
+
+def import_team(user: dict, rows: list[dict], apply: bool) -> dict:
+    """Preview (apply False) or save the team: one row per employee id (the driver code is the employee id), new ones
+    created, the known ones (same employee id) updated; the QRIS armada found in the reports is linked (created when
+    missing). A row whose placement is no pool is left out and listed."""
+    pools = {r["code"] for r in db.fetch(f"SELECT code FROM {P}.cotr_pool")}
+    fleet = {r["code"] for r in db.fetch(f"SELECT code FROM {P}.cotr_fleet")}
+    known = {str(r["employee_id"]).upper(): r for r in db.fetch(
+        f"SELECT code, name, nickname, pool_code, department, bike_code, fleet_code, employee_id FROM {P}.cotr_driver WHERE employee_id IS NOT NULL")}
+    taken = {r["fleet_code"]: r["code"] for r in db.fetch(f"SELECT code, fleet_code FROM {P}.cotr_driver WHERE fleet_code IS NOT NULL")}
+    plan, skipped = [], []
+    for r in rows:
+        if r["pool"] not in pools:
+            skipped.append({**r, "reason": f"Placement {r['placement'] or '—'} tidak dikenal"})
+            continue
+        k = known.get(r["employeeId"])
+        code = k["code"] if k else r["employeeId"]
+        arm = r["armada"] if r["armada"] and taken.get(r["armada"], code) == code else None
+        fields = {"name": r["name"], "nickname": r["nickname"], "pool_code": r["pool"], "department": r["department"],
+                  "bike_code": r["bike"] or None, "fleet_code": arm or (k["fleet_code"] if k else None)}
+        same = k and all((k.get(f) or None) == (v or None) for f, v in fields.items())
+        plan.append({**r, "armada": arm, "code": code, "action": "new" if not k else ("same" if same else "update"),
+                     "newArmada": bool(arm and arm not in fleet)})
+    if apply:
+        with db.transaction() as conn:
+            for p in plan:
+                if p["newArmada"]:
+                    conn.execute(f"""INSERT INTO {P}.cotr_fleet (code, type, pool_code, updated_by) VALUES (%s, 'sepeda', %s, %s)
+                                     ON CONFLICT (code) DO NOTHING""", (p["armada"], p["pool"], user["id"]))
+                vals = (p["name"], p["nickname"], p["pool"], p["department"], p["bike"] or None, p["armada"])
+                if p["action"] == "new":
+                    conn.execute(f"""INSERT INTO {P}.cotr_driver (code, employee_id, name, nickname, pool_code, department, bike_code,
+                                         fleet_code, position, updated_by)
+                                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (code) DO NOTHING""",
+                                 (p["code"], p["employeeId"], *vals, p["department"], user["id"]))
+                elif p["action"] == "update":
+                    conn.execute(f"""UPDATE {P}.cotr_driver SET name = %s, nickname = %s, pool_code = %s, department = %s,
+                                         bike_code = %s, fleet_code = coalesce(%s, fleet_code), updated_at = now(), updated_by = %s
+                                     WHERE code = %s""", (*vals, user["id"], p["code"]))
+    by = lambda k: sum(p["action"] == k for p in plan)  # noqa: E731
+    return {"rows": plan, "skipped": skipped, "new": by("new"), "update": by("update"), "same": by("same"),
+            "newArmada": sum(p["newArmada"] for p in plan), "applied": apply, "format": "team",
+            "departments": {d: sum(p["department"] == d for p in plan) for d in sorted({p["department"] for p in plan})}}

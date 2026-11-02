@@ -184,3 +184,32 @@ def test_incentive_bonus_deductions_and_minimum():
     assert r["eligible"] and r["total"] == 250000 + 60000 - 20000 - 50000
     assert cotr.incentive(2000, {}, {"scheduled": 26, "worked": 10}, scheme)["total"] == 0
     assert cotr.incentive(1500, {}, {"scheduled": 1, "worked": 1, "absent": 5}, {**scheme, "absent_penalty": 50000})["total"] == 0
+
+
+def test_team_of_the_data_cotr_workbook():
+    """The workbook "DATA COTR" (migration 060): employees with their pool, department, bike and QRIS armada."""
+    from io import BytesIO
+
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "DATA COTR"
+    ws.append(["DATA COTR"])
+    ws.append([])
+    ws.append(["NO", "Placement", "Department", "ID EMPLOYEE", "NAMA LENGKAP", "NAMA PANGGILAN"])
+    ws.append([1, "Kwitang", "Armada", "CALF0101001", "budi santoso", "Budi"])
+    ws.append([2, "Palmer", "Storage", "CALF0101002", "ani", "Ani"])
+    ws.append([3, "Mars", "Armada", "CALF0101003", "x", "X"])
+    bikes = wb.create_sheet("DATA SEPEDA ARMADA")
+    bikes.append([])
+    bikes.append([])
+    bikes.append(["NO", "PLACEMENT", "ALAMAT POOL", "ID EMPLOYEE", "NAMA LENGKAP ARMADA", "NAMA PANGGILAN", "KODE SEPEDA"])
+    bikes.append([1, "Kwitang", "-", "CALF0101001", "budi santoso", "Budi", "S7"])
+    rep = wb.create_sheet("Report Kwitang")
+    rep.append(["BNI 01 BUDI", "Calf Premium Cup", 15000])
+    buf = BytesIO()
+    wb.save(buf)
+    rows = {r["employeeId"]: r for r in cotr.parse_team(buf.getvalue())}
+    assert rows["CALF0101001"]["pool"] == "POOL-KWI" and rows["CALF0101001"]["bike"] == "S7" and rows["CALF0101001"]["armada"] == "BNI 01"
+    assert rows["CALF0101002"]["pool"] == "POOL-PLM" and rows["CALF0101002"]["armada"] is None
+    assert rows["CALF0101003"]["pool"] is None  # an unknown placement is listed, not imported

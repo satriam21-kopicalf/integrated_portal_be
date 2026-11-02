@@ -2,7 +2,13 @@
 per branch group (CCI, CTG, CTGP …, app/branch_groups.py) and per outlet: coverage (outlets visited), check-ins, visits,
 scores, findings, the trend per day and the performance per category of both checklists. The assessment of every PIC
 (2026-11-03): their check-in days, the average score of their own Product and Outlet visits and, from the SWAT audits
-(Form WW-WR, app/wwwr.py), how far their ratings agree with the team's; per outlet the SWAT audits and open action plans."""
+(Form WW-WR, app/wwwr.py), how far their ratings agree with the team's; per outlet the SWAT audits and open action plans.
+
+The PIC score (2026-11-02, after the workbook "[Kopi Calf Group] [Masterfile] Store Performance"): the check-ins done
+against the target (the outlets of the PIC × the check-ins a day of their branch group × the working days, 26 of 30),
+the punctuality (the first check-in of the day before 11:00 WIB), the Product and Outlet visits done against the same
+target and their scores, and the agreement with the SWAT audits. Weighted by WEIGHTS over the parts that have data;
+the net sales of the outlets will join it later."""
 from datetime import date, datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -14,6 +20,10 @@ from app import wwwr
 
 WIB = ZoneInfo("Asia/Jakarta")
 LIMIT = 10000
+PUNCTUAL_BEFORE = 11          # the first check-in of the day before 11:00 WIB is on time (Store Performance)
+WORKING_DAYS = 26 / 30        # 26 working days a month (Store Performance: daily × 26 = monthly)
+# the parts of the PIC score (%), over the parts that have data; net sales to come
+WEIGHTS = {"checkin": 15, "punctuality": 10, "visits": 15, "product": 15, "outlet": 15, "swat": 30}
 
 
 def _day(iso: str) -> str:
@@ -22,6 +32,28 @@ def _day(iso: str) -> str:
 
 def _avg(xs: list[float]) -> Optional[float]:
     return round(sum(xs) / len(xs), 1) if xs else None
+
+
+def _rate(done: float, target: float) -> Optional[float]:
+    """done of target in %, at most 100 (None without a target)."""
+    return round(min(100.0, done * 100 / target), 1) if target else None
+
+
+def _score(parts: dict[str, Optional[float]]) -> Optional[float]:
+    """The PIC score: the parts weighted by WEIGHTS over the parts that have data."""
+    got = {k: v for k, v in parts.items() if v is not None}
+    total = sum(WEIGHTS[k] for k in got)
+    return round(sum(v * WEIGHTS[k] for k, v in got.items()) / total, 1) if total else None
+
+
+def _assigned(user_ids: list[str]) -> dict[str, list[str]]:
+    """The outlets assigned to each PIC (User Accounts → branches)."""
+    if not user_ids:
+        return {}
+    from app import database as db
+    rows = db.fetch("""SELECT user_id::text AS u, array_agg(branch_code ORDER BY branch_code) AS codes FROM integration_portal.user_branch
+                        WHERE user_id::text = ANY(%s) GROUP BY 1""", (user_ids,))
+    return {r["u"]: list(r["codes"]) for r in rows}
 
 
 def overview(date_from: date, date_to: date, scope: Optional[list[str]], group: Optional[str]) -> dict:
@@ -85,12 +117,17 @@ def overview(date_from: date, date_to: date, scope: Optional[list[str]], group: 
     def person(uid: str, name: str) -> dict:
         return people.setdefault(uid, {"id": uid, "name": name, "checkinDays": set(), "checkins": 0, "outside": 0, "branches": set(),
                                        "product": [], "outlet": [], "productVisits": 0, "outletVisits": 0, "under": 0})
+    first: dict[tuple[str, str], datetime] = {}
     for c in checkins:
         if c["branchCode"] not in per:
             continue
         x = person(c["userId"], c["name"])
         x["checkins"] += 1
-        x["checkinDays"].add(_day(c["visitedAt"]))
+        d = _day(c["visitedAt"])
+        x["checkinDays"].add(d)
+        at = datetime.fromisoformat(c["visitedAt"]).astimezone(WIB)
+        if (c["userId"], d) not in first or at < first[(c["userId"], d)]:
+            first[(c["userId"], d)] = at
         x["outside"] += 1 if c["outsideRadius"] else 0
         x["branches"].add(c["branchCode"])
     for f in ("product", "outlet"):
@@ -104,16 +141,31 @@ def overview(date_from: date, date_to: date, scope: Optional[list[str]], group: 
             if v["score"] is not None:
                 x[f].append(v["score"])
     swat_of = {p["id"]: p for p in comp["pics"]}
+    assigned = _assigned(list(people))
+    limits = pic_checkin.daily_limits(sorted({c for cs in assigned.values() for c in cs} | {c for x in people.values() for c in x["branches"]}))
+    today = datetime.now(WIB).date()
+    days = max(0, (min(date_to, today) - date_from).days + 1)
+    work = max(1, round(days * WORKING_DAYS)) if days else 0
     pic_rows = []
     for x in people.values():
         sw = swat_of.get(x["id"])
+        outlets_of = [c for c in (assigned.get(x["id"]) or sorted(x["branches"])) if c in per]
+        target = sum(limits.get(c, 1) for c in outlets_of) * work
+        visit_target = len(outlets_of) * work
+        punctual = sum(1 for (u, _), at in first.items() if u == x["id"] and at.hour < PUNCTUAL_BEFORE)
+        parts = {"checkin": _rate(x["checkins"], target), "punctuality": _rate(punctual, len(x["checkinDays"])),
+                 "visits": _rate(x["productVisits"] + x["outletVisits"], 2 * visit_target),
+                 "product": _avg(x["product"]), "outlet": _avg(x["outlet"]), "swat": sw["conformity"] if sw else None}
         pic_rows.append({"id": x["id"], "name": x["name"], "branches": len(x["branches"]), "checkins": x["checkins"], "checkinDays": len(x["checkinDays"]),
                          "outside": x["outside"], "productVisits": x["productVisits"], "productScore": _avg(x["product"]),
                          "outletVisits": x["outletVisits"], "outletScore": _avg(x["outlet"]), "under": x["under"],
                          "swatAudits": sw["audits"] if sw else 0, "conformity": sw["conformity"] if sw else None,
                          "overrated": sw["overrated"] if sw else 0,
-                         "openActions": sum(open_actions.get(b, 0) for b in x["branches"])})
-    pic_rows.sort(key=lambda r: (r["conformity"] is None, r["conformity"] or 0, -(r["overrated"] or 0), r["name"].lower()))
+                         "openActions": sum(open_actions.get(b, 0) for b in x["branches"]),
+                         "outlets": len(outlets_of), "checkinTarget": target, "checkinRate": parts["checkin"],
+                         "punctualDays": punctual, "punctuality": parts["punctuality"], "visitTarget": 2 * visit_target,
+                         "visitRate": parts["visits"], "score": _score(parts)})
+    pic_rows.sort(key=lambda r: (r["score"] is None, r["score"] or 0, r["name"].lower()))
 
     rows = []
     for b in per.values():
@@ -156,7 +208,7 @@ def overview(date_from: date, date_to: date, scope: Optional[list[str]], group: 
                    "productScore": _avg(t["productScores"]), "outletScore": _avg(t["outletScores"])} for t in days],
         "product": {"sections": forms["product"]["sections"], "findings": forms["product"]["findings"][:10]},
         "outlet": {"sections": forms["outlet"]["sections"], "findings": forms["outlet"]["findings"][:10]},
-        "picAssessment": pic_rows,
+        "picAssessment": pic_rows, "weights": WEIGHTS, "workingDays": work,
         "swat": {"audits": len(comp["audits"]), "conformity": comp.get("summary", {}).get("conformity"),
                  "overrated": comp.get("summary", {}).get("overrated", 0), "openActions": sum(open_actions.values())},
         "groupOptions": [{"id": g["id"], "code": g["code"], "name": g["name"], "branches": len(g["branches"])} for g in groups["groups"]],

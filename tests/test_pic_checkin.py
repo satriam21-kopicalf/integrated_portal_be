@@ -24,8 +24,12 @@ def test_location_rules():
     assert near["distance_m"] < 20 and not near["outside_radius"] and not near["low_accuracy"]
     far = pic_checkin.judge(-6.2580, 106.8137, 10, KEMANG)  # ~300 m north
     assert 280 <= far["distance_m"] <= 320 and far["outside_radius"]
-    weak = pic_checkin.judge(-6.2589, 106.8137, 150, KEMANG)  # ~200 m, ±150: 200 - 100 <= 100 → not outside, low accuracy
-    assert not weak["outside_radius"] and weak["low_accuracy"]
+    weak = pic_checkin.judge(-6.2589, 106.8137, 150, KEMANG)  # ~200 m, ±150: 200 - 25 > 100 → outside, low accuracy
+    assert weak["outside_radius"] and weak["low_accuracy"]
+    # the GPS accuracy counts at most 25 m (2026-11-02): 50 m radius, ~83 m away at ±30 m → 83 - 25 > 50 → outside
+    edge = pic_checkin.judge(-6.26035, 106.8137, 30, {**KEMANG, "latitude": -6.2596, "longitude": 106.8137, "radius_m": 50})
+    assert 78 <= edge["distance_m"] <= 90 and edge["outside_radius"]
+    assert not pic_checkin.judge(-6.2600, 106.8137, 20, {**KEMANG, "latitude": -6.2596, "longitude": 106.8137, "radius_m": 50})["outside_radius"]
     blind = pic_checkin.judge(-6.2580, 106.8137, 10, {**KEMANG, "latitude": None, "longitude": None})
     assert blind == {"distance_m": None, "outside_radius": False, "low_accuracy": False}
 

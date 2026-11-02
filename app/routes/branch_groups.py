@@ -31,6 +31,7 @@ class GroupIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     description: Optional[str] = Field(None, max_length=300)
     sort: int = Field(0, ge=0, le=9999)
+    checkinMaxPerDay: Optional[int] = Field(None, ge=1, le=50)  # PIC check-ins per outlet per day (migration 066)
 
 
 class MembersIn(BaseModel):
@@ -60,7 +61,7 @@ def groups(request: Request, user: dict = Depends(current_user)) -> dict:
 @router.post("/api/monitoring/branch-groups", status_code=201)
 def create(body: GroupIn, request: Request, user: dict = Depends(current_user)) -> dict:
     _need(request, user, "mon.branch-groups")
-    out = _run(bg.save_group, None, body.code, body.name, body.description, body.sort, str(user["id"]))
+    out = _run(bg.save_group, None, body.code, body.name, body.description, body.sort, str(user["id"]), body.checkinMaxPerDay)
     activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups", summary=f"Membuat grup cabang {body.code.upper()}")
     return out
 
@@ -68,7 +69,7 @@ def create(body: GroupIn, request: Request, user: dict = Depends(current_user)) 
 @router.patch("/api/monitoring/branch-groups/{group_id}")
 def update(group_id: str, body: GroupIn, request: Request, user: dict = Depends(current_user)) -> dict:
     _need(request, user, "mon.branch-groups")
-    out = _run(bg.save_group, group_id, body.code, body.name, body.description, body.sort, str(user["id"]))
+    out = _run(bg.save_group, group_id, body.code, body.name, body.description, body.sort, str(user["id"]), body.checkinMaxPerDay)
     activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups", summary=f"Mengubah grup cabang {body.code.upper()}")
     return out
 

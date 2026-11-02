@@ -28,6 +28,8 @@ def sources(monkeypatch):
         "audits": [{"branchCode": "CTG54", "score": 88.0}], "summary": {"conformity": 75.0, "overrated": 3},
         "pics": [{"id": "u1", "audits": 1, "conformity": 75.0, "overrated": 3}]})
     monkeypatch.setattr(mo.wwwr, "actions_of", lambda branches: [{"branch_code": "CTG54", "n": 2}])
+    monkeypatch.setattr(mo, "_assigned", lambda ids: {"u1": ["CTG54"]})
+    monkeypatch.setattr(mo.pic_checkin, "daily_limits", lambda codes: {c: 1 for c in codes})
 
     def monitor(form, a, b, branches, limit=0):
         data = [{"branchCode": "CTG54", "userId": "u1", "name": "Andi", "score": 90.0 if form == "product" else 80.0,
@@ -50,7 +52,10 @@ def test_overview_per_group_and_outlet(sources):
     # the assessment per PIC: own visits and the SWAT agreement; per outlet the SWAT audits and open action plans
     pics = {p["id"]: p for p in o["picAssessment"]}
     assert (pics["u1"]["productScore"], pics["u1"]["outletScore"], pics["u1"]["conformity"], pics["u1"]["overrated"], pics["u1"]["openActions"]) == (90.0, 80.0, 75.0, 3, 2)
-    assert pics["u2"]["checkinDays"] == 1 and pics["u2"]["conformity"] is None and o["picAssessment"][0]["id"] == "u1"
+    assert pics["u2"]["checkinDays"] == 1 and pics["u2"]["conformity"] is None
+    # the PIC score: check-ins (1 of 1 outlet × 18 working days of 21), punctual (09:00 WIB), visits, scores, SWAT
+    assert pics["u1"]["checkinTarget"] == 18 and pics["u1"]["punctuality"] == 100.0 and pics["u1"]["score"] is not None
+    assert mo._score({"checkin": 50.0, "punctuality": None, "visits": None, "product": None, "outlet": None, "swat": 80.0}) == round((50 * 15 + 80 * 30) / 45, 1)
     ctg = next(b for b in o["branches"] if b["code"] == "CTG54")
     assert (ctg["swatAudits"], ctg["swatScore"], ctg["openActions"]) == (1, 88.0, 2) and o["swat"]["openActions"] == 2
     only = mo.overview(date(2026, 10, 1), date(2026, 10, 21), None, "CTG")

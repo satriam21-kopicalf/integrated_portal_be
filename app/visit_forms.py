@@ -36,14 +36,18 @@ REQ, OPT = "required", "optional"
 
 
 def _it(prefix: str, no: int, label: str, label_en: str, *, kind: str = "rating", required: bool = True,
-        required_for: Optional[list[str]] = None, note: Optional[str] = None, photo: Optional[str] = None, **extra) -> dict:
+        required_for: Optional[list[str]] = None, only_for: Optional[list[str]] = None, note: Optional[str] = None,
+        photo: Optional[str] = None, **extra) -> dict:
     """One item. required: it must be rated before sending (required_for: only at the outlets of these branch groups,
-    Monitoring → Branch groups). note / photo: what a rated required item needs (both by default); an optional item
-    needs neither."""
+    Monitoring → Branch groups). only_for: the item is asked only at the outlets of these groups (2026-11-02; the
+    others do not see it and it is not assessed there). note / photo: what a rated required item needs (both by
+    default); an optional item needs neither."""
     item = {"key": f"{prefix}.{no}", "no": no, "label": label, "labelEn": label_en, "kind": kind, "required": required,
             "note": note or REQ, "photo": photo or REQ, **extra}
     if required_for:
         item["requiredFor"] = required_for
+    if only_for:
+        item["onlyFor"] = only_for
     return item
 
 
@@ -82,55 +86,68 @@ EVIDENCE_NOTE_ONLY = {"note": REQ, "photo": OPT}  # a note is required, the phot
 QTY = {"qty": "g"}
 MAX_QTY_G = 1_000_000
 
+CATEGORY_EN = {"Kritikal": "Critical", "Mayor": "Major", "Minor": "Minor"}
+
+
+def _tp(label: str, label_en: str, category: str, detail: str, detail_en: str, standard: str, standard_en: str,
+        required: bool = True) -> tuple:
+    """A Travel Path point (SOP Rev. 3): one photo, the note optional; the photo points and the standard in ID / EN."""
+    return (label, label_en, {"detail": detail, "detailEn": detail_en, "standard": standard, "standardEn": standard_en,
+                              "category": category, "categoryEn": CATEGORY_EN[category], "note": OPT, "photo": REQ,
+                              **({} if required else {"required": False})})
+
+
 DEFINITIONS: dict[str, dict] = {
     "product": {
         "title": "Monitoring Product",
         "titleEn": "Monitoring Product",
         "groups": [
-            _grp("availability", "Availability", "Availability", "Ketersediaan dan Kesesuaian Produk", "Product availability and conformity", [
+            _grp("availability", "Ketersediaan", "Availability", "Ketersediaan dan Kesesuaian Produk", "Product Availability and Conformity", [
                 _sec("stok-preparation", "Stock Preparation", "Stock Preparation",
-                     _list("stok-preparation", [(f"Ketersediaan Stok {i}", f"{e} stock available", {**o, **QTY}) for i, e, o in PREMIX])),
-                _sec("shelf-life", "Shelf Life Label", "Shelf Life Label",
-                     _list("shelf-life", [(f"Shelf Life Label {i}", f"{e} shelf-life label", o) for i, e, o in PREMIX])),
-                # Beans Specialty: required at the CTGP and CCI outlets only (2026-10-27)
+                     _list("stok-preparation", [(f"Ketersediaan Stok {i}", f"{e} Stock Available", {**o, **QTY}) for i, e, o in PREMIX])),
+                _sec("shelf-life", "Label Shelf Life", "Shelf Life Label",
+                     _list("shelf-life", [(f"Label Shelf Life {i}", f"{e} Shelf Life Label", o) for i, e, o in PREMIX])),
+                # Beans Specialty: required at the CTGP and CCI outlets only (2026-10-27); the items marked only_for are not
+                # asked at the CTG outlets (Store Performance workbook, sheet reff.: ctg 0 — 2026-11-02)
                 _sec("espresso-beans", "Espresso dan Beans", "Espresso and Beans", _list("espresso-beans", [
-                    ("Ketersediaan Stok Espresso Premium", "Espresso Premium stock available", QTY),
-                    ("Ketersediaan Stok Espresso Regular", "Espresso Regular stock available", QTY),
-                    ("Ketersediaan Stok Beans Premium", "Beans Premium stock available", {**O, **QTY}),
-                    ("Ketersediaan Stok Beans Regular", "Beans Regular stock available", {**O, **QTY}),
-                    ("Ketersediaan Stok Beans Cold Brew", "Cold Brew beans stock available", QTY),
-                    ("Ketersediaan Stok Beans Specialty", "Specialty beans stock available",
-                     {"required": False, "required_for": ["CTGP", "CCI"], **QTY}),
+                    ("Ketersediaan Stok Espresso Premium", "Espresso Premium Stock Available", QTY),
+                    ("Ketersediaan Stok Espresso Regular", "Espresso Regular Stock Available", QTY),
+                    ("Ketersediaan Stok Beans Premium", "Beans Premium Stock Available", {**O, **QTY, "only_for": ["CTGP", "CCI"]}),
+                    ("Ketersediaan Stok Beans Regular", "Beans Regular Stock Available", {**O, **QTY, "only_for": ["CTGP", "CCI"]}),
+                    ("Ketersediaan Stok Beans Cold Brew", "Cold Brew Beans Stock Available", QTY),
+                    ("Ketersediaan Stok Beans Specialty", "Specialty Beans Stock Available",
+                     {"required": False, "required_for": ["CTGP", "CCI"], "only_for": ["CTGP", "CCI"], **QTY}),
                 ])),
                 _sec("bahan-penolong", "Bahan Penolong", "Supporting Materials", _list("bahan-penolong", [
-                    ("Ketersediaan Cup Es", "Iced cups available"), ("Ketersediaan Cup Frosted", "Frosted cups available"),
-                    ("Ketersediaan Cup Jefferson", "Jefferson cups available", O), ("Ketersediaan Paper Cup", "Paper cups available"),
-                    ("Ketersediaan Es Batu", "Ice cubes available"), ("Ketersediaan Es Batu dalam Klip", "Ice cubes in clip bags available"),
-                    ("Ketersediaan Can Dan Tutup Can (Sudah Stiker)", "Cans and can lids available (stickered)"),
-                    ("Ketersediaan Botol Dan Tutup Botol (Sudah Stiker)", "Bottles and bottle caps available (stickered)"),
-                    ("Ketersediaan Straw 5mm", "5 mm straws available"), ("Ketersediaan Straw 6mm", "6 mm straws available", O),
-                    ("Ketersediaan Lunch Box S", "Lunch boxes S available", O), ("Ketersediaan Lunch Box M", "Lunch boxes M available", O),
-                    ("Ketersediaan Set Spork", "Spork sets available", O), ("Ketersediaan Greeting Card", "Greeting cards available"),
-                    ("Ketersediaan Beans Card Specialty", "Specialty beans cards available", O),
-                    ("Ketersediaan Plastik Take Away", "Take-away bags available"),
+                    ("Ketersediaan Cup Es", "Iced Cups Available"), ("Ketersediaan Cup Frosted", "Frosted Cups Available"),
+                    ("Ketersediaan Cup Jefferson", "Jefferson Cups Available", {**O, "only_for": ["CTGP", "CCI"]}), ("Ketersediaan Paper Cup", "Paper Cups Available"),
+                    ("Ketersediaan Es Batu", "Ice Cubes Available"), ("Ketersediaan Es Batu dalam Klip", "Ice Cubes in Clip Bags Available"),
+                    ("Ketersediaan Can dan Tutup Can (Sudah Stiker)", "Cans and Can Lids Available (Stickered)"),
+                    ("Ketersediaan Botol dan Tutup Botol (Sudah Stiker)", "Bottles and Bottle Caps Available (Stickered)"),
+                    ("Ketersediaan Straw 5 mm", "5 mm Straws Available"), ("Ketersediaan Straw 6 mm", "6 mm Straws Available", {**O, "only_for": ["CTGP", "CCI"]}),
+                    ("Ketersediaan Lunch Box S", "Lunch Boxes S Available", O), ("Ketersediaan Lunch Box M", "Lunch Boxes M Available", O),
+                    ("Ketersediaan Set Spork", "Spork Sets Available", O), ("Ketersediaan Greeting Card", "Greeting Cards Available"),
+                    ("Ketersediaan Beans Card Specialty", "Specialty Beans Cards Available", O),
+                    ("Ketersediaan Plastik Take Away", "Take-Away Bags Available"),
                 ])),
                 _sec("bahan-baku", "Bahan Baku", "Raw Materials", _list("bahan-baku", [
-                    ("Kesesuaian Form Request Bahan Baku", "Raw material request form matches"),
-                    ("Kesesuaian Form Request FM, Oat Milk, Ice Cream, Brookfarm", "Request form FM, Oat Milk, Ice Cream, Brookfarm matches"),
-                    ("Kesesuaian Form Request Ice Hot, Rich Gold", "Request form Ice Hot, Rich Gold matches", O),
-                    ("Kesesuaian Form Request Bahan Baku Maincourse", "Main course raw material request form matches", O),
-                    ("Kesesuaian Form Request Bahan Baku Side Dishes", "Side dish raw material request form matches"),
+                    ("Kesesuaian Form Request Bahan Baku", "Raw Material Request Form Matches"),
+                    ("Kesesuaian Form Request FM, Oat Milk, Ice Cream, Brookfarm", "FM, Oat Milk, Ice Cream, Brookfarm Request Form Matches"),
+                    ("Kesesuaian Form Request Ice Hot, Rich Gold", "Ice Hot, Rich Gold Request Form Matches", {**O, "only_for": ["CTGP", "CCI"]}),
+                    ("Kesesuaian Form Request Bahan Baku Main Course", "Main Course Raw Material Request Form Matches", {**O, "only_for": ["CTGP", "CCI"]}),
+                    ("Kesesuaian Form Request Bahan Baku Side Dish", "Side Dish Raw Material Request Form Matches"),
                 ])),
             ]),
             _grp("kualitas-produk", "Kualitas Produk", "Product Quality", "5 Indra - Rasa", "5 Senses - Taste", [
                 _sec("kualitas-produk", "Kualitas Produk", "Product Quality", _list("kualitas-produk", [
                     ("Cupping Premium", "Cupping Premium"), ("Cupping Regular", "Cupping Regular"),
-                    ("Cupping All Premix", "Cupping all premixes"), ("Cupping All Cream & Foam", "Cupping all cream & foam"),
-                    ("Cupping Menu Specialty", "Cupping specialty menu"),
-                    ("Test Food WIP Side Dish & Main Course", "Test food WIP side dish & main course", O),
-                    ("Test Food Menu Side Dish", "Test food side dish menu", O),
-                    ("Test Food Menu Main Course", "Test food main course menu", O),
-                    ("Handling & Treatment Product", "Product handling & treatment"),
+                    ("Cupping Semua Premix", "Cupping All Premixes"), ("Cupping Semua Cream & Foam", "Cupping All Cream & Foam"),
+                    # optional (2026-11-02): not every outlet sells the specialty menu
+                    ("Cupping Menu Specialty", "Cupping Specialty Menu", O),
+                    ("Test Food WIP Side Dish & Main Course", "Test Food WIP Side Dish & Main Course", O),
+                    ("Test Food Menu Side Dish", "Test Food Side Dish Menu", O),
+                    ("Test Food Menu Main Course", "Test Food Main Course Menu", O),
+                    ("Handling & Treatment Produk", "Product Handling & Treatment"),
                 ])),
             ]),
         ],
@@ -140,113 +157,181 @@ DEFINITIONS: dict[str, dict] = {
         "titleEn": "Monitoring Outlet",
         "groups": [
             _grp("kebersihan-rating", "Kebersihan dan Rating Outlet", "Outlet Cleanliness and Rating", "5 Indra - Penglihatan", "5 Senses - Sight", [
-                # Outlet Cleanliness = Travel Path SOP Rev. 3 (2026-10-30): 23 points in 5 zones; one photo per point
-                _sec('tp-eksterior', 'Zona 1 — Eksterior & Pintu Masuk', 'Zone 1 — Exterior & entrance', _list('tp-eksterior', [
-            ('Signage, fasad & pintu masuk', 'Signage, fasad & pintu masuk', {"detail": 'Signage outlet · pintu dan kaca depan · papan promo dan jam operasional', "standard": 'Signage menyala dan bersih, kaca bebas bekas tangan, promo yang terpasang masih berjalan, jam operasional terbaca dari luar.', "category": 'Minor', "categoryEn": 'Minor', "note": OPT, "photo": REQ}),
-            ('Area outdoor & sekitar outlet', 'Area outdoor & sekitar outlet', {"detail": 'Meja dan kursi outdoor · trotoar dan area parkir · titik sampah di luar', "standard": 'Tidak ada sampah berserakan atau puntung, furniture pada posisi layout, area sekitar outlet rapi dan akses masuk tidak terhalang.', "category": 'Minor', "categoryEn": 'Minor', "note": OPT, "photo": REQ, "required": False}),
-            ('Tanaman', 'Tanaman', {"detail": 'Tanaman', "standard": 'Menyiram tanaman dan memastikan tanaman tidak mati.', "category": 'Mayor', "categoryEn": 'Major', "note": OPT, "photo": REQ, "required": False}),
+                # Outlet Cleanliness = Travel Path SOP Rev. 3 (2026-10-30), one photo per point; Ambience, Grooming & Kesiapan
+                # Crew and Cupping & Test Food Daily removed (2026-11-02)
+                _sec('tp-eksterior', 'Zona 1 — Eksterior & Pintu Masuk', 'Zone 1 — Exterior & Entrance', _list('tp-eksterior', [
+                    _tp('Signage, Fasad & Pintu Masuk', 'Signage, Facade & Entrance', 'Minor',
+                        'Signage outlet · pintu dan kaca depan · papan promo dan jam operasional',
+                        'Outlet signage · front door and glass · promo board and opening hours',
+                        'Signage menyala dan bersih, kaca bebas bekas tangan, promo yang terpasang masih berjalan, jam operasional terbaca dari luar.',
+                        'Signage lit and clean, glass free of hand marks, the promos shown still running, opening hours readable from outside.'),
+                    _tp('Area Outdoor & Sekitar Outlet', 'Outdoor Area & Surroundings', 'Minor',
+                        'Meja dan kursi outdoor · trotoar dan area parkir · titik sampah di luar',
+                        'Outdoor tables and chairs · sidewalk and parking · outside bins',
+                        'Tidak ada sampah berserakan atau puntung, furniture pada posisi layout, area sekitar outlet rapi dan akses masuk tidak terhalang.',
+                        'No litter or cigarette butts, furniture in its layout position, the surroundings tidy and the entrance not blocked.', required=False),
+                    _tp('Tanaman', 'Plants', 'Mayor', 'Tanaman', 'Plants',
+                        'Menyiram tanaman dan memastikan tanaman tidak mati.', 'Plants watered and none of them dead.', required=False),
                 ])),
-                _sec('tp-customer', 'Zona 2 — Area Customer', 'Zone 2 — Customer area', _list('tp-customer', [
-            ('Lantai, meja & kursi', 'Lantai, meja & kursi', {"detail": 'Lantai area customer · meja dan kursi · dinding, kaca, pencahayaan', "standard": 'Lantai bersih dan kering tanpa tumpahan, meja sudah di-clear dan dilap, kursi sesuai layout, semua lampu menyala.', "category": 'Mayor', "categoryEn": 'Major', "note": OPT, "photo": REQ}),
-            ('Ambience', 'Ambience', {"detail": 'Foto area duduk dari sudut customer · layar/remote AC · sumber musik', "standard": 'Suhu AC 16–19 °C, playlist sesuai standar dan volume tidak mengganggu percakapan, tidak ada bau asing, colokan dan Wi-Fi berfungsi.', "category": 'Minor', "categoryEn": 'Minor', "note": OPT, "photo": REQ}),
-            ('Toilet / restroom', 'Toilet / restroom', {"detail": 'Lantai & kloset · wastafel & cermin · sabun, tisu, tempat sampah · kartu kontrol kebersihan', "standard": 'Bersih, kering, tidak berbau. Sabun dan tisu tersedia, tempat sampah tidak penuh, kartu kontrol terisi sesuai jam pemeriksaan.', "category": 'Mayor', "categoryEn": 'Major', "note": OPT, "photo": REQ, "required": False}),
-            ('Display produk & merchandise', 'Display produk & merchandise', {"detail": 'Showcase pastry atau produk siap jual · label tanggal / best before · display merchandise dan harga', "standard": 'Tidak ada produk lewat masa simpan di display, semua produk berlabel tanggal, showcase pada suhu standar, harga terbaca dan sesuai POS.', "category": 'Kritikal', "categoryEn": 'Critical', "note": OPT, "photo": REQ, "required": False}),
+                _sec('tp-customer', 'Zona 2 — Area Customer', 'Zone 2 — Customer Area', _list('tp-customer', [
+                    _tp('Lantai, Meja & Kursi', 'Floor, Tables & Chairs', 'Mayor',
+                        'Lantai area customer · meja dan kursi · dinding, kaca, pencahayaan',
+                        'Customer area floor · tables and chairs · walls, glass, lighting',
+                        'Lantai bersih dan kering tanpa tumpahan, meja sudah di-clear dan dilap, kursi sesuai layout, semua lampu menyala.',
+                        'Floor clean and dry with no spills, tables cleared and wiped, chairs in layout, every light on.'),
+                    _tp('Toilet / Restroom', 'Toilet / Restroom', 'Mayor',
+                        'Lantai & kloset · wastafel & cermin · sabun, tisu, tempat sampah · kartu kontrol kebersihan',
+                        'Floor & toilet bowl · sink & mirror · soap, tissue, bin · cleaning control card',
+                        'Bersih, kering, tidak berbau. Sabun dan tisu tersedia, tempat sampah tidak penuh, kartu kontrol terisi sesuai jam pemeriksaan.',
+                        'Clean, dry, no odour. Soap and tissue available, the bin not full, the control card filled at the check times.', required=False),
+                    _tp('Display Produk & Merchandise', 'Product & Merchandise Display', 'Kritikal',
+                        'Showcase pastry atau produk siap jual · label tanggal / best before · display merchandise dan harga',
+                        'Pastry or ready-to-sell showcase · date / best-before labels · merchandise display and prices',
+                        'Tidak ada produk lewat masa simpan di display, semua produk berlabel tanggal, showcase pada suhu standar, harga terbaca dan sesuai POS.',
+                        'No product past its shelf life on display, every product date-labelled, showcase at standard temperature, prices readable and matching the POS.', required=False),
                 ])),
-                _sec('tp-counter', 'Zona 3 — Counter & Bar', 'Zone 3 — Counter & bar', _list('tp-counter', [
-            ('Kasir, antrian & menu board', 'Kasir, antrian & menu board', {"detail": 'Area kasir dan jalur antrian · menu board atau digital menu · daftar item habis', "standard": 'Meja kasir rapi tanpa barang pribadi, POS dan printer berfungsi, menu board bersih dan harga sesuai sistem, item habis sudah ditandai dan diinformasikan ke crew.', "category": 'Mayor', "categoryEn": 'Major', "note": OPT, "photo": REQ}),
-            ('Bar counter & station', 'Bar counter & station', {"detail": 'Bar counter tampak depan · bar mat dan area bawah counter · rak cup, lid, sedotan', "standard": 'Counter bersih dari tumpahan, tidak ada alat kotor menumpuk, packaging tersimpan tertutup dan tidak menyentuh lantai, station siap sesuai par level.', "category": 'Mayor', "categoryEn": 'Major', "note": OPT, "photo": REQ}),
-            ('Mesin espresso, grinder & kalibrasi', 'Mesin espresso, grinder & kalibrasi', {"detail": 'Group head dan steam wand · hopper dan grinder · catatan kalibrasi shift (dose, yield, waktu)', "standard": 'Group head sudah di-backflush, steam wand bebas residu susu dan di-purge, hopper bersih, hasil kalibrasi dalam rentang resep dan tercatat, susu steam 60–66 °C.', "category": 'Kritikal', "categoryEn": 'Critical', "note": OPT, "photo": REQ}),
-            ('Tools: sealer, can sealer, blender', 'Tools: sealer, can sealer, blender', {"detail": 'Foto close-up tiap alat dalam kondisi siap pakai', "standard": 'Alat bersih dari residu produk, tidak berkarat atau rusak, kabel aman, hasil seal rapat pada uji pertama.', "category": 'Mayor', "categoryEn": 'Major', "note": OPT, "photo": REQ}),
-            ('Hand sink & area pencucian alat', 'Hand sink & area pencucian alat', {"detail": 'Hand sink crew · area cuci alat · rak pengeringan', "standard": 'Air mengalir, sabun dan pengering tangan tersedia. Hand sink tidak dipakai mencuci alat atau menumpuk barang. Alat bersih disimpan terbalik dan kering.', "category": 'Kritikal', "categoryEn": 'Critical', "note": OPT, "photo": REQ}),
-            ('Ice cube & ice bin', 'Ice cube & ice bin', {"detail": 'Ice cube dalam plastik klip di penyimpanan · label tanggal produksi · ice bin dan scoop', "standard": 'Plastik klip tertutup rapat dan tidak bocor, berlabel tanggal dan dipakai FIFO, ice bin bersih, scoop disimpan di luar es dengan pegangan tidak menyentuh es.', "category": 'Kritikal', "categoryEn": 'Critical', "note": OPT, "photo": REQ}),
-            ('Waste bin area bar', 'Waste bin area bar', {"detail": 'Waste bin di area bar dan kasir', "standard": 'Tertutup, tidak penuh, kantong tidak bocor, tidak ada cairan menggenang di dasar bin.', "category": 'Minor', "categoryEn": 'Minor', "note": OPT, "photo": REQ}),
+                _sec('tp-counter', 'Zona 3 — Counter & Bar', 'Zone 3 — Counter & Bar', _list('tp-counter', [
+                    _tp('Kasir, Antrean & Menu Board', 'Cashier, Queue & Menu Board', 'Mayor',
+                        'Area kasir dan jalur antrean · menu board atau digital menu · daftar item habis',
+                        'Cashier area and queue line · menu board or digital menu · sold-out list',
+                        'Meja kasir rapi tanpa barang pribadi, POS dan printer berfungsi, menu board bersih dan harga sesuai sistem, item habis sudah ditandai dan diinformasikan ke crew.',
+                        'Cashier desk tidy with no personal items, POS and printer working, menu board clean and prices matching the system, sold-out items marked and told to the crew.'),
+                    _tp('Bar Counter & Station', 'Bar Counter & Station', 'Mayor',
+                        'Bar counter tampak depan · bar mat dan area bawah counter · rak cup, lid, sedotan',
+                        'Bar counter from the front · bar mat and under the counter · cup, lid and straw racks',
+                        'Counter bersih dari tumpahan, tidak ada alat kotor menumpuk, packaging tersimpan tertutup dan tidak menyentuh lantai, station siap sesuai par level.',
+                        'Counter free of spills, no dirty tools piling up, packaging stored closed and off the floor, station ready to par level.'),
+                    # optional (2026-11-02)
+                    _tp('Mesin Espresso, Grinder & Kalibrasi', 'Espresso Machine, Grinder & Calibration', 'Kritikal',
+                        'Group head dan steam wand · hopper dan grinder · catatan kalibrasi shift (dose, yield, waktu)',
+                        'Group head and steam wand · hopper and grinder · shift calibration notes (dose, yield, time)',
+                        'Group head sudah di-backflush, steam wand bebas residu susu dan di-purge, hopper bersih, hasil kalibrasi dalam rentang resep dan tercatat, susu steam 60–66 °C.',
+                        'Group head backflushed, steam wand purged and free of milk residue, hopper clean, calibration within the recipe range and recorded, steamed milk 60–66 °C.', required=False),
+                    _tp('Tools: Sealer, Can Sealer, Blender', 'Tools: Sealer, Can Sealer, Blender', 'Mayor',
+                        'Foto close-up tiap alat dalam kondisi siap pakai', 'Close-up photo of each tool ready to use',
+                        'Alat bersih dari residu produk, tidak berkarat atau rusak, kabel aman, hasil seal rapat pada uji pertama.',
+                        'Tools free of product residue, no rust or damage, cables safe, the seal tight on the first test.'),
+                    _tp('Hand Sink & Area Pencucian Alat', 'Hand Sink & Tool Washing Area', 'Kritikal',
+                        'Hand sink crew · area cuci alat · rak pengeringan', 'Crew hand sink · tool washing area · drying rack',
+                        'Air mengalir, sabun dan pengering tangan tersedia. Hand sink tidak dipakai mencuci alat atau menumpuk barang. Alat bersih disimpan terbalik dan kering.',
+                        'Running water, soap and hand dryer available. The hand sink is not used to wash tools or store items. Clean tools stored upside down and dry.'),
+                    _tp('Ice Cube & Ice Bin', 'Ice Cubes & Ice Bin', 'Kritikal',
+                        'Ice cube dalam plastik klip di penyimpanan · label tanggal produksi · ice bin dan scoop',
+                        'Ice cubes in clip bags in storage · production date label · ice bin and scoop',
+                        'Plastik klip tertutup rapat dan tidak bocor, berlabel tanggal dan dipakai FIFO, ice bin bersih, scoop disimpan di luar es dengan pegangan tidak menyentuh es.',
+                        'Clip bags sealed and not leaking, date-labelled and used FIFO, ice bin clean, scoop kept out of the ice with the handle not touching it.'),
+                    _tp('Waste Bin Area Bar', 'Bar Area Waste Bin', 'Minor',
+                        'Waste bin di area bar dan kasir', 'Waste bins at the bar and the cashier',
+                        'Tertutup, tidak penuh, kantong tidak bocor, tidak ada cairan menggenang di dasar bin.',
+                        'Closed, not full, bag not leaking, no liquid pooling at the bottom.'),
                 ])),
-                _sec('tp-boh', 'Zona 4 — Back of House', 'Zone 4 — Back of house', _list('tp-boh', [
-            ('Chiller & freezer', 'Chiller & freezer', {"detail": 'Tampak luar dan dalam · seal pintu · display suhu · susun bahan di dalam', "standard": 'Chiller 1–4 °C dan freezer −18 °C atau lebih rendah, angka terbaca di foto. Seal rapat, tidak ada bunga es berlebih atau kebocoran, bahan tertutup dan berlabel, produk siap saji tidak di bawah bahan mentah.', "category": 'Kritikal', "categoryEn": 'Critical', "note": OPT, "photo": REQ}),
-            ('Storage, FIFO & label', 'Storage, FIFO & label', {"detail": 'Rak dry storage · kemasan bahan baku dan labelnya · lantai dan dinding storage', "standard": 'Tersusun FIFO dan berlabel tanggal terima, tidak ada kemasan rusak atau kedaluwarsa, bahan minimal 15 cm di atas lantai dan tidak menempel dinding, area kering dan bebas hama.', "category": 'Kritikal', "categoryEn": 'Critical', "note": OPT, "photo": REQ}),
-            ('Chemical & sanitasi', 'Chemical & sanitasi', {"detail": 'Rak penyimpanan chemical · botol sanitizer dan kain lap · test strip', "standard": 'Chemical disimpan terpisah dan tidak di atas bahan pangan, semua botol berlabel dan tidak dipindah ke wadah minuman, sanitizer pada konsentrasi standar dan diganti sesuai jadwal, kain lap bersih.', "category": 'Kritikal', "categoryEn": 'Critical', "note": OPT, "photo": REQ}),
-            ('Area sampah akhir & drainase', 'Area sampah akhir & drainase', {"detail": 'Tempat pembuangan akhir di luar outlet · grease trap · floor drain', "standard": 'Sampah tertutup rapat dan tidak menumpuk, tidak ada bau menyengat atau lalat, saluran air lancar, grease trap dibersihkan sesuai jadwal.', "category": 'Mayor', "categoryEn": 'Major', "note": OPT, "photo": REQ, "required": False}),
-            ('Pest control', 'Pest control', {"detail": 'Titik rawan: sudut storage, bawah sink, celah pintu · perangkap dan kartu kunjungan pest control', "standard": 'Tidak ada jejak hama (kotoran, gigitan kemasan, serangga), celah pintu dan ventilasi tertutup, perangkap terpasang di titik standar, kunjungan terakhir tercatat dan belum lewat jadwal.', "category": 'Kritikal', "categoryEn": 'Critical', "note": OPT, "photo": REQ}),
-            ('Keselamatan & kelistrikan', 'Keselamatan & kelistrikan', {"detail": 'APAR dan tanggal inspeksinya · panel listrik dan kabel area bar · jalur keluar · kotak P3K', "standard": 'APAR terpasang, tekanan pada zona hijau, masa inspeksi berlaku. Tidak ada kabel terbuka atau sambungan basah. Jalur keluar bebas hambatan, isi P3K lengkap.', "category": 'Kritikal', "categoryEn": 'Critical', "note": OPT, "photo": REQ}),
+                _sec('tp-boh', 'Zona 4 — Back of House', 'Zone 4 — Back of House', _list('tp-boh', [
+                    _tp('Chiller & Freezer', 'Chiller & Freezer', 'Kritikal',
+                        'Tampak luar dan dalam · seal pintu · display suhu · susunan bahan di dalam',
+                        'Outside and inside · door seal · temperature display · how the stock is arranged',
+                        'Chiller 1–4 °C dan freezer −18 °C atau lebih rendah, angka terbaca di foto. Seal rapat, tidak ada bunga es berlebih atau kebocoran, bahan tertutup dan berlabel, produk siap saji tidak di bawah bahan mentah.',
+                        'Chiller 1–4 °C and freezer −18 °C or lower, readable in the photo. Seal tight, no excess frost or leaks, stock covered and labelled, ready-to-serve products not below raw materials.'),
+                    _tp('Storage, FIFO & Label', 'Storage, FIFO & Labels', 'Kritikal',
+                        'Rak dry storage · kemasan bahan baku dan labelnya · lantai dan dinding storage',
+                        'Dry storage racks · raw material packaging and labels · storage floor and walls',
+                        'Tersusun FIFO dan berlabel tanggal terima, tidak ada kemasan rusak atau kedaluwarsa, bahan minimal 15 cm di atas lantai dan tidak menempel dinding, area kering dan bebas hama.',
+                        'Arranged FIFO and labelled with the receiving date, no damaged or expired packaging, stock at least 15 cm off the floor and away from the wall, area dry and pest-free.'),
+                    _tp('Chemical & Sanitasi', 'Chemicals & Sanitation', 'Kritikal',
+                        'Rak penyimpanan chemical · botol sanitizer dan kain lap · test strip',
+                        'Chemical storage rack · sanitizer bottles and cloths · test strips',
+                        'Chemical disimpan terpisah dan tidak di atas bahan pangan, semua botol berlabel dan tidak dipindah ke wadah minuman, sanitizer pada konsentrasi standar dan diganti sesuai jadwal, kain lap bersih.',
+                        'Chemicals stored apart and not above food, every bottle labelled and never moved into drink containers, sanitizer at standard strength and changed on schedule, cloths clean.'),
+                    _tp('Area Sampah Akhir & Drainase', 'Final Waste Area & Drainage', 'Mayor',
+                        'Tempat pembuangan akhir di luar outlet · grease trap · floor drain',
+                        'Final waste point outside the outlet · grease trap · floor drain',
+                        'Sampah tertutup rapat dan tidak menumpuk, tidak ada bau menyengat atau lalat, saluran air lancar, grease trap dibersihkan sesuai jadwal.',
+                        'Waste closed and not piling up, no strong smell or flies, drains flowing, grease trap cleaned on schedule.', required=False),
+                    _tp('Pest Control', 'Pest Control', 'Kritikal',
+                        'Titik rawan: sudut storage, bawah sink, celah pintu · perangkap dan kartu kunjungan pest control',
+                        'Risk points: storage corners, under the sink, door gaps · traps and the pest control visit card',
+                        'Tidak ada jejak hama (kotoran, gigitan kemasan, serangga), celah pintu dan ventilasi tertutup, perangkap terpasang di titik standar, kunjungan terakhir tercatat dan belum lewat jadwal.',
+                        'No sign of pests (droppings, chewed packaging, insects), door gaps and vents closed, traps at the standard points, the last visit recorded and not overdue.'),
+                    _tp('Keselamatan & Kelistrikan', 'Safety & Electrical', 'Kritikal',
+                        'APAR dan tanggal inspeksinya · panel listrik dan kabel area bar · jalur keluar · kotak P3K',
+                        'Fire extinguisher and its inspection date · electrical panel and bar cables · exit route · first-aid kit',
+                        'APAR terpasang, tekanan pada zona hijau, masa inspeksi berlaku. Tidak ada kabel terbuka atau sambungan basah. Jalur keluar bebas hambatan, isi P3K lengkap.',
+                        'Extinguisher in place, pressure in the green zone, inspection valid. No exposed cables or wet connections. Exit route clear, first-aid kit complete.'),
                 ])),
-                _sec('tp-crew', 'Zona 5 — Crew & Dokumen', 'Zone 5 — Crew & documents', _list('tp-crew', [
-            ('Grooming & kesiapan crew', 'Grooming & kesiapan crew', {"detail": 'Foto crew on duty tampak depan: seragam, apron, penutup kepala, tangan dan kuku', "standard": 'Seragam bersih dan lengkap, apron tidak kotor, kuku pendek tanpa cat, tidak memakai aksesori tangan, crew sehat dan tidak bergejala.', "category": 'Mayor', "categoryEn": 'Major', "note": OPT, "photo": REQ}),
-            ('Cupping & test food daily', 'Cupping & test food daily', {"detail": 'Foto cupping semua premix dan test food beserta hasilnya', "standard": 'Premix dan food dalam kondisi baik (takaran benar, tidak basi, rasa sesuai).', "category": 'Kritikal', "categoryEn": 'Critical', "note": OPT, "photo": REQ}),
-            ('Area staff & loker', 'Area staff & loker', {"detail": 'Area loker dan tempat istirahat staf', "standard": 'Rapi, barang pribadi tidak bercampur dengan bahan baku atau alat produksi, tidak ada makanan atau minuman pribadi di area produksi.', "category": 'Minor', "categoryEn": 'Minor', "note": OPT, "photo": REQ, "required": False}),
-            ('Log & dokumen outlet', 'Log & dokumen outlet', {"detail": 'Log suhu harian · checklist cleaning · kartu kontrol toilet · catatan kalibrasi termometer', "standard": 'Semua log terisi pada jam yang seharusnya dan ditandatangani, tidak ada baris kosong atau diisi belakangan, termometer dikalibrasi sesuai jadwal.', "category": 'Mayor', "categoryEn": 'Major', "note": OPT, "photo": REQ}),
+                _sec('tp-crew', 'Zona 5 — Crew & Dokumen', 'Zone 5 — Crew & Documents', _list('tp-crew', [
+                    _tp('Area Staff & Loker', 'Staff Area & Lockers', 'Minor',
+                        'Area loker dan tempat istirahat staf', 'Locker area and staff rest area',
+                        'Rapi, barang pribadi tidak bercampur dengan bahan baku atau alat produksi, tidak ada makanan atau minuman pribadi di area produksi.',
+                        'Tidy, personal items kept apart from raw materials and tools, no personal food or drinks in the production area.', required=False),
+                    _tp('Log & Dokumen Outlet', 'Outlet Logs & Documents', 'Mayor',
+                        'Log suhu harian · checklist cleaning · kartu kontrol toilet · catatan kalibrasi termometer',
+                        'Daily temperature log · cleaning checklist · toilet control card · thermometer calibration record',
+                        'Semua log terisi pada jam yang seharusnya dan ditandatangani, tidak ada baris kosong atau diisi belakangan, termometer dikalibrasi sesuai jadwal.',
+                        'Every log filled at its time and signed, no blank or back-filled rows, thermometer calibrated on schedule.'),
                 ])),
                 # platform = the stars of the outlet on that platform go with the item (2026-10-21): Google from
                 # Aggregator → Google Maps (automatic), the delivery apps typed by the PIC
-                # the 10 areas used before 2026-10-30: kept for the visits that rated them
-                _sec("kebersihan", "Kebersihan Outlet (daftar lama)", "Outlet Cleanliness (old list)", _list("kebersihan", [
-                    ("Kebersihan Area Bar Bersih", "Clean bar area"), ("Kebersihan Area Bar Kotor", "Dirty bar area"),
-                    ("Kebersihan Area Kitchen", "Kitchen area"), ("Kebersihan Tools", "Tools"),
-                    ("Kebersihan Area Facade / Halaman Depan", "Facade / front yard"), ("Kebersihan Area Indoor", "Indoor area"),
-                    ("Kebersihan Area Outdoor", "Outdoor area"), ("Kebersihan Area Toilet & Musholla", "Toilet & prayer room"),
-                    ("Kebersihan Area Warehouse", "Warehouse area"), ("Kebersihan Area Mess", "Staff mess"),
-                ]), retired=True),
                 _sec("rating", "Rating Outlet", "Outlet Rating", _list("rating", [
-                    ("Rating Google", "Google rating", {"platform": "google"}),
-                    ("Rating GoFood", "GoFood rating", {"platform": "gofood"}),
-                    ("Rating GrabFood", "GrabFood rating", {"platform": "grabfood"}),
-                    ("Rating ShopeeFood", "ShopeeFood rating", {"platform": "shopeefood"}),
-                    ("Complain Customer (7 hari ke belakang)", "Customer complaints (last 7 days)"),
+                    ("Rating Google", "Google Rating", {"platform": "google"}),
+                    ("Rating GoFood", "GoFood Rating", {"platform": "gofood"}),
+                    ("Rating GrabFood", "GrabFood Rating", {"platform": "grabfood"}),
+                    ("Rating ShopeeFood", "ShopeeFood Rating", {"platform": "shopeefood"}),
+                    ("Komplain Customer (7 Hari Terakhir)", "Customer Complaints (Last 7 Days)"),
                 ])),
             ]),
-            _grp("barista-flow", "Barista + Flow Bar", "Barista + Bar Flow", "Memastikan peran dan tanggung jawab di bar",
-                 "Roles and responsibilities in the bar", [
+            _grp("barista-flow", "Barista + Flow Bar", "Barista + Bar Flow", "Memastikan Peran dan Tanggung Jawab di Bar",
+                 "Roles and Responsibilities in the Bar", [
                 _sec("barista", "Barista", "Barista", _list("barista", [
-                    ("Grooming Barista", "Barista grooming"),
-                    ("Kedisiplinan Barista", "Barista discipline", O),
-                    ("Nama Barista Telat", "Names of late baristas", {"kind": "text", "required": False}),
-                    ("Update Rekap Absen Barista", "Barista attendance recap updated"),
+                    ("Grooming Barista", "Barista Grooming"),
+                    ("Kedisiplinan Barista", "Barista Discipline", O),
+                    ("Nama Barista Telat", "Names of Late Baristas", {"kind": "text", "required": False}),
+                    ("Update Rekap Absen Barista", "Barista Attendance Recap Updated"),
                 ])),
                 # Speed of service and roles: a note is required, no photo needed; the bar flow: note and photo
                 _sec("flow-bar", "Flow Bar", "Bar Flow", _list("flow-bar", [
-                    ("Speed Of Service", "Speed of service", EVIDENCE_NOTE_ONLY),
-                    ("Kesesuaian Role Barista", "Barista roles followed", EVIDENCE_NOTE_ONLY),
-                    ("Kesesuaian Flow Bar", "Bar flow followed"),
+                    ("Speed of Service", "Speed of Service", EVIDENCE_NOTE_ONLY),
+                    ("Kesesuaian Role Barista", "Barista Roles Followed", EVIDENCE_NOTE_ONLY),
+                    ("Kesesuaian Flow Bar", "Bar Flow Followed"),
                 ])),
             ]),
-            _grp("hospitality", "Hospitality", "Hospitality", "5 Indra - Pendengaran - Product Knowledge", "5 Senses - Hearing - Product knowledge", [
+            _grp("hospitality", "Hospitality", "Hospitality", "5 Indra - Pendengaran - Product Knowledge", "5 Senses - Hearing - Product Knowledge", [
                 _sec("hospitality", "Hospitality", "Hospitality", _list("hospitality", [
-                    ("Product Knowledge Barista", "Barista product knowledge", EVIDENCE_NOTE_ONLY),
-                    ("Greetings Barista", "Barista greetings", EVIDENCE_NOTE_ONLY),
-                    ("Offering Product Barista", "Barista product offering", EVIDENCE_NOTE_ONLY),
-                    ("Music", "Music", EVIDENCE_NOTE_ONLY),
+                    ("Product Knowledge Barista", "Barista Product Knowledge", EVIDENCE_NOTE_ONLY),
+                    ("Greetings Barista", "Barista Greetings", EVIDENCE_NOTE_ONLY),
+                    ("Offering Product Barista", "Barista Product Offering", EVIDENCE_NOTE_ONLY),
+                    ("Musik", "Music", EVIDENCE_NOTE_ONLY),
                 ])),
             ]),
-            _grp("smell", "Aroma", "Smell", "5 Indra - Wangi Outlet - Alat Kebersihan", "5 Senses - Outlet scent - Cleaning tools", [
+            _grp("smell", "Aroma", "Smell", "5 Indra - Wangi Outlet - Alat Kebersihan", "5 Senses - Outlet Scent - Cleaning Tools", [
                 _sec("alat-kebersihan", "Kelengkapan Alat Kebersihan", "Cleaning Tools Complete", _list("alat-kebersihan", [
-                    ("Sapu", "Broom"), ("Pengki", "Dustpan"), ("Pel Area Bar", "Bar area mop"), ("Pel Area Customer", "Customer area mop"),
-                    ("Wipper", "Squeegee"), ("Pel Karet", "Rubber mop"), ("Sikat Mesin Kopi & Grinder", "Coffee machine & grinder brush", O),
-                    ("Lap Area Bar Depan", "Front bar cloth"), ("Lap Area Kitchen & Bar Belakang", "Kitchen & back bar cloth"),
-                    ("Lap Area Customer", "Customer area cloth"), ("Lap Gelas", "Glass cloth", O), ("Lap Tools", "Tools cloth"),
-                    ("Lap Mesin Kopi", "Coffee machine cloth", O), ("Lap Steam Milk", "Steam wand cloth", O),
-                    ("Lap Basket Porta", "Portafilter basket cloth", O),
+                    ("Sapu", "Broom"), ("Pengki", "Dustpan"), ("Pel Area Bar", "Bar Area Mop"), ("Pel Area Customer", "Customer Area Mop"),
+                    ("Wiper", "Squeegee"), ("Pel Karet", "Rubber Mop"), ("Sikat Mesin Kopi & Grinder", "Coffee Machine & Grinder Brush", O),
+                    ("Lap Area Bar Depan", "Front Bar Cloth"), ("Lap Area Kitchen & Bar Belakang", "Kitchen & Back Bar Cloth"),
+                    ("Lap Area Customer", "Customer Area Cloth"), ("Lap Gelas", "Glass Cloth", O), ("Lap Tools", "Tools Cloth"),
+                    ("Lap Mesin Kopi", "Coffee Machine Cloth", O), ("Lap Steam Milk", "Steam Wand Cloth", O),
+                    ("Lap Basket Porta", "Portafilter Basket Cloth", O),
                 ])),
                 _sec("chemical", "Kelengkapan Chemical", "Chemicals Complete", _list("chemical", [
-                    ("Sabun Kaca", "Glass cleaner"), ("Sabun Cuci Piring", "Dish soap"), ("Sabun Cuci Tangan", "Hand soap"),
-                    ("Sabun Lantai", "Floor cleaner"), ("Sabun Toilet", "Toilet cleaner", O), ("Pengharum AC", "AC freshener"),
-                    ("Pengharum Ruangan", "Room freshener"), ("Pengharum Mushola & Toilet", "Prayer room & toilet freshener", O),
+                    ("Sabun Kaca", "Glass Cleaner"), ("Sabun Cuci Piring", "Dish Soap"), ("Sabun Cuci Tangan", "Hand Soap"),
+                    ("Sabun Lantai", "Floor Cleaner"), ("Sabun Toilet", "Toilet Cleaner", O), ("Pengharum AC", "AC Freshener"),
+                    ("Pengharum Ruangan", "Room Freshener"), ("Pengharum Musala & Toilet", "Prayer Room & Toilet Freshener", O),
                 ])),
             ]),
             _grp("kenyamanan", "Kenyamanan Outlet", "Outlet Comfort", "5 Indra - Suhu Ruangan & Kenyamanan Outlet",
-                 "5 Senses - Room temperature & outlet comfort", [
+                 "5 Senses - Room Temperature & Outlet Comfort", [
                 _sec("kenyamanan", "Kenyamanan Outlet", "Outlet Comfort", _list("kenyamanan", [
-                    ("Kondisi Ruangan", "Room condition"),
-                    ("Kondisi Furniture (Sofa, Meja, Karpet, Kursi)", "Furniture condition (sofa, table, carpet, chair)"),
-                    ("Kondisi Internet Customer", "Customer internet"), ("Kondisi Merchandise", "Merchandise condition", O),
+                    ("Kondisi Ruangan", "Room Condition"),
+                    ("Kondisi Furniture (Sofa, Meja, Karpet, Kursi)", "Furniture Condition (Sofa, Table, Carpet, Chair)"),
+                    ("Kondisi Internet Customer", "Customer Internet"), ("Kondisi Merchandise", "Merchandise Condition", O),
                 ])),
             ]),
             # added 2026-10-21 (user request): the workbook's ADMINISTRASI & FINANCE; SO Packaging became SO Daily (2026-10-27)
             _grp("administrasi-finance", "Administrasi & Finance", "Administration & Finance", "Administrasi & Finance Outlet",
-                 "Outlet administration & finance", [
+                 "Outlet Administration & Finance", [
                 _sec("administrasi-finance", "Administrasi & Finance", "Administration & Finance", _list("administrasi-finance", [
-                    ("SO Daily", "Daily stock opname"), ("SO Weekly / Monthly", "Weekly / monthly stock opname"),
-                    ("Daily Cupping", "Daily cupping"), ("Dokumentasi Surat Jalan", "Delivery note documentation"),
-                    ("Form Selfpickup", "Self-pickup form", O), ("Penggunaan Pitty Cash Terkontrol", "Petty cash use under control"),
-                    ("Setoran Uang Pembelian Menggunakan Cash", "Cash purchase money deposited"),
+                    ("SO Daily", "Daily Stock Opname"), ("SO Weekly / Monthly", "Weekly / Monthly Stock Opname"),
+                    ("Daily Cupping", "Daily Cupping"), ("Dokumentasi Surat Jalan", "Delivery Note Documentation"),
+                    ("Form Self Pickup", "Self Pickup Form", O), ("Penggunaan Petty Cash Terkontrol", "Petty Cash Use Under Control"),
+                    ("Setoran Uang Pembelian Menggunakan Cash", "Cash Purchase Money Deposited"),
                 ])),
             ]),
         ],
@@ -303,8 +388,9 @@ def all_items(form: str, retired: bool = False) -> list[dict]:
     return out
 
 
-def _counts(form: str, answers: dict) -> dict:
-    rated = [answers.get(it["key"], {}).get("rating") for it in all_items(form) if it["kind"] == "rating"]
+def _counts(form: str, answers: dict, group: Optional[str] = None) -> dict:
+    """UNDER / MEET / EXCEED of a visit over the items asked at its outlet (branch group); score = MEET + EXCEED of the rated."""
+    rated = [answers.get(it["key"], {}).get("rating") for it in all_items(form) if it["kind"] == "rating" and applies(it, group)]
     c = {r: sum(1 for x in rated if x == r) for r in RATINGS}
     done = sum(c.values())
     return {"under": c["UNDER"], "meet": c["MEET"], "exceed": c["EXCEED"], "rated": done, "total": len(rated),
@@ -326,8 +412,15 @@ def group_of(branch_code: str) -> Optional[str]:
     return r["code"] if r else None
 
 
+def applies(item: dict, group: Optional[str]) -> bool:
+    """Is the item asked at an outlet of this branch group? (an outlet without a group is asked everything)"""
+    return not item.get("onlyFor") or group is None or group in item["onlyFor"]
+
+
 def is_required(item: dict, group: Optional[str]) -> bool:
     """Must the item be rated before sending, at an outlet of this branch group?"""
+    if not applies(item, group):
+        return False
     return bool(item.get("required", True)) or (group is not None and group in (item.get("requiredFor") or []))
 
 
@@ -492,7 +585,7 @@ def save_answers(form: str, user: dict, visit_id: str, patch: dict) -> dict:
             cur["by"] = user.get("full_name") or user["username"]
         answers[key] = {k: v for k, v in cur.items() if v is not None}
     answers = {k: v for k, v in answers.items() if v}
-    counts = _counts(form, answers)
+    counts = _counts(form, answers, group_of(row["branch_code"]))
     db.fetchrow(f"""UPDATE {T} SET answers = %s::jsonb, counts = %s::jsonb, score = %s, updated_at = now()
                     WHERE id::text = %s RETURNING id""", (json.dumps(answers), json.dumps(counts), counts["score"], visit_id))
     return {"answers": answers, "counts": counts}
@@ -526,8 +619,8 @@ def delete_photo(form: str, user: dict, visit_id: str, photo_id: str) -> dict:
     return {"photos": photos_of(visit_id)}
 
 
-def unrated(form: str, answers: dict) -> int:
-    return sum(1 for it in all_items(form) if it["kind"] == "rating" and not (answers.get(it["key"]) or {}).get("rating"))
+def unrated(form: str, answers: dict, group: Optional[str] = None) -> int:
+    return sum(1 for it in all_items(form) if it["kind"] == "rating" and applies(it, group) and not (answers.get(it["key"]) or {}).get("rating"))
 
 
 def missing(form: str, answers: dict, photos: list[dict], group: Optional[str] = None) -> list[dict]:
@@ -574,7 +667,8 @@ def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Opti
         raise VisitError(f"Belum bisa dikirim: {sum(1 for t in todo if t['need'] == 'rating')} butir wajib belum dinilai")
     if todo:
         raise VisitError(f"Belum bisa dikirim: {len(todo)} butir yang dinilai belum lengkap catatan/foto/gram")
-    if unrated(form, row["answers"] or {}) == len([i for i in all_items(form) if i["kind"] == "rating"]):
+    group = group_of(row["branch_code"])
+    if unrated(form, row["answers"] or {}, group) == len([i for i in all_items(form) if i["kind"] == "rating" and applies(i, group)]):
         raise VisitError("Belum ada butir yang dinilai")
     # the signature is optional (like the stock opname); a name goes with it
     sig_type, sig = parse_photo(signature) if signature else (None, None)
@@ -592,7 +686,7 @@ def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Opti
         answers[it["key"]] = {**cur, **({k: g[k] for k in ("stars", "reviews", "source", "fetchedAt")} if g else {})}
         if not answers[it["key"]]:
             answers.pop(it["key"])
-    counts = _counts(form, answers)
+    counts = _counts(form, answers, group)
     db.fetchrow(
         f"""UPDATE {T} SET status = 'SUBMITTED', submitted_at = now(), updated_at = now(), answers = %s::jsonb, counts = %s::jsonb, score = %s,
                 latitude = %s, longitude = %s, accuracy_m = %s, outlet_latitude = %s, outlet_longitude = %s, radius_m = %s,
@@ -648,9 +742,12 @@ def monitor(form: str, date_from: date, date_to: date, branches: Optional[list[s
                 f["count"] += 1
                 f["branches"].add(r["branch_name"])
     data = []
+    from app.pic_checkin import groups_of
+    group = groups_of(sorted({r["branch_code"] for r in rows}))
     for r in rows:
         v = _view(r)
         v["photoCount"] = r["photo_count"]
+        v["branchGroup"] = group.get(r["branch_code"])  # CCI / CTG / CTGP (2026-11-02)
         data.append(v)
     scores = [v["score"] for v in data if v["score"] is not None]
     summary = {"visits": len(data), "branches": len({v["branchCode"] for v in data}), "pics": len({v["userId"] for v in data}),
@@ -659,6 +756,19 @@ def monitor(form: str, date_from: date, date_to: date, branches: Optional[list[s
                "score": round(sum(scores) / len(scores), 1) if scores else None,
                "outside": sum(1 for v in data if v["outsideRadius"])}
     order = {s["key"]: i for i, s in enumerate(s for g in DEFINITIONS[form]["groups"] for s in g["sections"])}
+    # per branch group: visits, outlets, average score, UNDER (2026-11-02)
+    per_group: dict[str, dict] = {}
+    for v in data:
+        x = per_group.setdefault(v["branchGroup"] or "—", {"code": v["branchGroup"] or "—", "visits": 0, "outlets": set(), "scores": [], "under": 0, "pics": set()})
+        x["visits"] += 1
+        x["outlets"].add(v["branchCode"])
+        x["pics"].add(v["userId"])
+        x["under"] += v["counts"]["under"]
+        if v["score"] is not None:
+            x["scores"].append(v["score"])
+    by_group = [{"code": x["code"], "visits": x["visits"], "outlets": len(x["outlets"]), "pics": len(x["pics"]), "under": x["under"],
+                 "score": round(sum(x["scores"]) / len(x["scores"]), 1) if x["scores"] else None}
+                for x in sorted(per_group.values(), key=lambda x: (x["code"] == "—", x["code"]))]
     top = sorted(findings.values(), key=lambda f: (-f["count"], f["label"]))[:15]
     pics = {}
     for v in data:
@@ -670,7 +780,7 @@ def monitor(form: str, date_from: date, date_to: date, branches: Optional[list[s
             vals = [float(a["stars"]) for r in rows if (a := (r["answers"] or {}).get(it["key"]) or {}).get("stars") is not None]
             platforms.append({"key": it["key"], "platform": it["platform"], "label": it["label"], "labelEn": it.get("labelEn"),
                               "stars": round(sum(vals) / len(vals), 2) if vals else None, "visits": len(vals)})
-    return {"definition": DEFINITIONS[form], "data": data, "summary": summary, "platforms": platforms,
+    return {"definition": DEFINITIONS[form], "data": data, "summary": summary, "platforms": platforms, "groups": by_group,
             "attendance": attendance(form, date_from, date_to, branches),
             "sections": sorted(sections.values(), key=lambda s: order.get(s["key"], 99)),
             "findings": [{**f, "branches": sorted(f["branches"])} for f in top],

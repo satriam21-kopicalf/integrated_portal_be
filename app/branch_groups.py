@@ -28,7 +28,7 @@ def outlets() -> list[dict]:
 
 
 def list_groups() -> dict:
-    groups = db.fetch(f"SELECT id::text, code, name, description, sort, updated_at FROM {TG} ORDER BY sort, code")
+    groups = db.fetch(f"SELECT id::text, code, name, description, sort, checkin_max_per_day, updated_at FROM {TG} ORDER BY sort, code")
     branches = outlets()
     by_group: dict[str, list[dict]] = {}
     for b in branches:
@@ -48,20 +48,23 @@ def _clean(code: str, name: str) -> tuple[str, str]:
     return code, name
 
 
-def save_group(group_id: Optional[str], code: str, name: str, description: Optional[str], sort: int, actor: Optional[str]) -> dict:
+def save_group(group_id: Optional[str], code: str, name: str, description: Optional[str], sort: int, actor: Optional[str],
+               checkin_max: Optional[int] = None) -> dict:
+    """checkin_max: the PIC check-ins an outlet of the group takes per day (None = once a day, migration 066)."""
     code, name = _clean(code, name)
     clash = db.fetchrow(f"SELECT id::text FROM {TG} WHERE code = %s AND (%s::uuid IS NULL OR id <> %s::uuid)", (code, group_id, group_id))
     if clash:
         raise GroupError(f"Kode {code} sudah dipakai grup lain")
     desc = (description or "").strip()[:300] or None
     if group_id:
-        row = db.fetchrow(f"""UPDATE {TG} SET code = %s, name = %s, description = %s, sort = %s, updated_at = now(), updated_by = %s
-                              WHERE id::text = %s RETURNING id::text""", (code, name, desc, sort, actor, group_id))
+        row = db.fetchrow(f"""UPDATE {TG} SET code = %s, name = %s, description = %s, sort = %s, checkin_max_per_day = %s,
+                                     updated_at = now(), updated_by = %s
+                              WHERE id::text = %s RETURNING id::text""", (code, name, desc, sort, checkin_max, actor, group_id))
         if row is None:
             raise LookupError("Grup tidak ditemukan")
     else:
-        row = db.fetchrow(f"""INSERT INTO {TG} (code, name, description, sort, updated_by) VALUES (%s, %s, %s, %s, %s)
-                              RETURNING id::text""", (code, name, desc, sort, actor))
+        row = db.fetchrow(f"""INSERT INTO {TG} (code, name, description, sort, checkin_max_per_day, updated_by) VALUES (%s, %s, %s, %s, %s, %s)
+                              RETURNING id::text""", (code, name, desc, sort, checkin_max, actor))
     return {"id": row["id"]}
 
 

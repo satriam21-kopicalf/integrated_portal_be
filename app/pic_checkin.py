@@ -9,8 +9,11 @@ A PIC checks in at the outlet he visits:
     (app/face.py) and refuses a photo without one;
   * position: GPS with its accuracy, compared with the outlet's coordinates set in Cost Control → Lokasi Outlet
     (kopicalf kc_master.facility, linked to the ESB branch through facility_esb_map). Same rule as the stock opname
-    (kopicalf 06.9 §12.15): outside the radius when distance − min(accuracy, 100 m) > radius; an outlet without
-    coordinates cannot be checked (no distance, not outside); accuracy worse than 100 m = low accuracy.
+    (kopicalf 06.9 §12.15): outside the radius when distance − min(accuracy, 25 m) > radius; an outlet without
+    coordinates cannot be checked (no distance, not outside); accuracy worse than 100 m = low accuracy. The radius of
+    every Kopi Calf outlet is 50 m (2026-11-02, migration 066).
+  * how often: a PIC checks in at an outlet at most the check-ins per day of its branch group (Monitoring → Branch
+    groups, migration 066; empty = once a day).
 """
 import base64
 import binascii
@@ -27,9 +30,10 @@ from app.database import SCHEMA
 from app.face import count_faces
 
 T = "integration_portal.pic_checkin"
+DEFAULT_RADIUS_M = 50  # an outlet without its own radius (2026-11-02)
 MAX_PHOTO = 3 * 1024 * 1024
 LOW_ACCURACY_M = 100
-ACCURACY_CREDIT_M = 100
+ACCURACY_CREDIT_M = 25  # the GPS accuracy counts at most 25 m on top of the 50 m radius (2026-11-02)
 GLOBAL_ROLES = ("superadmin", "cost_control")
 # pic: PIC Check In · surveyor: Surveyor Check In (migration 039, every Kopi Calf branch whatever the account's scope)
 KINDS = ("pic", "surveyor")
@@ -56,7 +60,7 @@ def judge(lat: float, lng: float, accuracy: Optional[float], outlet: Optional[di
         return {"distance_m": None, "outside_radius": False, "low_accuracy": low}
     d = distance_m(lat, lng, float(outlet["latitude"]), float(outlet["longitude"]))
     credit = min(float(accuracy or 0), ACCURACY_CREDIT_M)
-    return {"distance_m": d, "outside_radius": d - credit > int(outlet.get("radius_m") or 100), "low_accuracy": low}
+    return {"distance_m": d, "outside_radius": d - credit > int(outlet.get("radius_m") or DEFAULT_RADIUS_M), "low_accuracy": low}
 
 
 # ---------------------------------------------------------------- branches of the form
@@ -104,8 +108,18 @@ def branch_options(user: dict, every: bool = False) -> list[dict]:
         names = _names(codes)
         names = {c: names.get(c, c) for c in codes}
     locs = locations(list(names))
-    return sorted(({"code": c, "name": n, **locs.get(c, {"latitude": None, "longitude": None, "radius_m": None})}
+    groups = groups_of(list(names))
+    return sorted(({"code": c, "name": n, "group": groups.get(c), **locs.get(c, {"latitude": None, "longitude": None, "radius_m": None})}
                    for c, n in names.items()), key=lambda b: b["name"])
+
+
+def groups_of(codes: list[str]) -> dict[str, str]:
+    """{branch code: branch group code (CCI, CTG, CTGP …)} of the branches that have one (Monitoring → Branch groups)."""
+    if not codes:
+        return {}
+    return {r["branch_code"]: r["code"] for r in db.fetch(
+        """SELECT m.branch_code, g.code FROM integration_portal.branch_group_member m
+             JOIN integration_portal.branch_group g ON g.id = m.group_id WHERE m.branch_code = ANY(%s)""", (codes,))}
 
 
 # ---------------------------------------------------------------- photo
@@ -220,7 +234,9 @@ def create(user: dict, branch_code: str, photo: str, lat: float, lng: float, acc
     if branch is None:
         raise CheckInError("Cabang tidak tersedia untuk akun Anda")
     if done_today(str(user["id"]), kind).get(branch["code"]):
-        raise CheckInError(f"Anda sudah check in di {branch['name']} hari ini. Check in berikutnya besok.")
+        limit = daily_limits([branch["code"]]).get(branch["code"], 1) if kind == "pic" else 1
+        raise CheckInError(f"Anda sudah check in di {branch['name']} hari ini" + (f" ({limit}x, batas grup outlet)" if limit > 1 else "")
+                           + ". Check in berikutnya besok.")
     photo_type, data = parse_photo(photo)
     faces = count_faces(data)
     if faces is None:
@@ -295,12 +311,32 @@ def recent_of(user_id: str, limit: int = 10, kind: str = "pic") -> list[dict]:
     return out
 
 
-def done_today(user_id: str, kind: str = "pic") -> dict[str, dict]:
-    """{branch code: {id, visitedAt}} of the PIC's check-ins today (WIB): one check in per branch per day."""
-    rows = db.fetch(f"""SELECT DISTINCT ON (branch_code) branch_code, id::text, visited_at FROM {T}
+def daily_limits(codes: list[str]) -> dict[str, int]:
+    """{branch code: check-ins a PIC may do there per day}: the limit of its branch group, else 1."""
+    if not codes:
+        return {}
+    rows = db.fetch("""SELECT m.branch_code, g.checkin_max_per_day FROM integration_portal.branch_group_member m
+                         JOIN integration_portal.branch_group g ON g.id = m.group_id WHERE m.branch_code = ANY(%s)""", (codes,))
+    got = {r["branch_code"]: r["checkin_max_per_day"] for r in rows}
+    return {c: int(got.get(c) or 1) for c in codes}
+
+
+def today_counts(user_id: str, kind: str = "pic") -> dict[str, dict]:
+    """{branch code: {n, id, visitedAt}} of the PIC's check-ins today (WIB), the latest first."""
+    rows = db.fetch(f"""SELECT branch_code, count(*)::int AS n, (array_agg(id::text ORDER BY visited_at DESC))[1] AS id,
+                               max(visited_at) AS visited_at FROM {T}
                         WHERE user_id = %s AND kind = %s AND (visited_at AT TIME ZONE 'Asia/Jakarta')::date = (now() AT TIME ZONE 'Asia/Jakarta')::date
-                        ORDER BY branch_code, visited_at""", (user_id, kind))
-    return {r["branch_code"]: {"id": r["id"], "visitedAt": r["visited_at"].isoformat()} for r in rows}
+                        GROUP BY branch_code""", (user_id, kind))
+    return {r["branch_code"]: {"n": r["n"], "id": r["id"], "visitedAt": r["visited_at"].isoformat()} for r in rows}
+
+
+def done_today(user_id: str, kind: str = "pic") -> dict[str, dict]:
+    """{branch code: {id, visitedAt, count, limit}} of the branches where the PIC has done today's check-ins (WIB): the
+    limit of the branch group (once a day when it has none; the Cost Control check in: once a day)."""
+    counts = today_counts(user_id, kind)
+    limits = daily_limits(list(counts)) if kind == "pic" else {}
+    return {c: {"id": x["id"], "visitedAt": x["visitedAt"], "count": x["n"], "limit": limits.get(c, 1)}
+            for c, x in counts.items() if x["n"] >= limits.get(c, 1)}
 
 
 def monitor(date_from: date, date_to: date, branches: Optional[list[str]], user_id: Optional[str] = None,

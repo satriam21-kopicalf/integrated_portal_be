@@ -1060,7 +1060,7 @@ def schedule(d_from: date, d_to: date, pool: Optional[str]) -> dict:
     if (d_to - d_from).days > 62:
         raise CotrError("Rentang jadwal maksimal 62 hari")
     templates = {t["code"]: _plain(t) for t in db.fetch(f"SELECT * FROM {P}.cotr_shift_template ORDER BY sort")}
-    drivers = db.fetch(f"""SELECT code, name, pool_code, fleet_code, status FROM {P}.cotr_driver
+    drivers = db.fetch(f"""SELECT code, name, nickname, department, pool_code, fleet_code, status FROM {P}.cotr_driver
                             WHERE status <> 'inactive' OR code IN (SELECT driver_code FROM {P}.cotr_schedule
                                                                     WHERE day BETWEEN %s AND %s)
                             ORDER BY pool_code NULLS LAST, name""", (d_from, d_to))
@@ -1100,7 +1100,7 @@ def schedule(d_from: date, d_to: date, pool: Optional[str]) -> dict:
             day = date.fromordinal(day.toordinal() + 1)
         recap.append({"driver": d["code"], **tally, "pay": pay})
     return {"from": d_from.isoformat(), "to": d_to.isoformat(), "templates": list(templates.values()),
-            "drivers": [{k: d[k] for k in ("code", "name", "pool_code", "fleet_code", "status")} for d in drivers],
+            "drivers": [{k: d[k] for k in ("code", "name", "nickname", "department", "pool_code", "fleet_code", "status")} for d in drivers],
             "cells": cells, "recap": recap}
 
 

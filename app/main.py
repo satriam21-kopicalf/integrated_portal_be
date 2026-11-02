@@ -24,6 +24,7 @@ from app.routes import (auth_router, avatars_router, branches_router, exports_ro
 from app.access import require_page
 from app.routes.access import router as access_router
 from app.routes.ratio import router as ratio_router
+from app.routes.menu_costing import router as menu_costing_router
 from app.routes.xlsx import router as xlsx_router
 from app.routes.auth import current_user, session_lookup
 from app.routes.stock_opname import router as stock_opname_router
@@ -118,6 +119,7 @@ app.include_router(exports_router, dependencies=[Depends(require_page("sales"))]
 app.include_router(overview_router, dependencies=[Depends(require_page("overview"))])
 app.include_router(live_router, dependencies=[Depends(require_page("overview"))])
 app.include_router(ratio_router)  # /api/cost-control/ratio (page cc.ratio)
+app.include_router(menu_costing_router)  # /api/cost-control/pricelist, /sales-calc (pages cc.pricelist, cc.sales-calc)
 app.include_router(stock_opname_router, dependencies=signed_in)  # stock opname through the kopicalf gateway (pages per path)
 app.include_router(waste_router)  # waste (migration 040): pages waste, cc.waste-monitor, cc.waste-review
 app.include_router(branch_groups_router)  # Monitoring → Branch groups / Overview: before /api/monitoring/{form}

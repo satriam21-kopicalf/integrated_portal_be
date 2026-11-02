@@ -2,12 +2,15 @@
 
 Driver app (fe-calfontheroad), accounts of role driver tied to a Master Driver row:
     GET  /api/cotr/driver/today                 the driver, the menus, today's shift, stock, sales, reloads, requests, recap
-    POST /api/cotr/driver/check-in              {"kind": start|end, "photo", "latitude", "longitude", "accuracyM", "stock", "note"}
-                                                end also {"waste", "cupping": {code: cups}, "cashActual", "cashSpent"}
+    POST /api/cotr/driver/dispatch/confirm      {"counts": {code: cups}, "note"} the check of today's assignment (049):
+                                                all there -> accepted, else disputed for the storage
+    POST /api/cotr/driver/check-in              {"kind": start|end, "photo", "latitude", "longitude", "accuracyM", "note"}
+                                                start also {"signature"} (the stock is the accepted assignment)
+                                                end also {"stock", "waste", "cupping": {code: cups}, "cashActual", "cashSpent"}
     POST /api/cotr/driver/sales                 {"lines": [{"code", "qty"}], "payment": cash|qris}
     POST /api/cotr/driver/sales/{id}/void       {"reason"}
     POST /api/cotr/driver/reloads               {"lines": {code: cups}, "note"}
-    POST /api/cotr/driver/reloads/{id}/receive  an approved reload is on the fleet
+    POST /api/cotr/driver/reloads/{id}/receive  {"counts", "note"}: the check of an approved reload (as the assignment)
     POST /api/cotr/driver/requests              {"kind": fuel|ice|stall|repair|parking|other, "amount", "note", "photo"}
     POST /api/cotr/driver/locations             {"points": [{"at", "lat", "lng", "accuracy", "speed", "heading", "battery"}]}
                                                 the GPS of the phone while the shift is open (migration 048)
@@ -15,7 +18,11 @@ Every driver action answers the new state of the day (as GET today).
 
 Portal (Monitoring COTR):
     GET  /api/cotr/monitor?day=                 page cotr.check-in: shifts of the day, drivers not started, reloads, requests
-    POST /api/cotr/reloads/{id}/decide          page cotr.check-in: {"approve", "note"}
+    GET  /api/cotr/storage?day=&pool=           page cotr.storage: the drivers of a pool with their assignment and reloads
+    PUT  /api/cotr/dispatch                     page cotr.storage: {"day", "driver", "lines", "note"} assign (until accepted)
+    POST /api/cotr/dispatch/{id}/resolve        page cotr.storage: {"lines", "note"} the final cups of a difference
+    POST /api/cotr/reloads/{id}/decide          page cotr.storage: {"approve", "note", "lines"} the cups sent
+    POST /api/cotr/reloads/{id}/resolve         page cotr.storage: {"lines", "note"} the cups received of a difference
     POST /api/cotr/requests/{id}/decide         page cotr.check-in: {"approve", "note"} (a rejection needs the note)
     GET  /api/cotr/masters/{entity}             pools | fleet | menus | boms | drivers (any COTR page; writes: the page of it)
     POST /api/cotr/masters/{entity}             create        PUT /api/cotr/masters/{entity}/{code}   update
@@ -26,7 +33,7 @@ Portal (Monitoring COTR):
     GET  /api/cotr/locations/{driver}?day=      page cotr.check-in: the route of one driver
     GET  /api/cotr/production?days=&buffer=     page cotr.production: plan from the sales of the last days
     GET/POST /api/cotr/waste, DELETE /api/cotr/waste/{id}   page cotr.production
-    GET  /api/cotr/photos/{check-in|request}/{id}   the team (cotr.check-in) or the driver it belongs to
+    GET  /api/cotr/photos/{check-in|signature|request}/{id}   the team (cotr.check-in) or the driver it belongs to
 """
 import base64
 import binascii
@@ -77,6 +84,12 @@ class CheckInIn(BaseModel):
     cupping: dict[str, int] = Field(default_factory=dict)
     cashActual: Optional[float] = Field(None, ge=0, le=100_000_000)
     cashSpent: Optional[float] = Field(None, ge=0, le=100_000_000)
+    signature: Optional[str] = Field(None, max_length=1_000_000)  # start: PNG data URL of the signature pad
+
+
+class CountsIn(BaseModel):
+    counts: dict[str, int] = Field(default_factory=dict)
+    note: Optional[str] = Field(None, max_length=500)
 
 
 class SaleLine(BaseModel):
@@ -113,9 +126,17 @@ def driver_today(user: dict = Depends(driver_only)):
 @router.post("/driver/check-in")
 def driver_check_in(body: CheckInIn, request: Request, user: dict = Depends(driver_only)):
     out = _call(cotr.check_in, user, body.kind, body.photo, body.latitude, body.longitude, body.accuracyM, body.stock, body.note,
-                body.waste, body.cupping, body.cashActual, body.cashSpent)
+                body.waste, body.cupping, body.cashActual, body.cashSpent, body.signature)
     _log(request, user, f"cotr.check_in.{body.kind}", f"COTR check {'in' if body.kind == 'start' else 'out'}: {out['driver']['code']}",
          {"stock": body.stock})
+    return out
+
+
+@router.post("/driver/dispatch/confirm")
+def driver_confirm(body: CountsIn, request: Request, user: dict = Depends(driver_only)):
+    out = _call(cotr.confirm_dispatch, user, body.counts, body.note)
+    d = out["dispatch"]
+    _log(request, user, "cotr.dispatch.check", f"COTR assignment {'sesuai' if d['status'] == 'accepted' else 'berbeda'}: {out['driver']['code']}")
     return out
 
 
@@ -137,8 +158,8 @@ def driver_reload(body: ReloadIn, user: dict = Depends(driver_only)):
 
 
 @router.post("/driver/reloads/{reload_id}/receive")
-def driver_receive(reload_id: str, user: dict = Depends(driver_only)):
-    return _call(cotr.receive_reload, user, reload_id)
+def driver_receive(reload_id: str, body: Optional[CountsIn] = None, user: dict = Depends(driver_only)):
+    return _call(cotr.receive_reload, user, reload_id, body.counts if body else None, body.note if body else None)
 
 
 @router.post("/driver/requests")
@@ -172,6 +193,17 @@ def driver_locations(body: PointsIn, user: dict = Depends(driver_only)):
 class DecisionIn(BaseModel):
     approve: bool
     note: Optional[str] = Field(None, max_length=300)
+    lines: Optional[dict[str, int]] = None  # a reload: the cups sent (the ones asked when not given)
+
+
+class LinesIn(BaseModel):
+    lines: dict[str, int]
+    note: Optional[str] = Field(None, max_length=300)
+
+
+class AssignIn(LinesIn):
+    day: date
+    driver: str = Field(min_length=1, max_length=40)
 
 
 @router.get("/monitor")
@@ -180,10 +212,36 @@ def monitor(day: Optional[date] = None, _: dict = Depends(require_page("cotr.che
 
 
 @router.post("/reloads/{reload_id}/decide")
-def decide_reload(reload_id: str, body: DecisionIn, request: Request, user: dict = Depends(require_page("cotr.check-in"))):
-    _call(cotr.decide_reload, user, reload_id, body.approve, body.note)
+def decide_reload(reload_id: str, body: DecisionIn, request: Request, user: dict = Depends(require_page("cotr.storage"))):
+    _call(cotr.decide_reload, user, reload_id, body.approve, body.note, body.lines)
     _log(request, user, "cotr.reload.decide", f"Reload COTR {'disetujui' if body.approve else 'ditolak'}", {"reloadId": reload_id})
     return {"ok": True}
+
+
+@router.post("/reloads/{reload_id}/resolve")
+def resolve_reload(reload_id: str, body: LinesIn, request: Request, user: dict = Depends(require_page("cotr.storage"))):
+    _call(cotr.resolve_reload, user, reload_id, body.lines, body.note)
+    _log(request, user, "cotr.reload.resolve", "Selisih reload COTR diputuskan", {"reloadId": reload_id, "lines": body.lines})
+    return {"ok": True}
+
+
+@router.get("/storage")
+def storage(day: Optional[date] = None, pool: Optional[str] = None, _: dict = Depends(require_page("cotr.storage"))):
+    return cotr.storage_day(day or today(), pool)
+
+
+@router.put("/dispatch")
+def assign(body: AssignIn, request: Request, user: dict = Depends(require_page("cotr.storage"))):
+    out = _call(cotr.assign, user, body.day, body.driver, body.lines, body.note)
+    _log(request, user, "cotr.dispatch.assign", f"Assignment COTR {body.driver} {body.day}", {"lines": body.lines})
+    return out
+
+
+@router.post("/dispatch/{dispatch_id}/resolve")
+def resolve_dispatch(dispatch_id: str, body: LinesIn, request: Request, user: dict = Depends(require_page("cotr.storage"))):
+    out = _call(cotr.resolve_dispatch, user, dispatch_id, body.lines, body.note)
+    _log(request, user, "cotr.dispatch.resolve", f"Selisih assignment COTR {out['driver']} diputuskan", {"lines": body.lines})
+    return out
 
 
 @router.post("/requests/{request_id}/decide")
@@ -194,7 +252,7 @@ def decide_request(request_id: str, body: DecisionIn, request: Request, user: di
     return {"ok": True}
 
 
-COTR_PAGES = tuple(sorted(set(ENTITY_PAGE.values()) | {"cotr.check-in"}))
+COTR_PAGES = tuple(sorted(set(ENTITY_PAGE.values()) | {"cotr.check-in", "cotr.storage"}))
 
 
 def _master_user(request: Request, entity: str, user: dict = Depends(current_user)) -> dict:
@@ -305,7 +363,7 @@ def waste_delete(waste_id: str, _: dict = Depends(require_page("cotr.production"
 
 
 @router.get("/photos/{kind}/{row_id}")
-def photo(kind: Literal["check-in", "request"], row_id: str, request: Request, user: dict = Depends(current_user)):
+def photo(kind: Literal["check-in", "signature", "request"], row_id: str, request: Request, user: dict = Depends(current_user)):
     if not has_page(user, "cotr.check-in"):
         d = cotr.driver_of(user) if user["role"] == "driver" else None
         if not d or cotr.photo_owner(kind, row_id) != d["code"]:

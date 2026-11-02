@@ -116,3 +116,17 @@ def test_positions_are_thinned_in_time_order():
     pts.append({"at": t0 + timedelta(seconds=90), "lat": 0, "lng": 0})  # no fix
     assert [int((p["at"] - t0).total_seconds()) for p in cotr.thin(pts, None)] == [0, 30, 60]
     assert cotr.thin(pts, t0 + timedelta(seconds=45)) == [pts[3]]  # 10 s at least after what was kept before
+
+
+def test_assignment_and_reload_checks():
+    # the driver's check: all there, or the difference per menu (found - assigned)
+    assert cotr.check_counts({"EKC": 100, "AMR": 10}, {"EKC": 100, "AMR": 10}) == (True, {})
+    assert cotr.check_counts({"EKC": 100, "AMR": 10}, {"EKC": 96, "AMR": 10}) == (False, {"EKC": -4})
+    # a received reload adds what the storage settled, else what it approved, else what was asked
+    asked = {"status": "received", "lines": {"EKC": 50}}
+    assert cotr.received(asked) == {"EKC": 50}
+    assert cotr.received({**asked, "approved_lines": {"EKC": 40}}) == {"EKC": 40}
+    assert cotr.received({**asked, "approved_lines": {"EKC": 40}, "received_lines": {"EKC": 38}}) == {"EKC": 38}
+    stock = cotr.stock_now({"EKC": 10}, [{**asked, "approved_lines": {"EKC": 40}, "received_lines": {"EKC": 38}},
+                                         {"status": "disputed", "lines": {"EKC": 20}}], [])
+    assert stock == {"EKC": 48}  # a reload in dispute is not on the fleet yet

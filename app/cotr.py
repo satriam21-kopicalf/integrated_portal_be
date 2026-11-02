@@ -55,12 +55,23 @@ def clean_stock(value: Any, menus: Iterable[str]) -> Stock:
     return out
 
 
+def received(reload: dict) -> Stock:
+    """The cups a received reload added: settled by the storage, else approved, else asked (before migration 049)."""
+    return reload.get("received_lines") or reload.get("approved_lines") or reload["lines"]
+
+
+def check_counts(expected: Stock, counted: Stock) -> tuple[bool, dict[str, int]]:
+    """The driver's check of an assignment or a reload: all there, and the difference per menu (found - expected)."""
+    diff = difference(counted, expected)
+    return not diff, diff
+
+
 def stock_now(start: Stock, reloads: Iterable[dict], sales: Iterable[dict]) -> Stock:
     """Cups on the fleet: start + reloads received - sales not voided (never below zero)."""
     out = {k: int(v) for k, v in (start or {}).items()}
     for r in reloads:
         if r["status"] == "received":
-            for k, v in r["lines"].items():
+            for k, v in received(r).items():
                 out[k] = out.get(k, 0) + int(v)
     for s in sales:
         if not s.get("voided_at"):
@@ -131,7 +142,7 @@ def recap(shift: dict, sales: list[dict], reloads: list[dict], requests: list[di
     return {
         "cups": sum(m["qty"] for m in per_menu.values()), "total": sum(by_pay.values()), "cash": by_pay["cash"],
         "qris": by_pay["qris"], "voided": len(sales) - len(ok), "perMenu": sorted(per_menu.values(), key=lambda m: -m["qty"]),
-        "reloaded": sum(sum(int(v) for v in r["lines"].values()) for r in reloads if r["status"] == "received"),
+        "reloaded": sum(sum(int(v) for v in received(r).values()) for r in reloads if r["status"] == "received"),
         "requested": float(sum(Decimal(r["amount"]) for r in requests if r["status"] != "rejected")),
         "difference": diff,
         "waste": sum(int(v) for v in (shift.get("end_waste") or {}).values()),
@@ -218,7 +229,23 @@ def _sale_view(s: dict) -> dict:
 
 def _reload_view(r: dict) -> dict:
     return {"id": str(r["id"]), "at": _iso(r["at"]), "lines": r["lines"], "note": r["note"], "status": r["status"],
-            "decidedAt": _iso(r["decided_at"]), "decisionNote": r["decision_note"], "receivedAt": _iso(r["received_at"])}
+            "decidedAt": _iso(r["decided_at"]), "decisionNote": r["decision_note"], "receivedAt": _iso(r["received_at"]),
+            "approvedLines": r.get("approved_lines") or (r["lines"] if r["status"] != "requested" else None),
+            "driverCounts": r.get("driver_counts"), "driverNote": r.get("driver_note"),
+            "receivedLines": received(r) if r["status"] == "received" else None, "resolutionNote": r.get("resolution_note")}
+
+
+def _dispatch_view(x: Optional[dict]) -> Optional[dict]:
+    if not x:
+        return None
+    return {"id": str(x["id"]), "day": _iso(x["day"]), "driver": x["driver_code"], "pool": x["pool_code"], "lines": x["lines"],
+            "note": x["note"], "status": x["status"], "assignedAt": _iso(x["assigned_at"]), "driverCounts": x["driver_counts"],
+            "driverNote": x["driver_note"], "checkedAt": _iso(x["checked_at"]), "finalLines": x["final_lines"],
+            "resolvedAt": _iso(x["resolved_at"]), "resolutionNote": x["resolution_note"]}
+
+
+def dispatch_of(driver_code: str, day: date) -> Optional[dict]:
+    return db.fetchrow(f"SELECT * FROM {P}.cotr_dispatch WHERE driver_code = %s AND day = %s", (driver_code, day))
 
 
 def _request_view(r: dict) -> dict:
@@ -249,6 +276,7 @@ def today_of(user: dict) -> dict:
         "driver": _driver_view(d),
         "menus": [{"code": m["code"], "name": m["name"], "price": float(m["price"])} for m in menus(active_only=True)],
         "shift": shift,
+        "dispatch": _dispatch_view(dispatch_of(d["code"], today())),
         "stock": stock_now(s["start_stock"], reloads, sales) if s else {},
         "sales": [_sale_view(x) for x in sales],
         "reloads": [_reload_view(x) for x in reloads],
@@ -270,26 +298,56 @@ def _open_shift(d: dict) -> dict:
     return s
 
 
+def confirm_dispatch(user: dict, counts: dict, note: Optional[str]) -> dict:
+    """The driver's check of today's assignment: all there -> accepted (the start stock); else the counts found and a
+    note go to the storage (disputed), which settles the final cups."""
+    d = require_driver(user)
+    found = clean_stock(counts, _menu_map())
+    note = (note or "").strip() or None
+    with db.transaction() as conn:
+        x = conn.execute(f"SELECT * FROM {P}.cotr_dispatch WHERE driver_code = %s AND day = %s FOR UPDATE", (d["code"], today())).fetchone()
+        if not x:
+            raise CotrError("Belum ada assignment produk dari storage")
+        if x["status"] != "assigned":
+            raise CotrError("Assignment sudah dicek")
+        ok, _ = check_counts(x["lines"], found)
+        if not ok and not note:
+            raise CotrError("Ada perbedaan jumlah: tulis keterangannya untuk storage")
+        if ok:
+            conn.execute(f"""UPDATE {P}.cotr_dispatch SET status = 'accepted', checked_at = now(), final_lines = lines,
+                                 driver_note = %s WHERE id = %s""", (note, x["id"]))
+        else:
+            conn.execute(f"""UPDATE {P}.cotr_dispatch SET status = 'disputed', checked_at = now(), driver_counts = %s,
+                                 driver_note = %s WHERE id = %s""", (Jsonb(found), note, x["id"]))
+    return today_of(user)
+
+
 def check_in(user: dict, kind: str, photo: str, lat: float, lng: float, accuracy: Optional[float], stock: dict,
              note: Optional[str], waste: Optional[dict] = None, cupping: Optional[dict] = None,
-             cash_actual: Optional[float] = None, cash_spent: Optional[float] = None) -> dict:
+             cash_actual: Optional[float] = None, cash_spent: Optional[float] = None, signature: Optional[str] = None) -> dict:
     d = require_driver(user)
     ptype, pdata = parse_photo(photo)
     menu_codes = _menu_map()
     counted = clean_stock(stock, menu_codes)
     wasted, tasted = clean_stock(waste, menu_codes), clean_stock(cupping, menu_codes)
     note = (note or "").strip() or None
+    sign_type, sign = parse_photo(signature) if signature else (None, None)
     with db.transaction() as conn:
         s = conn.execute(f"SELECT * FROM {P}.cotr_shift WHERE driver_code = %s AND day = %s FOR UPDATE", (d["code"], today())).fetchone()
         if kind == "start":
             if s:
                 raise CotrError("Shift hari ini sudah dimulai")
-            if not counted:
-                raise CotrError("Isi produk yang dibawa")
+            # the start stock is the assignment of the storage, checked by the driver (migration 049)
+            x = conn.execute(f"SELECT * FROM {P}.cotr_dispatch WHERE driver_code = %s AND day = %s", (d["code"], today())).fetchone()
+            if not x or x["status"] != "accepted":
+                raise CotrError("Cek dulu produk yang di-assign storage sampai sesuai")
+            if not sign:
+                raise CotrError("Tanda tangan wajib diisi")
+            counted = x["final_lines"]
             s = conn.execute(
-                f"""INSERT INTO {P}.cotr_shift (driver_code, day, pool_code, fleet_code, start_stock)
-                    VALUES (%s, %s, %s, %s, %s) RETURNING *""",
-                (d["code"], today(), d["pool_code"], d["fleet_code"], Jsonb(counted))).fetchone()
+                f"""INSERT INTO {P}.cotr_shift (driver_code, day, pool_code, fleet_code, start_stock, dispatch_id)
+                    VALUES (%s, %s, %s, %s, %s, %s) RETURNING *""",
+                (d["code"], today(), d["pool_code"], d["fleet_code"], Jsonb(counted), x["id"])).fetchone()
         else:
             if not s or s["status"] != "open":
                 raise CotrError("Belum ada shift yang berjalan")
@@ -311,9 +369,10 @@ def check_in(user: dict, kind: str, photo: str, lat: float, lng: float, accuracy
                      WHERE id = %s""",
                 (Jsonb(counted), Jsonb(expected), note, Jsonb(wasted), Jsonb(tasted), cash_actual, cash_spent or 0, s["id"]))
         conn.execute(
-            f"""INSERT INTO {P}.cotr_check_in (shift_id, kind, latitude, longitude, accuracy_m, photo, photo_type, stock, note)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (s["id"], kind, lat, lng, accuracy, pdata, ptype, Jsonb(counted), note))
+            f"""INSERT INTO {P}.cotr_check_in (shift_id, kind, latitude, longitude, accuracy_m, photo, photo_type, stock, note,
+                    signature, signature_type)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (s["id"], kind, lat, lng, accuracy, pdata, ptype, Jsonb(counted), note, sign, sign_type))
     return today_of(user)
 
 
@@ -357,13 +416,27 @@ def request_reload(user: dict, lines: dict, note: Optional[str]) -> dict:
     return today_of(user)
 
 
-def receive_reload(user: dict, reload_id: str) -> dict:
+def receive_reload(user: dict, reload_id: str, counts: Optional[dict] = None, note: Optional[str] = None) -> dict:
+    """The driver's check of an approved reload: all there -> received (the approved cups join the stock); else the
+    counts found and a note go to the storage (disputed), which settles the cups received."""
     d = require_driver(user)
     s = _open_shift(d)
-    row = db.fetchrow(f"""UPDATE {P}.cotr_reload SET status = 'received', received_at = now()
-                           WHERE id = %s AND shift_id = %s AND status = 'approved' RETURNING id""", (reload_id, s["id"]))
-    if not row:
-        raise CotrError("Reload belum disetujui pool atau sudah diterima")
+    note = (note or "").strip() or None
+    with db.transaction() as conn:
+        r = conn.execute(f"SELECT * FROM {P}.cotr_reload WHERE id = %s AND shift_id = %s FOR UPDATE", (reload_id, s["id"])).fetchone()
+        if not r or r["status"] != "approved":
+            raise CotrError("Reload belum disetujui storage atau sudah diterima")
+        approved = r["approved_lines"] or r["lines"]
+        found = clean_stock(counts, _menu_map()) if counts is not None else approved
+        ok, _ = check_counts(approved, found)
+        if not ok and not note:
+            raise CotrError("Ada perbedaan jumlah: tulis keterangannya untuk storage")
+        if ok:
+            conn.execute(f"""UPDATE {P}.cotr_reload SET status = 'received', received_at = now(), received_lines = %s,
+                                 driver_note = %s WHERE id = %s""", (Jsonb(approved), note, r["id"]))
+        else:
+            conn.execute(f"""UPDATE {P}.cotr_reload SET status = 'disputed', driver_counts = %s, driver_note = %s
+                              WHERE id = %s""", (Jsonb(found), note, r["id"]))
     return today_of(user)
 
 
@@ -544,12 +617,93 @@ def monitor(day: date) -> dict:
     }
 
 
-def decide_reload(user: dict, reload_id: str, approve: bool, note: Optional[str]) -> None:
-    row = db.fetchrow(f"""UPDATE {P}.cotr_reload SET status = %s, decided_at = now(), decided_by = %s, decision_note = %s
+def decide_reload(user: dict, reload_id: str, approve: bool, note: Optional[str], lines: Optional[dict] = None) -> None:
+    """The storage approves a reload with the cups it sends (the ones asked when not given; fewer when short) or
+    rejects it (a reason is required)."""
+    note = (note or "").strip() or None
+    if not approve and not note:
+        raise CotrError("Tulis alasan penolakan")
+    sent = clean_stock(lines, _menu_map()) if lines is not None else None
+    if approve and sent is not None and not sent:
+        raise CotrError("Isi jumlah yang dikirim")
+    row = db.fetchrow(f"""UPDATE {P}.cotr_reload SET status = %s, decided_at = now(), decided_by = %s, decision_note = %s,
+                              approved_lines = CASE WHEN %s THEN COALESCE(%s, lines) END
                            WHERE id = %s AND status = 'requested' RETURNING id""",
-                      ("approved" if approve else "rejected", user["id"], (note or "").strip() or None, reload_id))
+                      ("approved" if approve else "rejected", user["id"], note, approve, Jsonb(sent) if sent else None, reload_id))
     if not row:
         raise CotrError("Reload sudah diputuskan")
+
+
+def resolve_reload(user: dict, reload_id: str, lines: dict, note: Optional[str]) -> None:
+    """The storage settles a reload the driver found different: the cups that join the stock of the fleet."""
+    final = clean_stock(lines, _menu_map())
+    row = db.fetchrow(f"""UPDATE {P}.cotr_reload SET status = 'received', received_at = now(), received_lines = %s,
+                              resolved_at = now(), resolved_by = %s, resolution_note = %s
+                           WHERE id = %s AND status = 'disputed' RETURNING id""",
+                      (Jsonb(final), user["id"], (note or "").strip() or None, reload_id))
+    if not row:
+        raise CotrError("Reload tidak dalam status perbedaan")
+
+
+# ---------------------------------------------------------------- the storage: assignment of the products (049)
+
+def storage_day(day: date, pool: Optional[str]) -> dict:
+    """The drivers of a pool for the day with their assignment, the shift, and the reloads to decide or settle."""
+    where, args = ("AND d.pool_code = %s", (pool,)) if pool else ("", ())
+    drivers = db.fetch(f"""SELECT d.code, d.name, d.pool_code, d.fleet_code, d.status FROM {P}.cotr_driver d
+                            WHERE d.status <> 'inactive' {where} ORDER BY d.fleet_code NULLS LAST, d.code""", args)
+    codes = [d["code"] for d in drivers]
+    disp = {x["driver_code"]: x for x in db.fetch(f"SELECT * FROM {P}.cotr_dispatch WHERE day = %s AND driver_code = ANY(%s)", (day, codes))}
+    shifts = {s["driver_code"]: s for s in db.fetch(f"SELECT * FROM {P}.cotr_shift WHERE day = %s AND driver_code = ANY(%s)", (day, codes))}
+    ids = [s["id"] for s in shifts.values()]
+    reloads = db.fetch(f"""SELECT r.*, s.driver_code FROM {P}.cotr_reload r JOIN {P}.cotr_shift s ON s.id = r.shift_id
+                            WHERE r.shift_id = ANY(%s) ORDER BY r.at""", (ids,)) if ids else []
+    prev = {x["driver_code"]: x["final_lines"] or x["lines"] for x in db.fetch(
+        f"""SELECT DISTINCT ON (driver_code) driver_code, lines, final_lines FROM {P}.cotr_dispatch
+             WHERE day < %s AND driver_code = ANY(%s) ORDER BY driver_code, day DESC""", (day, codes))}
+    rows = []
+    for d in drivers:
+        s = shifts.get(d["code"])
+        rows.append({"code": d["code"], "name": d["name"], "pool": d["pool_code"], "fleet": d["fleet_code"], "status": d["status"],
+                     "dispatch": _dispatch_view(disp.get(d["code"])), "previous": prev.get(d["code"]),
+                     "shift": s["status"] if s else None})
+    return {"day": day.isoformat(), "drivers": rows,
+            "reloads": [_reload_view(r) | {"driver": r["driver_code"]} for r in reloads]}
+
+
+def assign(user: dict, day: date, driver_code: str, lines: dict, note: Optional[str]) -> dict:
+    """The storage assigns the cups of the day to a driver; changeable until the driver has accepted them."""
+    given = clean_stock(lines, _menu_map())
+    if not given:
+        raise CotrError("Isi minimal satu produk")
+    d = db.fetchrow(f"SELECT code, pool_code FROM {P}.cotr_driver WHERE code = %s", (driver_code,))
+    if not d:
+        raise CotrError("Driver tidak ditemukan")
+    row = db.fetchrow(
+        f"""INSERT INTO {P}.cotr_dispatch (day, driver_code, pool_code, lines, note, assigned_by)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (day, driver_code) DO UPDATE SET lines = EXCLUDED.lines, note = EXCLUDED.note, status = 'assigned',
+                assigned_at = now(), assigned_by = EXCLUDED.assigned_by, driver_counts = NULL, driver_note = NULL, checked_at = NULL
+              WHERE {P}.cotr_dispatch.status <> 'accepted'
+            RETURNING *""",
+        (day, driver_code, d["pool_code"], Jsonb(given), (note or "").strip() or None, user["id"]))
+    if not row:
+        raise CotrError("Assignment sudah diterima driver dan tidak dapat diubah")
+    return _dispatch_view(row)
+
+
+def resolve_dispatch(user: dict, dispatch_id: str, lines: dict, note: Optional[str]) -> dict:
+    """The storage settles an assignment the driver found different: the final cups, the start stock of the shift."""
+    final = clean_stock(lines, _menu_map())
+    if not final:
+        raise CotrError("Isi jumlah final")
+    row = db.fetchrow(f"""UPDATE {P}.cotr_dispatch SET status = 'accepted', final_lines = %s, resolved_at = now(),
+                              resolved_by = %s, resolution_note = %s
+                           WHERE id = %s AND status = 'disputed' RETURNING *""",
+                      (Jsonb(final), user["id"], (note or "").strip() or None, dispatch_id))
+    if not row:
+        raise CotrError("Assignment tidak dalam status perbedaan")
+    return _dispatch_view(row)
 
 
 def decide_request(user: dict, request_id: str, approve: bool, note: Optional[str]) -> None:
@@ -563,6 +717,9 @@ def decide_request(user: dict, request_id: str, approve: bool, note: Optional[st
 
 
 def photo(kind: str, row_id: str) -> Optional[dict]:
+    """The photo of a check in or a request, or the signature of a check in."""
+    if kind == "signature":
+        return db.fetchrow(f"SELECT signature AS photo, signature_type AS photo_type FROM {P}.cotr_check_in WHERE id = %s", (row_id,))
     table = {"check-in": "cotr_check_in", "request": "cotr_request"}[kind]
     return db.fetchrow(f"SELECT photo, photo_type FROM {P}.{table} WHERE id = %s", (row_id,))
 

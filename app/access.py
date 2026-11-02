@@ -63,6 +63,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("rating.grabfood", "GrabFood", "Aggregator"),
     # Calf On The Road (prototype 2026-11-01, sample data in the frontend): pages of the COTR team, given per role / user
     ("cotr.check-in", "Driver Check In", "Monitoring COTR"),
+    ("cotr.storage", "Storage & Assignment", "Monitoring COTR"),
     ("cotr.drivers", "Master Driver", "Monitoring COTR"),
     ("cotr.fleet", "Master Fleet", "Monitoring COTR"),
     ("cotr.pools", "Master Pool / HUB", "Monitoring COTR"),

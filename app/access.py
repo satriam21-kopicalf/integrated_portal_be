@@ -69,6 +69,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("cotr.pools", "Master Pool / HUB", "Monitoring COTR"),
     ("cotr.menu", "Master Menu", "Monitoring COTR"),
     ("cotr.production", "Storage & Production", "Monitoring COTR"),
+    ("cotr.schedule", "Master Schedule", "Monitoring COTR"),
     # not a menu entry: salary, bank account and NIK of the drivers in Master Driver (migration 050)
     ("cotr.management", "COTR Management (salary & bank)", "Monitoring COTR"),
 ]

@@ -36,6 +36,9 @@ Portal (Monitoring COTR):
     GET  /api/cotr/production?days=&buffer=     page cotr.production: plan from the sales of the last days
     GET  /api/cotr/usage?dateFrom=&dateTo=&pool=  page cotr.production: theoretical usage per item (sold, waste, cupping
                                                 exploded through the recipe cards, migration 051)
+    GET  /api/cotr/schedule?dateFrom=&dateTo=&pool=   page cotr.schedule: roster, check ins, attendance, recap (052)
+    PUT  /api/cotr/schedule                     page cotr.schedule: {"entries": [{driver, day, status, template, pool, note}]}
+    POST /api/cotr/schedule/copy                page cotr.schedule: {"source", "target", "days", "drivers"}
     GET/POST /api/cotr/waste, DELETE /api/cotr/waste/{id}   page cotr.production
     GET  /api/cotr/photos/{check-in|signature|request}/{id}   the team (cotr.check-in) or the driver it belongs to
 """
@@ -57,9 +60,9 @@ from app.utils import today
 
 router = APIRouter(prefix="/api/cotr", tags=["cotr"])
 driver_only = require_roles("driver")
-ENTITY_PAGE = {"pools": "cotr.pools", "fleet": "cotr.fleet", "fleet-types": "cotr.fleet", "menus": "cotr.menu",
+ENTITY_PAGE = {"pools": "cotr.pools", "fleet": "cotr.fleet", "fleet-types": "cotr.fleet", "shift-templates": "cotr.schedule", "menus": "cotr.menu",
                "boms": "cotr.production", "items": "cotr.production", "drivers": "cotr.drivers"}
-Entity = Literal["pools", "fleet", "fleet-types", "menus", "boms", "items", "drivers"]
+Entity = Literal["pools", "fleet", "fleet-types", "shift-templates", "menus", "boms", "items", "drivers"]
 MANAGEMENT = "cotr.management"  # salary, bank and NIK of the drivers (migration 050)
 
 
@@ -257,7 +260,7 @@ def decide_request(request_id: str, body: DecisionIn, request: Request, user: di
     return {"ok": True}
 
 
-COTR_PAGES = tuple(sorted(set(ENTITY_PAGE.values()) | {"cotr.check-in", "cotr.storage", MANAGEMENT}))
+COTR_PAGES = tuple(sorted(set(ENTITY_PAGE.values()) | {"cotr.check-in", "cotr.storage", "cotr.schedule", MANAGEMENT}))
 
 
 def _master_user(request: Request, entity: str, user: dict = Depends(current_user)) -> dict:
@@ -355,6 +358,47 @@ def locations(day: Optional[date] = None, _: dict = Depends(require_page("cotr.c
 @router.get("/locations/{driver_code}")
 def driver_track(driver_code: str, day: Optional[date] = None, _: dict = Depends(require_page("cotr.check-in"))):
     return cotr.track(driver_code, day or today())
+
+
+class ScheduleCell(BaseModel):
+    driver: str = Field(min_length=1, max_length=40)
+    day: date
+    status: Optional[Literal["work", "off", "leave", "sick"]] = None  # null clears the cell
+    template: Optional[str] = Field(None, max_length=40)
+    pool: Optional[str] = Field(None, max_length=40)
+    note: Optional[str] = Field(None, max_length=300)
+
+
+class ScheduleIn(BaseModel):
+    entries: list[ScheduleCell] = Field(min_length=1, max_length=2000)
+
+
+class ScheduleCopyIn(BaseModel):
+    source: date
+    target: date
+    days: int = Field(7, ge=1, le=31)
+    drivers: Optional[list[str]] = None
+
+
+@router.get("/schedule")
+def schedule(dateFrom: Optional[date] = None, dateTo: Optional[date] = None, pool: Optional[str] = None,
+             _: dict = Depends(require_page("cotr.schedule"))):
+    start = dateFrom or today() - timedelta(days=today().weekday())
+    return _call(cotr.schedule, start, dateTo or start + timedelta(days=6), pool)
+
+
+@router.put("/schedule")
+def schedule_save(body: ScheduleIn, request: Request, user: dict = Depends(require_page("cotr.schedule"))):
+    n = _call(cotr.schedule_save, user, [e.model_dump() for e in body.entries])
+    _log(request, user, "cotr.schedule.save", f"Jadwal COTR: {n} sel disimpan")
+    return {"ok": True, "saved": n}
+
+
+@router.post("/schedule/copy")
+def schedule_copy(body: ScheduleCopyIn, request: Request, user: dict = Depends(require_page("cotr.schedule"))):
+    n = _call(cotr.schedule_copy, user, body.source, body.target, body.days, body.drivers)
+    _log(request, user, "cotr.schedule.copy", f"Jadwal COTR disalin {body.source} → {body.target} ({n} sel)")
+    return {"ok": True, "copied": n}
 
 
 @router.get("/usage")

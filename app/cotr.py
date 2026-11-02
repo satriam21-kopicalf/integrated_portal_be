@@ -471,6 +471,8 @@ MASTERS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
                                      "is_active", "brand", "model", "frame_no", "acquired_on", "qris_bank", "qris_nmid",
                                      "qris_merchant", "note"), "code"),
     "fleet-types": ("cotr_fleet_type", "code", ("code", "name", "sort"), "sort, name"),
+    "shift-templates": ("cotr_shift_template", "code", ("code", "name", "start_time", "end_time", "break_min", "grace_min",
+                                                        "color", "is_active", "sort"), "sort, start_time"),
     "menus": ("cotr_menu", "code", ("code", "name", "category", "price", "bom_code", "is_active", "sort"), "sort, name"),
     "boms": ("cotr_bom", "code", ("code", "name", "output", "yield_qty", "yield_unit", "lines", "kind", "units", "note"),
              "kind DESC, name"),
@@ -487,12 +489,12 @@ SENSITIVE = {"drivers": ("nik", "salary_monthly", "allowance_monthly", "bank_nam
 IMAGES = {"drivers": {"photo": ("photo", "photo_type")},
           "fleet": {"photo": ("photo", "photo_type"), "qris": ("qris_image", "qris_image_type")}}
 _BYTES = {"photo", "photo_type", "qris_image", "qris_image_type", "updated_by"}
-UPPER_CODES = {"pools", "fleet", "menus", "boms", "drivers", "items"}  # fleet types keep their code as typed (sepeda_listrik)
+UPPER_CODES = {"pools", "fleet", "menus", "boms", "drivers", "items", "shift-templates"}  # fleet types keep their code as typed (sepeda_listrik)
 
 
 def _plain(row: dict) -> dict:
     out = {k: (float(v) if isinstance(v, Decimal) else _iso(v)) for k, v in row.items() if k not in _BYTES}
-    for k in ("open_time", "close_time"):
+    for k in ("open_time", "close_time", "start_time", "end_time"):
         if out.get(k):
             out[k] = str(out[k])[:5]
     if "photo" in row:
@@ -1008,3 +1010,120 @@ def usage(d_from: date, d_to: date, pool: Optional[str]) -> dict:
         rows.append(r)
     rows.sort(key=lambda r: (r["category"] or "", -r["total"]))
     return {"from": d_from.isoformat(), "to": d_to.isoformat(), "menus": menu_rows, "items": rows, "noRecipe": no_recipe}
+
+
+# ---------------------------------------------------------------- master schedule (migration 052)
+
+STATUSES = ("work", "off", "leave", "sick")
+
+
+def _minutes(t: Any) -> int:
+    h, m = str(t)[:5].split(":")
+    return int(h) * 60 + int(m)
+
+
+def attendance(entry: Optional[dict], template: Optional[dict], started: Optional[str], ended: Optional[str]) -> str:
+    """The attendance of one driver on one day: the roster against the check in (times "HH:MM" in Jakarta).
+    work + check in -> on_time / late (after start + grace); work without -> absent (planned while the day is to come
+    is decided by the caller); no roster but a check in -> unscheduled; off / leave / sick -> the status."""
+    if entry is None or entry["status"] != "work":
+        if started:
+            return "unscheduled"
+        return entry["status"] if entry else "none"
+    if not started:
+        return "absent"
+    if template and _minutes(started) > _minutes(template["start_time"]) + int(template["grace_min"] or 0):
+        return "late"
+    return "on_time"
+
+
+def schedule(d_from: date, d_to: date, pool: Optional[str]) -> dict:
+    """The roster of a period with the check ins of the drivers and a recap per driver (for the incentives)."""
+    if (d_to - d_from).days > 62:
+        raise CotrError("Rentang jadwal maksimal 62 hari")
+    templates = {t["code"]: _plain(t) for t in db.fetch(f"SELECT * FROM {P}.cotr_shift_template ORDER BY sort")}
+    drivers = db.fetch(f"""SELECT code, name, pool_code, fleet_code, status FROM {P}.cotr_driver
+                            WHERE status <> 'inactive' OR code IN (SELECT driver_code FROM {P}.cotr_schedule
+                                                                    WHERE day BETWEEN %s AND %s)
+                            ORDER BY pool_code NULLS LAST, name""", (d_from, d_to))
+    if pool:
+        drivers = [d for d in drivers if d["pool_code"] == pool]
+    entries = {(r["driver_code"], r["day"]): r for r in db.fetch(
+        f"SELECT * FROM {P}.cotr_schedule WHERE day BETWEEN %s AND %s", (d_from, d_to))}
+    shifts = {(r["driver_code"], r["day"]): r for r in db.fetch(
+        f"""SELECT driver_code, day, to_char(started_at AT TIME ZONE 'Asia/Jakarta', 'HH24:MI') AS started,
+                   to_char(ended_at AT TIME ZONE 'Asia/Jakarta', 'HH24:MI') AS ended, status
+              FROM {P}.cotr_shift WHERE day BETWEEN %s AND %s""", (d_from, d_to))}
+    now = today()
+    cells, recap = [], []
+    for d in drivers:
+        tally = {k: 0 for k in ("scheduled", "worked", "on_time", "late", "absent", "off", "leave", "sick", "unscheduled")}
+        day = d_from
+        while day <= d_to:
+            e, sh = entries.get((d["code"], day)), shifts.get((d["code"], day))
+            t = templates.get(e["template_code"]) if e and e["template_code"] else None
+            state = attendance(e, t, sh["started"] if sh else None, sh["ended"] if sh else None)
+            if state == "absent" and day >= now:
+                state = "planned"
+            if e or sh:
+                cells.append({"driver": d["code"], "day": day.isoformat(), "status": e["status"] if e else None,
+                              "template": e["template_code"] if e else None, "pool": e["pool_code"] if e else None,
+                              "note": e["note"] if e else None, "started": sh["started"] if sh else None,
+                              "ended": sh["ended"] if sh else None, "attendance": state})
+            if e and e["status"] == "work":
+                tally["scheduled"] += 1
+            if sh:
+                tally["worked"] += 1
+            if state in tally:
+                tally[state] += 1
+            day = date.fromordinal(day.toordinal() + 1)
+        recap.append({"driver": d["code"], **tally})
+    return {"from": d_from.isoformat(), "to": d_to.isoformat(), "templates": list(templates.values()),
+            "drivers": [{k: d[k] for k in ("code", "name", "pool_code", "fleet_code", "status")} for d in drivers],
+            "cells": cells, "recap": recap}
+
+
+def schedule_save(user: dict, entries: list[dict]) -> int:
+    """Upsert roster cells; a cell with status null is cleared."""
+    n = 0
+    with db.transaction() as conn, conn.cursor() as cur:
+        for e in entries:
+            status = e.get("status")
+            if status is None:
+                cur.execute(f"DELETE FROM {P}.cotr_schedule WHERE driver_code = %s AND day = %s", (e["driver"], e["day"]))
+                n += 1
+                continue
+            if status not in STATUSES:
+                raise CotrError(f"Status jadwal tidak dikenal: {status}")
+            template = e.get("template") if status == "work" else None
+            if status == "work" and not template:
+                raise CotrError("Jadwal kerja butuh shift")
+            cur.execute(
+                f"""INSERT INTO {P}.cotr_schedule (driver_code, day, status, template_code, pool_code, note, updated_by)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (driver_code, day) DO UPDATE SET status = EXCLUDED.status,
+                        template_code = EXCLUDED.template_code, pool_code = EXCLUDED.pool_code, note = EXCLUDED.note,
+                        updated_at = now(), updated_by = EXCLUDED.updated_by""",
+                (e["driver"], e["day"], status, template, e.get("pool") or None, e.get("note") or None, user["id"]))
+            n += 1
+    return n
+
+
+def schedule_copy(user: dict, src: date, dst: date, days: int, drivers: Optional[list[str]]) -> int:
+    """Copy the roster of `days` days from `src` to `dst` (e.g. last week to this week), overwriting the target."""
+    if not 1 <= days <= 31:
+        raise CotrError("Jumlah hari salin 1–31")
+    offset = dst.toordinal() - src.toordinal()
+    if offset == 0:
+        raise CotrError("Tanggal asal dan tujuan sama")
+    where, args = ("AND driver_code = ANY(%s)", (drivers,)) if drivers else ("", ())
+    with db.transaction() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""INSERT INTO {P}.cotr_schedule (driver_code, day, status, template_code, pool_code, note, updated_by)
+                SELECT driver_code, day + %s, status, template_code, pool_code, note, %s FROM {P}.cotr_schedule
+                 WHERE day >= %s AND day < %s {where}
+                ON CONFLICT (driver_code, day) DO UPDATE SET status = EXCLUDED.status,
+                    template_code = EXCLUDED.template_code, pool_code = EXCLUDED.pool_code, note = EXCLUDED.note,
+                    updated_at = now(), updated_by = EXCLUDED.updated_by""",
+            (offset, user["id"], src, date.fromordinal(src.toordinal() + days), *args))
+        return cur.rowcount

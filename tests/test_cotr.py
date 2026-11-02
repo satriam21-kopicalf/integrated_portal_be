@@ -152,3 +152,15 @@ def test_recipe_card_explodes_premix_by_item_code():
     cotr.explode(boms, "BOM-CUP", 441, out)  # 441 cups = 66150 g of premix = 10 Pail
     assert round(out["RM-FRESHMILK"]["qty"]) == 27000 and round(out["RM-ESP-PREMIUM"]["qty"]) == 16650
     assert out["PK-CUP-10OZ"]["qty"] == 441 and "PRM-PREMIUM" not in out
+
+
+def test_attendance_against_the_roster():
+    t = {"start_time": "06:00", "grace_min": 15}
+    work = {"status": "work"}
+    assert cotr.attendance(work, t, "06:10", None) == "on_time"
+    assert cotr.attendance(work, t, "06:16", None) == "late"
+    assert cotr.attendance(work, t, None, None) == "absent"
+    assert cotr.attendance({"status": "off"}, None, None, None) == "off"
+    assert cotr.attendance({"status": "leave"}, None, "07:00", None) == "unscheduled"
+    assert cotr.attendance(None, None, "07:00", None) == "unscheduled"
+    assert cotr.attendance(None, None, None, None) == "none"

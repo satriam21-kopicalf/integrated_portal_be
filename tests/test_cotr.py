@@ -139,3 +139,16 @@ def test_salary_bank_and_nik_only_for_the_cotr_management():
     assert shown == {"code": "DRV-BNI01", "name": "Budi", "has_photo": True}  # no bytes, no salary / bank / NIK
     full = cotr._hide("drivers", cotr._plain(row), sensitive=True)
     assert (full["salary_monthly"], full["bank_account"], full["nik"]) == (3500000.0, "123", "317")
+
+
+def test_recipe_card_explodes_premix_by_item_code():
+    # Premix Premium (NEW) of the Cost Control calculator: 6615 g per Pail; a cup takes 150 g of it and a cup
+    boms = {"BOM-PRM-PREMIUM": {"code": "BOM-PRM-PREMIUM", "output": "PRM-PREMIUM", "yield_qty": 6615,
+                                "lines": [{"item": "RM-FRESHMILK", "qty": 2700, "unit": "g"}, {"item": "RM-ESP-PREMIUM", "qty": 1665, "unit": "g"},
+                                          {"item": "RM-CREAMER", "qty": 1125, "unit": "g"}, {"item": "RM-AIR", "qty": 1125, "unit": "g"}]},
+            "BOM-CUP": {"code": "BOM-CUP", "output": "COTR-PRM-CUP", "yield_qty": 1,
+                        "lines": [{"item": "PRM-PREMIUM", "qty": 150, "unit": "g"}, {"item": "PK-CUP-10OZ", "qty": 1, "unit": "pcs"}]}}
+    out: dict = {}
+    cotr.explode(boms, "BOM-CUP", 441, out)  # 441 cups = 66150 g of premix = 10 Pail
+    assert round(out["RM-FRESHMILK"]["qty"]) == 27000 and round(out["RM-ESP-PREMIUM"]["qty"]) == 16650
+    assert out["PK-CUP-10OZ"]["qty"] == 441 and "PRM-PREMIUM" not in out

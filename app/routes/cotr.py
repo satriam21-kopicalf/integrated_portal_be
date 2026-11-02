@@ -34,6 +34,8 @@ Portal (Monitoring COTR):
     GET  /api/cotr/locations?day=               page cotr.check-in: the last position of every driver of the day
     GET  /api/cotr/locations/{driver}?day=      page cotr.check-in: the route of one driver
     GET  /api/cotr/production?days=&buffer=     page cotr.production: plan from the sales of the last days
+    GET  /api/cotr/usage?dateFrom=&dateTo=&pool=  page cotr.production: theoretical usage per item (sold, waste, cupping
+                                                exploded through the recipe cards, migration 051)
     GET/POST /api/cotr/waste, DELETE /api/cotr/waste/{id}   page cotr.production
     GET  /api/cotr/photos/{check-in|signature|request}/{id}   the team (cotr.check-in) or the driver it belongs to
 """
@@ -56,8 +58,8 @@ from app.utils import today
 router = APIRouter(prefix="/api/cotr", tags=["cotr"])
 driver_only = require_roles("driver")
 ENTITY_PAGE = {"pools": "cotr.pools", "fleet": "cotr.fleet", "fleet-types": "cotr.fleet", "menus": "cotr.menu",
-               "boms": "cotr.production", "drivers": "cotr.drivers"}
-Entity = Literal["pools", "fleet", "fleet-types", "menus", "boms", "drivers"]
+               "boms": "cotr.production", "items": "cotr.production", "drivers": "cotr.drivers"}
+Entity = Literal["pools", "fleet", "fleet-types", "menus", "boms", "items", "drivers"]
 MANAGEMENT = "cotr.management"  # salary, bank and NIK of the drivers (migration 050)
 
 
@@ -353,6 +355,13 @@ def locations(day: Optional[date] = None, _: dict = Depends(require_page("cotr.c
 @router.get("/locations/{driver_code}")
 def driver_track(driver_code: str, day: Optional[date] = None, _: dict = Depends(require_page("cotr.check-in"))):
     return cotr.track(driver_code, day or today())
+
+
+@router.get("/usage")
+def usage(dateFrom: Optional[date] = None, dateTo: Optional[date] = None, pool: Optional[str] = None,
+          _: dict = Depends(require_page("cotr.production"))):
+    end = dateTo or today()
+    return cotr.usage(dateFrom or end - timedelta(days=6), end, pool)
 
 
 @router.get("/production")

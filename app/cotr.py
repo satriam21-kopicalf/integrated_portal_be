@@ -472,7 +472,10 @@ MASTERS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
                                      "qris_merchant", "note"), "code"),
     "fleet-types": ("cotr_fleet_type", "code", ("code", "name", "sort"), "sort, name"),
     "menus": ("cotr_menu", "code", ("code", "name", "category", "price", "bom_code", "is_active", "sort"), "sort, name"),
-    "boms": ("cotr_bom", "code", ("code", "name", "output", "yield_qty", "yield_unit", "lines"), "name"),
+    "boms": ("cotr_bom", "code", ("code", "name", "output", "yield_qty", "yield_unit", "lines", "kind", "units", "note"),
+             "kind DESC, name"),
+    "items": ("cotr_item", "code", ("code", "name", "category", "unit", "pack_unit", "pack_qty", "cost", "is_stock",
+                                    "is_active", "note"), "category, name"),
     "drivers": ("cotr_driver", "code", ("code", "name", "phone", "pool_code", "fleet_code", "status", "joined_on", "user_id",
                                         "nik", "birth_place", "birth_date", "gender", "address", "emergency_name",
                                         "emergency_phone", "employment_status", "position", "contract_end", "salary_monthly",
@@ -484,7 +487,7 @@ SENSITIVE = {"drivers": ("nik", "salary_monthly", "allowance_monthly", "bank_nam
 IMAGES = {"drivers": {"photo": ("photo", "photo_type")},
           "fleet": {"photo": ("photo", "photo_type"), "qris": ("qris_image", "qris_image_type")}}
 _BYTES = {"photo", "photo_type", "qris_image", "qris_image_type", "updated_by"}
-UPPER_CODES = {"pools", "fleet", "menus", "boms", "drivers"}  # fleet types keep their code as typed (sepeda_listrik)
+UPPER_CODES = {"pools", "fleet", "menus", "boms", "drivers", "items"}  # fleet types keep their code as typed (sepeda_listrik)
 
 
 def _plain(row: dict) -> dict:
@@ -531,6 +534,11 @@ def _value(col: str, v: Any) -> Any:
         return Jsonb(lines)
     if col == "storage":
         return [s.strip() for s in (v.split(",") if isinstance(v, str) else (v or [])) if str(s).strip()]
+    if col == "units":  # the containers of a premix: [{name, grams}]
+        units = [{"name": str(u.get("name", "")).strip(), "grams": float(u.get("grams") or 0)} for u in (v or []) if str(u.get("name", "")).strip()]
+        if any(u["grams"] <= 0 for u in units):
+            raise CotrError("Gram per satuan harus lebih dari 0")
+        return Jsonb(units)
     return v
 
 
@@ -947,3 +955,56 @@ def track(driver_code: str, day: date) -> list[dict]:
     return [_point(r) for r in db.fetch(
         f"""SELECT l.* FROM {P}.cotr_location l JOIN {P}.cotr_shift s ON s.id = l.shift_id
              WHERE l.driver_code = %s AND s.day = %s ORDER BY l.at""", (driver_code, day))]
+
+
+# ---------------------------------------------------------------- theoretical usage (migration 051)
+
+def usage(d_from: date, d_to: date, pool: Optional[str]) -> dict:
+    """What the drivers used in theory: the cups sold (not voided), wasted and given for tasting at the end of the
+    shifts, exploded through the recipe card of each menu (premix down to its raw materials) into items."""
+    where, args = ("AND sh.pool_code = %s", (pool,)) if pool else ("", ())
+    sold = db.fetch(
+        f"""SELECT l->>'code' AS code, sum((l->>'qty')::int) AS qty FROM {P}.cotr_sale s
+              JOIN {P}.cotr_shift sh ON sh.id = s.shift_id, jsonb_array_elements(s.lines) l
+             WHERE s.voided_at IS NULL AND sh.day BETWEEN %s AND %s {where} GROUP BY 1""", (d_from, d_to, *args))
+    ends = db.fetch(f"""SELECT end_waste, end_cupping FROM {P}.cotr_shift sh
+                         WHERE sh.day BETWEEN %s AND %s AND sh.status = 'closed' {where}""", (d_from, d_to, *args))
+    cups: dict[str, dict[str, float]] = {}
+    for r in sold:
+        cups.setdefault(r["code"], {"sold": 0, "waste": 0, "cupping": 0})["sold"] += int(r["qty"])
+    for e in ends:
+        for src, col in (("waste", "end_waste"), ("cupping", "end_cupping")):
+            for code, n in (e[col] or {}).items():
+                cups.setdefault(code, {"sold": 0, "waste": 0, "cupping": 0})[src] += int(n)
+    menus_by = {m["code"]: m for m in menus()}
+    boms = {b["code"]: b for b in db.fetch(f"SELECT * FROM {P}.cotr_bom")}
+    items = {i["code"]: i for i in db.fetch(f"SELECT * FROM {P}.cotr_item")}
+    out: dict[str, dict] = {}
+    menu_rows, no_recipe = [], []
+    for code, c in sorted(cups.items()):
+        m = menus_by.get(code)
+        menu_rows.append({"code": code, "name": m["name"] if m else code, **c, "bom": m["bom_code"] if m else None})
+        if not m or not m["bom_code"]:
+            no_recipe.append(code)
+            continue
+        for src in ("sold", "waste", "cupping"):
+            if not c[src]:
+                continue
+            part: dict[str, dict] = {}
+            explode(boms, m["bom_code"], c[src], part)
+            for k, v in part.items():
+                it = items.get(k)
+                row = out.setdefault(k, {"item": k, "name": it["name"] if it else k, "unit": it["unit"] if it else v["unit"],
+                                         "category": it["category"] if it else None, "sold": 0.0, "waste": 0.0, "cupping": 0.0,
+                                         "cost": float(it["cost"]) if it and it["cost"] is not None else None})
+                row[src] += v["qty"]
+    import math
+    rows = []
+    for r in out.values():
+        r["total"] = r["sold"] + r["waste"] + r["cupping"]
+        for k in ("sold", "waste", "cupping", "total"):
+            r[k] = math.ceil(round(r[k], 6))
+        r["value"] = round(r["total"] * r["cost"], 2) if r["cost"] is not None else None
+        rows.append(r)
+    rows.sort(key=lambda r: (r["category"] or "", -r["total"]))
+    return {"from": d_from.isoformat(), "to": d_to.isoformat(), "menus": menu_rows, "items": rows, "noRecipe": no_recipe}

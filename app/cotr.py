@@ -10,8 +10,9 @@ spent on the road from it, which give the balance of the day (- short / + over: 
 fleet is never stored: start stock + reloads received - sales not voided. Costs on the road (fuel, ice, stall …) are
 sent with the receipt and approved or rejected in the portal.
 """
+import math
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
 from typing import Any, Iterable, Optional
@@ -241,7 +242,7 @@ def _dispatch_view(x: Optional[dict]) -> Optional[dict]:
     return {"id": str(x["id"]), "day": _iso(x["day"]), "driver": x["driver_code"], "pool": x["pool_code"], "lines": x["lines"],
             "note": x["note"], "status": x["status"], "assignedAt": _iso(x["assigned_at"]), "driverCounts": x["driver_counts"],
             "driverNote": x["driver_note"], "checkedAt": _iso(x["checked_at"]), "finalLines": x["final_lines"],
-            "resolvedAt": _iso(x["resolved_at"]), "resolutionNote": x["resolution_note"]}
+            "resolvedAt": _iso(x["resolved_at"]), "resolutionNote": x["resolution_note"], "cupping": x.get("cupping") or {}}
 
 
 def dispatch_of(driver_code: str, day: date) -> Optional[dict]:
@@ -728,8 +729,10 @@ def resolve_reload(user: dict, reload_id: str, lines: dict, note: Optional[str])
 def storage_day(day: date, pool: Optional[str]) -> dict:
     """The drivers of a pool for the day with their assignment, the shift, and the reloads to decide or settle."""
     where, args = ("AND d.pool_code = %s", (pool,)) if pool else ("", ())
-    drivers = db.fetch(f"""SELECT d.code, d.name, d.pool_code, d.fleet_code, d.status FROM {P}.cotr_driver d
-                            WHERE d.status <> 'inactive' {where} ORDER BY d.fleet_code NULLS LAST, d.code""", args)
+    # the drivers only: the team of the workbook DATA COTR (migration 060) also holds the storage, stockist … staff
+    drivers = db.fetch(f"""SELECT d.code, d.name, d.nickname, d.pool_code, d.fleet_code, d.status FROM {P}.cotr_driver d
+                            WHERE d.status <> 'inactive' AND (d.department IS NULL OR d.department ILIKE 'armada%%') {where}
+                            ORDER BY d.fleet_code NULLS LAST, d.code""", args)
     codes = [d["code"] for d in drivers]
     disp = {x["driver_code"]: x for x in db.fetch(f"SELECT * FROM {P}.cotr_dispatch WHERE day = %s AND driver_code = ANY(%s)", (day, codes))}
     shifts = {s["driver_code"]: s for s in db.fetch(f"SELECT * FROM {P}.cotr_shift WHERE day = %s AND driver_code = ANY(%s)", (day, codes))}
@@ -742,29 +745,38 @@ def storage_day(day: date, pool: Optional[str]) -> dict:
     rows = []
     for d in drivers:
         s = shifts.get(d["code"])
-        rows.append({"code": d["code"], "name": d["name"], "pool": d["pool_code"], "fleet": d["fleet_code"], "status": d["status"],
-                     "dispatch": _dispatch_view(disp.get(d["code"])), "previous": prev.get(d["code"]),
+        rows.append({"code": d["code"], "name": d["name"], "nickname": d["nickname"], "pool": d["pool_code"], "fleet": d["fleet_code"],
+                     "status": d["status"], "dispatch": _dispatch_view(disp.get(d["code"])), "previous": prev.get(d["code"]),
                      "shift": s["status"] if s else None})
+    advice = suggestions(day, codes)
+    for r in rows:
+        r["advice"] = advice.get(r["code"])
     return {"day": day.isoformat(), "drivers": rows,
             "reloads": [_reload_view(r) | {"driver": r["driver_code"]} for r in reloads]}
 
 
-def assign(user: dict, day: date, driver_code: str, lines: dict, note: Optional[str]) -> dict:
-    """The storage assigns the cups of the day to a driver; changeable until the driver has accepted them."""
-    given = clean_stock(lines, _menu_map())
+def assign(user: dict, day: date, driver_code: str, lines: dict, note: Optional[str], cupping: Optional[dict] = None) -> dict:
+    """The storage assigns the cups of the day to a driver; changeable until the driver has accepted them. `lines` is
+    what the driver carries (the start stock); `cupping` (migration 061) the part of it for tasting, at most the lines."""
+    menus = _menu_map()
+    given = clean_stock(lines, menus)
     if not given:
         raise CotrError("Isi minimal satu produk")
+    taste = clean_stock(cupping or {}, menus)
+    if any(n > given.get(k, 0) for k, n in taste.items()):
+        raise CotrError("Cupping tidak boleh melebihi produk yang dibawa")
     d = db.fetchrow(f"SELECT code, pool_code FROM {P}.cotr_driver WHERE code = %s", (driver_code,))
     if not d:
         raise CotrError("Driver tidak ditemukan")
     row = db.fetchrow(
-        f"""INSERT INTO {P}.cotr_dispatch (day, driver_code, pool_code, lines, note, assigned_by)
-            VALUES (%s, %s, %s, %s, %s, %s)
+        f"""INSERT INTO {P}.cotr_dispatch (day, driver_code, pool_code, lines, note, assigned_by, cupping)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (day, driver_code) DO UPDATE SET lines = EXCLUDED.lines, note = EXCLUDED.note, status = 'assigned',
+                cupping = EXCLUDED.cupping,
                 assigned_at = now(), assigned_by = EXCLUDED.assigned_by, driver_counts = NULL, driver_note = NULL, checked_at = NULL
               WHERE {P}.cotr_dispatch.status <> 'accepted'
             RETURNING *""",
-        (day, driver_code, d["pool_code"], Jsonb(given), (note or "").strip() or None, user["id"]))
+        (day, driver_code, d["pool_code"], Jsonb(given), (note or "").strip() or None, user["id"], Jsonb(taste)))
     if not row:
         raise CotrError("Assignment sudah diterima driver dan tidak dapat diubah")
     return _dispatch_view(row)
@@ -1325,3 +1337,69 @@ def import_team(user: dict, rows: list[dict], apply: bool) -> dict:
     return {"rows": plan, "skipped": skipped, "new": by("new"), "update": by("update"), "same": by("same"),
             "newArmada": sum(p["newArmada"] for p in plan), "applied": apply, "format": "team",
             "departments": {d: sum(p["department"] == d for p in plan) for d in sorted({p["department"] for p in plan})}}
+
+
+# ---------------------------------------------------------------- assignment advice (migration 061)
+
+ADVICE_DAYS = 14
+ADVICE_BUFFER = 0.10  # on top of the average sold …
+HIGH_WASTE = 0.15  # … none when the driver wastes more than this share of what he carries
+
+
+def advise(sold: dict[str, float], waste: dict[str, float], cupping: dict[str, float], days: int) -> dict:
+    """What a driver should carry from his last days: per menu the average sold per day worked plus a buffer (none
+    when his waste is high), rounded up; the cupping of a day on average. Pure: the numbers of the history."""
+    if days <= 0:
+        return {"days": 0, "sell": {}, "cupping": {}, "avgSold": {}, "wasteRate": None}
+    menus = set(sold) | set(waste)
+    carried = sum(sold.values()) + sum(waste.values())
+    rate = round(sum(waste.values()) / carried, 4) if carried else None
+    buffer = 0.0 if rate is not None and rate > HIGH_WASTE else ADVICE_BUFFER
+    avg = {m: round(sold.get(m, 0) / days, 2) for m in menus}
+    sell = {m: math.ceil(round(a * (1 + buffer), 6)) for m, a in avg.items() if a > 0}
+    taste = {m: round(n / days) for m, n in cupping.items() if round(n / days) > 0}
+    return {"days": days, "sell": sell, "cupping": taste, "avgSold": avg, "wasteRate": rate}
+
+
+def suggestions(day: date, codes: list[str]) -> dict[str, dict]:
+    """The advice of every driver from the shifts of the last ADVICE_DAYS days before `day`; a driver without any gets
+    the average of the drivers of his pool (source "pool")."""
+    if not codes:
+        return {}
+    since = day - timedelta(days=ADVICE_DAYS)
+    shifts = db.fetch(f"""SELECT sh.id, sh.driver_code, d.pool_code, sh.end_waste, sh.end_cupping FROM {P}.cotr_shift sh
+                            JOIN {P}.cotr_driver d ON d.code = sh.driver_code
+                           WHERE sh.day >= %s AND sh.day < %s AND sh.status = 'closed'""", (since, day))
+    sold: dict[str, dict[str, float]] = {}
+    for r in db.fetch(f"""SELECT sh.driver_code, l->>'code' AS code, sum((l->>'qty')::int) AS qty FROM {P}.cotr_sale s
+                            JOIN {P}.cotr_shift sh ON sh.id = s.shift_id, jsonb_array_elements(s.lines) l
+                           WHERE s.voided_at IS NULL AND sh.day >= %s AND sh.day < %s AND sh.status = 'closed'
+                           GROUP BY 1, 2""", (since, day)):
+        sold.setdefault(r["driver_code"], {})[r["code"]] = float(r["qty"])
+    days: dict[str, int] = {}
+    waste: dict[str, dict[str, float]] = {}
+    taste: dict[str, dict[str, float]] = {}
+    pool_of: dict[str, str] = {}
+    for sh in shifts:
+        c = sh["driver_code"]
+        days[c] = days.get(c, 0) + 1
+        pool_of[c] = sh["pool_code"]
+        for k, n in (sh["end_waste"] or {}).items():
+            waste.setdefault(c, {})[k] = waste.get(c, {}).get(k, 0) + float(n)
+        for k, n in (sh["end_cupping"] or {}).items():
+            taste.setdefault(c, {})[k] = taste.get(c, {}).get(k, 0) + float(n)
+    out = {c: {**advise(sold.get(c, {}), waste.get(c, {}), taste.get(c, {}), days[c]), "source": "driver"} for c in days}
+    # the pool average for the drivers without history
+    pools: dict[str, list[dict]] = {}
+    for c, a in out.items():
+        pools.setdefault(pool_of[c], []).append(a)
+    pool_avg: dict[str, dict] = {}
+    for p, items in pools.items():
+        keys = {k for a in items for k in a["avgSold"]}
+        avg = {k: sum(a["avgSold"].get(k, 0) for a in items) / len(items) for k in keys}
+        pool_avg[p] = {"days": 0, "sell": {k: math.ceil(round(v * (1 + ADVICE_BUFFER), 6)) for k, v in avg.items() if v > 0},
+                       "cupping": {}, "avgSold": {k: round(v, 2) for k, v in avg.items()}, "wasteRate": None, "source": "pool"}
+    for r in db.fetch(f"SELECT code, pool_code FROM {P}.cotr_driver WHERE code = ANY(%s)", (codes,)):
+        if r["code"] not in out and r["pool_code"] in pool_avg:
+            out[r["code"]] = pool_avg[r["pool_code"]]
+    return out

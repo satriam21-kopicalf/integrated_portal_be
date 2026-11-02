@@ -214,6 +214,7 @@ class LinesIn(BaseModel):
 class AssignIn(LinesIn):
     day: date
     driver: str = Field(min_length=1, max_length=40)
+    cupping: Optional[dict[str, int]] = None  # the part of the lines for tasting (migration 061)
 
 
 @router.get("/monitor")
@@ -242,7 +243,7 @@ def storage(day: Optional[date] = None, pool: Optional[str] = None, _: dict = De
 
 @router.put("/dispatch")
 def assign(body: AssignIn, request: Request, user: dict = Depends(require_page("cotr.storage"))):
-    out = _call(cotr.assign, user, body.day, body.driver, body.lines, body.note)
+    out = _call(cotr.assign, user, body.day, body.driver, body.lines, body.note, body.cupping)
     _log(request, user, "cotr.dispatch.assign", f"Assignment COTR {body.driver} {body.day}", {"lines": body.lines})
     return out
 

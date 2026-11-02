@@ -213,3 +213,11 @@ def test_team_of_the_data_cotr_workbook():
     assert rows["CALF0101001"]["pool"] == "POOL-KWI" and rows["CALF0101001"]["bike"] == "S7" and rows["CALF0101001"]["armada"] == "BNI 01"
     assert rows["CALF0101002"]["pool"] == "POOL-PLM" and rows["CALF0101002"]["armada"] is None
     assert rows["CALF0101003"]["pool"] is None  # an unknown placement is listed, not imported
+
+
+def test_assignment_advice_from_the_last_days():
+    a = cotr.advise({"PRM": 100}, {"PRM": 5}, {"PRM": 4}, 5)  # 20 sold a day, waste 4.8 %: +10 %
+    assert a["sell"] == {"PRM": 22} and a["cupping"] == {"PRM": 1} and a["wasteRate"] == round(5 / 105, 4)
+    b = cotr.advise({"PRM": 100}, {"PRM": 40}, {}, 5)  # waste 28.6 %: no buffer
+    assert b["sell"] == {"PRM": 20}
+    assert cotr.advise({}, {}, {}, 0)["sell"] == {}

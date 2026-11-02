@@ -2,14 +2,14 @@
 
 Pricelist   the price of every raw material (kc_master.item, STOCK) per base unit from a date (cc_item_price); the price
             of a day is the latest one valid by then. As a reference the average purchase price of the last 90 days
-            (ESB goods received, agg_cost_item_period purchase_value / purchase_qty) is shown beside it.
+            is shown beside it (ESB purchase invoice lines in the base unit of the item, Σ qty × price / Σ qty).
 Menu cards  a recipe card per menu as the production calculator: lines of raw materials (base unit) or WIP / premix
             recipes (kc_recipe active version, in grams, exploded into their ingredients per gram of batch); ESB POS
             menus are assigned to a card (cc_menu_recipe_map, by menu id), several menus may share one card.
 Report      for a period and branches, from the POS sales per menu (agg_menu_daily):
             1. Material Required Planning: average daily sales × horizon days (+ buffer) exploded into raw materials;
-            2. Usage actual vs system: system = sold × cards (exploded), actual = ESB actual usage of the items
-               (agg_cost_item_period.actual_qty of the periods starting in the range);
+            2. Usage actual vs system: system = sold × cards (exploded), actual = SO awal + purchases − SO akhir per
+               item of the branches with both ESB stock opname documents (chosen as Outlet ratio, app/ratio.py);
             3. COGS bahan baku: system usage × pricelist; per menu the HPP of a portion, the cost of the sold portions
                and the ratio to the menu's sales.
 """
@@ -21,8 +21,10 @@ from typing import Any, Optional
 from psycopg.types.json import Jsonb
 
 from app import database as db
+from app.database import SCHEMA
 
 P = "integration_portal"
+SKIP_STATUSES = ("Rejected", "Cancelled", "Void")
 
 
 class CostingError(ValueError):
@@ -41,9 +43,7 @@ def items(search: str = "", category: str = "", on: Optional[date] = None) -> di
     day = on or date.today()
     rows = db.fetch(
         f"""SELECT i.code, i.name, i.base_uom, c.name AS category,
-                   pr.price, pr.valid_from, pr.note,
-                   (SELECT sum(a.purchase_value) / nullif(sum(a.purchase_qty), 0) FROM {P}.agg_cost_item_period a
-                     WHERE a.product_code = i.code AND a.period_start >= %(since)s AND a.purchase_qty > 0) AS purchase_avg
+                   pr.price, pr.valid_from, pr.note
               FROM kc_master.item i LEFT JOIN kc_master.item_category c ON c.id = i.category_id
               LEFT JOIN LATERAL (SELECT price, valid_from, note FROM {P}.cc_item_price p
                                   WHERE p.item_code = i.code AND p.valid_from <= %(day)s
@@ -53,6 +53,7 @@ def items(search: str = "", category: str = "", on: Optional[date] = None) -> di
                AND (%(cat)s = '' OR c.name = %(cat)s)
              ORDER BY c.name NULLS LAST, i.name""",
         {"day": day, "since": day - timedelta(days=90), "q": search.strip(), "like": f"%{search.strip()}%", "cat": category})
+    avg = purchase_avg(day - timedelta(days=90), day)
     cats = [r["name"] for r in db.fetch(
         """SELECT DISTINCT c.name FROM kc_master.item i JOIN kc_master.item_category c ON c.id = i.category_id
             WHERE i.is_active AND i.item_type = 'STOCK' ORDER BY 1""")]
@@ -60,7 +61,23 @@ def items(search: str = "", category: str = "", on: Optional[date] = None) -> di
         "code": r["code"], "name": r["name"], "unit": r["base_uom"], "category": r["category"],
         "price": _f(r["price"]) if r["price"] is not None else None,
         "validFrom": r["valid_from"].isoformat() if r["valid_from"] else None, "note": r["note"],
-        "purchaseAvg": round(_f(r["purchase_avg"]), 4) if r["purchase_avg"] is not None else None} for r in rows]}
+        "purchaseAvg": avg.get((r["code"], str(r["base_uom"] or "").upper()))} for r in rows]}
+
+
+def purchase_avg(d_from: date, d_to: date) -> dict[tuple[str, str], float]:
+    """{(product code, UOM): average price} of the ESB purchase invoice lines of the period (Σ qty × price / Σ qty);
+    a purchase in another unit (a pack) is left out of the base-unit price."""
+    try:
+        rows = db.fetch(
+            f"""SELECT l.product_code, upper(coalesce(l.uom_name, '')) AS uom, sum(l.qty * l.price) AS value, sum(l.qty) AS qty
+                  FROM {SCHEMA}.erp_documents d
+                  JOIN {SCHEMA}.erp_document_lines l ON l.module = d.module AND l.doc_num = d.doc_num AND l.line_type = 'detail'
+                 WHERE d.module = 'purchase_invoice' AND d.doc_date BETWEEN %s AND %s AND d.deleted_at IS NULL
+                   AND d.status_name <> ALL(%s) AND l.product_code IS NOT NULL AND l.qty > 0
+                 GROUP BY 1, 2""", (d_from, d_to, list(SKIP_STATUSES)))
+    except Exception:  # noqa: BLE001 - the ESB documents unreachable: the pricelist still works without the reference
+        return {}
+    return {(r["product_code"], r["uom"]): round(_f(r["value"]) / _f(r["qty"]), 4) for r in rows if _f(r["qty"])}
 
 
 def price_history(code: str) -> list[dict]:
@@ -325,21 +342,16 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
         m["hpp"] = round(unit, 2) if unit is not None else None
         m["cogs"] = round(unit * m["qty"], 2) if unit is not None else None
         m["ratio"] = round(m["cogs"] / m["sales"], 6) if m["cogs"] is not None and m["sales"] else None
-    actual = {r["product_code"]: r for r in db.fetch(
-        f"""SELECT product_code, max(product_name) AS name, max(base_unit) AS unit, sum(actual_qty) AS actual,
-                   sum(theoretical_qty) AS esb_theoretical
-              FROM {P}.agg_cost_item_period WHERE period_start BETWEEN %(a)s AND %(b)s
-               AND (%(br)s::text[] IS NULL OR branch_code = ANY(%(br)s)) AND product_code IS NOT NULL GROUP BY 1""",
-        {"a": d_from, "b": d_to, "br": branches})}
+    actual = actual_usage(d_from, d_to, branches)
     usage = []
     for k, v in sorted(system.items(), key=lambda kv: kv[1]["name"]):
         a = actual.get(v["code"] or "")
         p = price.get(v["code"]) if v["code"] else v.get("price")
         usage.append({"code": v["code"], "name": v["name"], "unit": v["unit"], "isStock": v.get("isStock", True), "extra": v.get("extra", False),
-                      "system": round(v["qty"], 3), "actual": round(_f(a["actual"]), 3) if a else None,
-                      "variance": round(_f(a["actual"]) - v["qty"], 3) if a else None,
+                      "system": round(v["qty"], 3), "actual": round(a, 3) if a is not None else None,
+                      "variance": round(a - v["qty"], 3) if a is not None else None,
                       "price": p, "systemValue": round(v["qty"] * p, 2) if p is not None else None,
-                      "actualValue": round(_f(a["actual"]) * p, 2) if a and p is not None else None})
+                      "actualValue": round(a * p, 2) if a is not None and p is not None else None})
     def unit_price(v: dict) -> Optional[float]:
         return price.get(v["code"]) if v["code"] else v.get("price")
     mrp = [{"code": v["code"], "name": v["name"], "unit": v["unit"], "isStock": v.get("isStock", True), "extra": v.get("extra", False),
@@ -357,3 +369,47 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
                       "unpriced": sum(1 for m in per_menu if m["hpp"] is None),
                       "systemValue": sum(u["systemValue"] or 0 for u in usage),
                       "actualValue": sum(u["actualValue"] or 0 for u in usage)}}
+
+
+def actual_usage(d_from: date, d_to: date, branches: Optional[list[str]]) -> dict[str, float]:
+    """{product code: SO awal + purchases − SO akhir} over the branches that have both ESB stock opname documents (the
+    document closest to the day before the period and to its last day, as Outlet ratio); a purchase counts when its
+    unit is the unit the item is counted in. Empty when the ESB documents cannot be read."""
+    from app import ratio  # the stock opname documents of a day, chosen as the Outlet ratio does
+
+    try:
+        start, end = ratio.so_values(d_from - timedelta(days=1), branches), ratio.so_values(d_to, branches)
+        both = [b for b in start if b in end]
+        if not both:
+            return {}
+
+        def counted(docs: list[str]) -> dict[str, tuple[float, str]]:
+            out: dict[str, tuple[float, str]] = {}
+            for r in db.fetch(
+                    f"""SELECT product_code, upper(coalesce(uom_name, '')) AS uom, sum(qty) AS qty
+                          FROM {SCHEMA}.erp_document_lines
+                         WHERE module = 'stock_opname' AND line_type = 'detail' AND doc_num = ANY(%s) AND product_code IS NOT NULL
+                         GROUP BY 1, 2""", (docs,)):
+                qty, _ = out.get(r["product_code"], (0.0, r["uom"]))
+                out[r["product_code"]] = (qty + _f(r["qty"]), r["uom"])
+            return out
+        so_a = counted([start[b]["doc"] for b in both])
+        so_b = counted([end[b]["doc"] for b in both])
+        bought: dict[tuple[str, str], float] = {}
+        for r in db.fetch(
+                f"""SELECT l.product_code, upper(coalesce(l.uom_name, '')) AS uom, sum(l.qty) AS qty
+                      FROM {SCHEMA}.erp_documents d
+                      JOIN {SCHEMA}.erp_document_lines l ON l.module = d.module AND l.doc_num = d.doc_num AND l.line_type = 'detail'
+                      JOIN {SCHEMA}.master_branches b ON b.branch_id::text = d.branch_id::text
+                     WHERE d.module = 'purchase_invoice' AND d.doc_date BETWEEN %s AND %s AND d.deleted_at IS NULL
+                       AND d.status_name <> ALL(%s) AND b.branch_code = ANY(%s) AND l.product_code IS NOT NULL
+                     GROUP BY 1, 2""", (d_from, d_to, list(SKIP_STATUSES), both)):
+            bought[(r["product_code"], r["uom"])] = _f(r["qty"])
+    except Exception:  # noqa: BLE001 - no ESB documents: the report shows the system usage only
+        return {}
+    out = {}
+    for code in set(so_a) | set(so_b):
+        a, ua = so_a.get(code, (0.0, ""))
+        b, ub = so_b.get(code, (0.0, ua))
+        out[code] = a + bought.get((code, ua or ub), 0.0) - b
+    return out

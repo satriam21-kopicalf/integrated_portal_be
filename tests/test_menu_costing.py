@@ -34,3 +34,19 @@ def test_free_items_in_a_card():
     out: dict = {}
     mc.explode({"lines": lines}, 4, WIP, out)
     assert out["o:stiker"]["qty"] == 4 and out["o:stiker"]["price"] == 150.0
+
+
+def test_actual_usage_from_the_stock_opname_and_purchases(monkeypatch):
+    from datetime import date
+
+    from app import ratio
+    docs = {date(2026, 10, 31): {"A": {"doc": "SO-1"}, "B": {"doc": "SO-9"}}, date(2026, 11, 7): {"A": {"doc": "SO-2"}}}
+    monkeypatch.setattr(ratio, "so_values", lambda day, codes: docs[day])
+
+    def fetch(sql, params=None):
+        if "stock_opname" in sql:
+            return [{"product_code": "RM-MILK", "uom": "GR", "qty": 5000 if "SO-1" in params[0] else 2000}]
+        assert params[3] == ["A"]  # only the branches with both documents
+        return [{"product_code": "RM-MILK", "uom": "GR", "qty": 10000}, {"product_code": "RM-MILK", "uom": "PACK", "qty": 3}]
+    monkeypatch.setattr(mc.db, "fetch", fetch)
+    assert mc.actual_usage(date(2026, 11, 1), date(2026, 11, 7), None) == {"RM-MILK": 5000 + 10000 - 2000}

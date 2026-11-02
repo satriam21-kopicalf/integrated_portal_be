@@ -22,6 +22,7 @@ from psycopg.types.json import Jsonb
 
 from app import database as db
 from app.database import SCHEMA
+from app.scope import COMPANY_NAMES, MAIN_COMPANY
 
 P = "integration_portal"
 SKIP_STATUSES = ("Rejected", "Cancelled", "Void")
@@ -208,13 +209,42 @@ def delete_recipe(code: str) -> bool:
 
 
 def menus(days: int = 90) -> list[dict]:
-    """The ESB POS menus sold in the last `days` days with their quantity and the card assigned to them."""
+    """Every menu of the POS transactions (menus, packages and extras, from the monthly rollup of every month, as the
+    sales pages), with its brand (ESB company of the branches that sold it), the quantity of the last `days` days, the
+    last day it sold and the card assigned to it. Most sold first, then by name."""
     since = date.today() - timedelta(days=days)
-    return [{"id": r["menu_id"], "name": r["name"], "category": r["category"], "qty": _f(r["qty"]), "recipe": r["recipe_code"]}
-            for r in db.fetch(
-        f"""SELECT a.menu_id, max(a.menu_name) AS name, max(a.category) AS category, sum(a.qty) AS qty, m.recipe_code
-              FROM {P}.agg_menu_daily a LEFT JOIN {P}.cc_menu_recipe_map m ON m.menu_id = a.menu_id
-             WHERE a.sales_date >= %s GROUP BY a.menu_id, m.recipe_code ORDER BY sum(a.qty) DESC""", (since,))]
+    rows = db.fetch(
+        f"""WITH br AS (SELECT DISTINCT ON (branch_code) branch_code, coalesce(company_code, %(main)s) AS company
+                          FROM {SCHEMA}.master_branches WHERE coalesce(branch_code, '') <> ''
+                         ORDER BY branch_code, coalesce(is_deleted, false)),
+                 every AS (SELECT a.menu_id, max(a.menu_name) AS name, max(a.category) AS category,
+                                  max(a.category_detail) AS detail, string_agg(DISTINCT a.kind, ',') AS kinds,
+                                  string_agg(DISTINCT coalesce(br.company, %(main)s), ',') AS companies, max(a.month) AS last_month
+                             FROM {P}.agg_menu_monthly a LEFT JOIN br ON br.branch_code = a.branch_code
+                            WHERE a.menu_id <> '?' GROUP BY a.menu_id),
+                 recent AS (SELECT menu_id, sum(qty) AS qty, max(sales_date) AS last_day FROM {P}.agg_menu_daily
+                             WHERE sales_date >= %(since)s AND menu_id <> '?' GROUP BY menu_id)
+            SELECT coalesce(e.menu_id, r.menu_id) AS menu_id, e.name, e.category, e.detail, e.kinds, e.companies, e.last_month,
+                   r.qty, r.last_day, m.recipe_code
+              FROM every e FULL JOIN recent r ON r.menu_id = e.menu_id
+              LEFT JOIN {P}.cc_menu_recipe_map m ON m.menu_id = coalesce(e.menu_id, r.menu_id)""",
+        {"since": since, "main": MAIN_COMPANY})
+    missing = [r["menu_id"] for r in rows if r["name"] is None]
+    if missing:  # sold this month, not rolled up yet: the names from the daily rows
+        names = {r["menu_id"]: r for r in db.fetch(
+            f"""SELECT menu_id, max(menu_name) AS name, max(category) AS category, max(category_detail) AS detail,
+                       string_agg(DISTINCT kind, ',') AS kinds FROM {P}.agg_menu_daily
+                 WHERE menu_id = ANY(%s) GROUP BY menu_id""", (missing,))}
+        for r in rows:
+            if r["name"] is None and r["menu_id"] in names:
+                r.update({k: names[r["menu_id"]][k] for k in ("name", "category", "detail", "kinds")})
+    out = [{"id": r["menu_id"], "name": r["name"] or r["menu_id"], "category": r["category"] or "",
+            "detail": r["detail"] or "", "kinds": sorted((r["kinds"] or "menu").split(",")),
+            "companies": [{"code": c, "name": COMPANY_NAMES.get(c, c)} for c in sorted((r["companies"] or MAIN_COMPANY).split(","))],
+            "qty": _f(r["qty"]), "lastSold": (r["last_day"] or r["last_month"]).isoformat() if (r["last_day"] or r["last_month"]) else None,
+            "recipe": r["recipe_code"]} for r in rows]
+    out.sort(key=lambda m: (-m["qty"], m["name"].lower()))
+    return out
 
 
 def explode(card: dict, portions: float, wip: dict[str, dict], out: dict[str, dict]) -> None:

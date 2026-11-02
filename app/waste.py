@@ -31,7 +31,9 @@ T_USAGE = "integration_portal.usage_count"
 T_DAY = "integration_portal.waste_day"
 SCOPES = {"waste": "Waste", "usage": "Usage Management", "premix": "Premix"}
 ENTRY_SCOPES = ("waste", "premix")  # usage is the daily list (save_usage)
-STATUSES = ("submitted", "approved", "rejected")
+STATUSES = ("submitted", "investigating", "approved", "rejected")
+T_INV = "integration_portal.waste_investigation"
+CATEGORY_SCOPES = ("waste", "usage")  # Form Waste (and premix) / Usage Management (migration 055)
 MAX_QTY = Decimal("1000000")
 # the WIP of the stock opname count (kopicalf_core recipes.count_recipes): active recipe, active version, facility type
 PREMIX = """SELECT r.id::text, r.code, r.name, r.recipe_type, r.count_uom, v.id::text AS version_id, v.output_qty_base AS batch
@@ -119,8 +121,10 @@ def catalog(facility: str = "OUTLET") -> dict:
         items["premix"] = premix_recipes(facility)
     except Exception:  # noqa: BLE001 - kc_recipe unreachable: the form still works for waste and usage
         items["premix"] = []
-    cats = [r["name"] for r in db.fetch(f"SELECT name FROM {T_CAT} WHERE is_active ORDER BY sort, name")]
-    return {"items": items, "categories": cats, "scopes": SCOPES}
+    cats: dict[str, list[str]] = {k: [] for k in CATEGORY_SCOPES}
+    for r in db.fetch(f"SELECT scope, name FROM {T_CAT} WHERE is_active ORDER BY sort, name"):
+        cats.setdefault(r["scope"], []).append(r["name"])
+    return {"items": items, "categories": cats["waste"], "usageCategories": cats["usage"], "scopes": SCOPES}
 
 
 def _item(scope: str, code: str, facility: str = "OUTLET") -> Optional[dict]:
@@ -145,7 +149,8 @@ def allowed_days() -> tuple[date, date]:
 
 COLUMNS = """e.id::text, e.user_id::text, e.username, e.full_name, e.role, e.branch_code, e.branch_name, e.business_date,
     e.scope, e.item_code, e.item_name, e.unit, e.qty, e.category, e.note, e.production_date, e.expired_date, e.qty_base, e.exploded, e.photo_taken_at, e.latitude, e.longitude,
-    e.status, e.review_note, e.reviewed_by, e.reviewed_at, e.created_at"""
+    e.status, e.review_note, e.reviewed_by, e.reviewed_at, e.created_at, e.signature IS NOT NULL AS signed,
+    e.investigation_id::text AS investigation_id"""
 
 
 def _view(r: dict) -> dict:
@@ -159,7 +164,8 @@ def _view(r: dict) -> dict:
             "grams": num(r.get("qty_base")), "ingredients": r.get("exploded") or None,
             "photoTakenAt": r["photo_taken_at"].isoformat() if r["photo_taken_at"] else None,
             "latitude": num(r["latitude"]), "longitude": num(r["longitude"]), "status": r["status"],
-            "review": None if r["status"] == "submitted" else {
+            "signed": bool(r.get("signed")), "investigationId": r.get("investigation_id"),
+            "review": None if r["status"] in ("submitted", "investigating") else {
                 "note": r["review_note"], "by": r["reviewed_by"],
                 "at": r["reviewed_at"].isoformat() if r["reviewed_at"] else None},
             "createdAt": r["created_at"].isoformat()}
@@ -206,8 +212,9 @@ def save_usage(user: dict, body: dict) -> dict:
     longitude}} (migration 045: category and photo required, the photo kept when saved again without one); an empty
     quantity (null) removes the item."""
     branch, day = _branch_day(user, body)
-    items = {i["code"]: i for i in catalog()["items"]["usage"]}
-    cats = catalog()["categories"]
+    cat = catalog()
+    items = {i["code"]: i for i in cat["items"]["usage"]}
+    cats = cat["usageCategories"]
     lines = body.get("lines") or {}
     unknown = [c for c in lines if c not in items]
     if unknown:
@@ -230,6 +237,9 @@ def save_usage(user: dict, body: dict) -> dict:
             raise WasteError(f"Pilih kategori untuk {name}")
         photo = parse_photo(line["photo"]) if line.get("photo") else None
         keep.append((code, q, category, (line.get("note") or "").strip()[:500] or None, photo, line))
+    sign = parse_photo(body["signature"]) if keep and body.get("signature") else None
+    if keep and sign is None:
+        raise WasteError("Tanda tangan wajib sebelum menyimpan Usage Management")
     if keep and any(k[4] is None for k in keep):
         have = {r["item_code"] for r in db.fetch(
             f"SELECT item_code FROM {T_USAGE} WHERE branch_code = %s AND business_date = %s AND photo IS NOT NULL",
@@ -247,7 +257,8 @@ def save_usage(user: dict, body: dict) -> dict:
             conn.execute(
                 f"""INSERT INTO {T_USAGE} (branch_code, branch_name, business_date, item_code, item_name, unit, qty,
                         category, note, photo, photo_type, photo_taken_at, latitude, longitude,
-                        user_id, username, full_name) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        user_id, username, full_name, signature, signature_type)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (branch_code, business_date, item_code) DO UPDATE SET qty = EXCLUDED.qty,
                         category = EXCLUDED.category, note = EXCLUDED.note,
                         photo = coalesce(EXCLUDED.photo, {T_USAGE}.photo),
@@ -256,10 +267,11 @@ def save_usage(user: dict, body: dict) -> dict:
                         latitude = CASE WHEN EXCLUDED.photo IS NULL THEN {T_USAGE}.latitude ELSE EXCLUDED.latitude END,
                         longitude = CASE WHEN EXCLUDED.photo IS NULL THEN {T_USAGE}.longitude ELSE EXCLUDED.longitude END,
                         user_id = EXCLUDED.user_id, username = EXCLUDED.username, full_name = EXCLUDED.full_name,
-                        updated_at = now()""",
+                        signature = EXCLUDED.signature, signature_type = EXCLUDED.signature_type, updated_at = now()""",
                 (branch["code"], branch["name"], day, code, i["name"], i["unit"], q, category, note, data, pt,
                  line.get("takenAt") if photo else None, line.get("latitude") if photo else None,
-                 line.get("longitude") if photo else None, user["id"], user["username"], user.get("full_name")))
+                 line.get("longitude") if photo else None, user["id"], user["username"], user.get("full_name"),
+                 sign[1], sign[0]))
     return {"branchCode": branch["code"], "branchName": branch["name"], "businessDate": day.isoformat(),
             "saved": len(keep), "removed": len(drop)}
 
@@ -302,22 +314,26 @@ def create(user: dict, body: dict, device: Optional[str], ip: Optional[str]) -> 
         raise WasteError("Pilih kategori waste")
     if not body.get("photo"):
         raise WasteError("Foto evidence wajib untuk setiap item")
+    if not body.get("signature"):
+        raise WasteError("Tanda tangan wajib sebelum submit waste")
+    sign_type, sign = parse_photo(body["signature"])
     made, expires = body.get("productionDate"), body.get("expiredDate")
     if made and expires and expires < made:
         raise WasteError("Expired date harus setelah production date")
     photo_type, data = parse_photo(body["photo"])
     row = db.fetchrow(
         f"""INSERT INTO {T} (user_id, username, full_name, role, branch_code, branch_name, business_date, scope, item_code,
-                item_name, unit, qty, qty_base, exploded, category, note, production_date, expired_date, photo, photo_type, photo_taken_at, latitude, longitude, device, ip)
+                item_name, unit, qty, qty_base, exploded, category, note, production_date, expired_date, photo, photo_type, photo_taken_at, latitude, longitude, device, ip,
+                signature, signature_type)
             VALUES (%(u)s, %(un)s, %(fn)s, %(role)s, %(bc)s, %(bn)s, %(d)s, %(s)s, %(ic)s, %(in)s, %(unit)s, %(q)s, %(g)s, %(x)s::jsonb, %(c)s,
-                %(n)s, %(pd)s, %(ed)s, %(p)s, %(pt)s, %(ta)s, %(lat)s, %(lng)s, %(dev)s, %(ip)s)
+                %(n)s, %(pd)s, %(ed)s, %(p)s, %(pt)s, %(ta)s, %(lat)s, %(lng)s, %(dev)s, %(ip)s, %(sg)s, %(sgt)s)
             RETURNING {COLUMNS.replace('e.', '')}""",
         {"u": user["id"], "un": user["username"], "fn": user.get("full_name"), "role": user["role"], "bc": branch["code"],
          "bn": branch["name"], "d": day, "s": scope, "ic": item["code"], "in": item["name"], "unit": unit, "q": qty, "g": grams,
          "x": json.dumps(comps) if comps is not None else None,
          "c": category, "n": (body.get("note") or "").strip()[:500] or None, "pd": made, "ed": expires, "p": data, "pt": photo_type,
          "ta": body.get("takenAt"), "lat": body.get("latitude"), "lng": body.get("longitude"),
-         "dev": (device or "")[:300] or None, "ip": ip})
+         "dev": (device or "")[:300] or None, "ip": ip, "sg": sign, "sgt": sign_type})
     return _view(row)
 
 
@@ -353,6 +369,7 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], scope
         f"""SELECT count(*)::int AS entries, count(DISTINCT e.branch_code)::int AS branches,
                    count(DISTINCT e.item_code)::int AS items, count(DISTINCT e.user_id)::int AS people,
                    count(*) FILTER (WHERE e.status = 'submitted')::int AS submitted,
+                   count(*) FILTER (WHERE e.status = 'investigating')::int AS investigating,
                    count(*) FILTER (WHERE e.status = 'approved')::int AS approved,
                    count(*) FILTER (WHERE e.status = 'rejected')::int AS rejected
             FROM {T} e WHERE {cond}""", params)
@@ -387,6 +404,11 @@ def review(ids: list[str], status: str, note: Optional[str], user: dict, branche
 
 def photo_of(entry_id: str) -> Optional[dict]:
     return db.fetchrow(f"SELECT user_id::text, branch_code, photo, photo_type FROM {T} WHERE id::text = %s", (entry_id,))
+
+
+def signature_of(entry_id: str) -> Optional[dict]:
+    return db.fetchrow(f"""SELECT user_id::text, branch_code, signature AS photo, signature_type AS photo_type FROM {T}
+                           WHERE id::text = %s AND signature IS NOT NULL""", (entry_id,))
 
 
 
@@ -438,3 +460,154 @@ def usage_report(date_from: date, date_to: date, branches: Optional[list[str]]) 
              "itemCode": r["item_code"], "itemName": r["item_name"], "unit": r["unit"], "qty": r["qty"], "by": r["by"],
              "category": r.get("category"), "note": r.get("note"), "hasPhoto": bool(r.get("has_photo")),
              "updatedAt": r["updated_at"].isoformat()} for r in rows]
+
+
+# ---------------------------------------------------------------- categories (migration 055)
+
+def _exec(sql: str, args: tuple) -> None:
+    with db.transaction() as conn:
+        conn.execute(sql, args)
+
+
+def categories() -> list[dict]:
+    """Every category of both forms with the number of entries / usage lines that used it (Cost Control settings)."""
+    rows = db.fetch(f"""SELECT c.id, c.scope, c.name, c.sort, c.is_active,
+                               (SELECT count(*) FROM {T} e WHERE e.category = c.name)::int
+                               + (SELECT count(*) FROM {T_USAGE} u WHERE u.category = c.name)::int AS used
+                          FROM {T_CAT} c ORDER BY c.scope, c.sort, c.name""")
+    return [{"id": r["id"], "scope": r["scope"], "name": r["name"], "sort": r["sort"], "isActive": r["is_active"],
+             "used": r["used"]} for r in rows]
+
+
+def add_category(scope: str, name: str) -> dict:
+    name = " ".join((name or "").split())
+    if scope not in CATEGORY_SCOPES or not name:
+        raise WasteError("Kategori dan jenis form wajib diisi")
+    if db.fetchrow(f"SELECT 1 FROM {T_CAT} WHERE scope = %s AND lower(name) = lower(%s)", (scope, name)):
+        raise WasteError("Kategori sudah ada")
+    row = db.fetchrow(f"""INSERT INTO {T_CAT} (scope, name, sort)
+                          VALUES (%s, %s, coalesce((SELECT max(sort) + 1 FROM {T_CAT} WHERE scope = %s), 1))
+                          RETURNING id""", (scope, name, scope))
+    return next(c for c in categories() if c["id"] == row["id"])
+
+
+def update_category(cat_id: int, name: Optional[str], is_active: Optional[bool], sort: Optional[int]) -> dict:
+    """Rename (the entries keep the name they were saved with, the renamed one is offered from now on), switch off or
+    reorder a category."""
+    cur = db.fetchrow(f"SELECT * FROM {T_CAT} WHERE id = %s", (cat_id,))
+    if not cur:
+        raise WasteError("Kategori tidak ditemukan")
+    if name is not None:
+        name = " ".join(name.split())
+        if not name:
+            raise WasteError("Nama kategori wajib diisi")
+        if db.fetchrow(f"SELECT 1 FROM {T_CAT} WHERE scope = %s AND lower(name) = lower(%s) AND id <> %s",
+                       (cur["scope"], name, cat_id)):
+            raise WasteError("Kategori sudah ada")
+    _exec(f"""UPDATE {T_CAT} SET name = coalesce(%s, name), is_active = coalesce(%s, is_active),
+                   sort = coalesce(%s, sort) WHERE id = %s""", (name, is_active, sort, cat_id))
+    return next(c for c in categories() if c["id"] == cat_id)
+
+
+# ---------------------------------------------------------------- investigation (migration 055, FM-QAQC-03)
+
+SOURCES = ("On-Site/Langsung", "Media Sosial/Online", "Whatsapp/Telepon")
+WASTE_KINDS = ("Packaging rusak", "Bahan Baku Expired", "Premix Tumpah", "Premix Expired", "Sisa Produk tidak terjual",
+               "QC kondimen food", "QC kondimen beverage", "Kontaminasi/kerusakan fisik", "Kontaminasi/kerusakan kimia",
+               "Kontaminasi/kerusakan biologi")
+CHECKS = ("Kualitas Bahan Baku (Supplier)", "Suhu Penyimpanan (Chiller/Freezer)", "Kepatuhan SOP / Resep",
+          "Higienitas Staff (menggunakan APD) & Sanitasi Area", "Batas Kadaluwarsa / Metode FIFO",
+          "Faktor Lain (Listrik padam, human error, dll)")
+SIGNERS = ("made", "checked", "approved")
+
+
+def _inv_view(r: dict, entries: Optional[list[dict]] = None) -> dict:
+    out = {"id": r["id"], "reportNo": r["report_no"], "branchCode": r["branch_code"], "branchName": r["branch_name"],
+           "status": r["status"], "report": r["report"] or {}, "signatures": r["signatures"] or {},
+           "createdBy": r["created_by"], "createdAt": r["created_at"].isoformat(), "updatedBy": r["updated_by"],
+           "updatedAt": r["updated_at"].isoformat()}
+    if entries is not None:
+        out["entries"] = entries
+    return out
+
+
+def open_investigation(ids: list[str], user: dict, branches: Optional[tuple]) -> dict:
+    """An investigation of entries of one branch (not decided yet), pre-filled from them; the entries wait in status
+    investigating."""
+    rows = db.fetch(f"SELECT {COLUMNS} FROM {T} e WHERE e.id::text = ANY(%s) AND e.status IN ('submitted', 'investigating')",
+                    (ids,))
+    if not rows or len(rows) != len(set(ids)):
+        raise WasteError("Pilih entri waste yang belum diputuskan")
+    if branches is not None and any(r["branch_code"] not in branches for r in rows):
+        raise WasteError("Entri di luar cabang Anda")
+    if len({r["branch_code"] for r in rows}) > 1:
+        raise WasteError("Satu investigasi untuk satu outlet: pilih entri dari cabang yang sama")
+    if any(r["investigation_id"] for r in rows):
+        raise WasteError("Sebagian entri sudah dalam investigasi")
+    first = min(rows, key=lambda r: r["business_date"])
+    kinds = sorted({r["category"] for r in rows})
+    report = {
+        "date": today().isoformat(), "incident": "waste", "source": None,
+        "wasteKinds": [k for k in WASTE_KINDS if any(k.lower() in c.lower() or c.lower() in k.lower() for c in kinds)],
+        "categories": kinds,
+        "object": ", ".join(sorted({r["item_name"] for r in rows})),
+        "qty": ", ".join(f"{float(r['qty']):g} {r['unit']}" for r in rows),
+        "batch": None, "incidentAt": first["business_date"].isoformat(), "outlet": first["branch_name"],
+        "pic": ", ".join(sorted({r["full_name"] or r["username"] for r in rows})),
+        "chronology": "\n".join(f"- {r['item_name']}: {r['note']}" for r in rows if r["note"]),
+        "checks": {c: {"checked": False, "finding": ""} for c in CHECKS},
+        "rootCause": "", "corrective": "", "preventive": "",
+    }
+    by = user.get("full_name") or user["username"]
+    with db.transaction() as conn:
+        inv = conn.execute(f"""INSERT INTO {T_INV} (branch_code, branch_name, report, created_by, updated_by)
+                               VALUES (%s, %s, %s::jsonb, %s, %s) RETURNING id::text""",
+                           (first["branch_code"], first["branch_name"], json.dumps(report), by, by)).fetchone()
+        conn.execute(f"""UPDATE {T} SET status = 'investigating', investigation_id = %s::uuid, review_note = NULL,
+                         reviewed_by = %s, reviewed_at = now() WHERE id::text = ANY(%s)""", (inv["id"], by, ids))
+    return investigation(inv["id"])
+
+
+def investigation(inv_id: str) -> Optional[dict]:
+    r = db.fetchrow(f"SELECT id::text, * FROM {T_INV} WHERE id::text = %s", (inv_id,))
+    if not r:
+        return None
+    entries = db.fetch(f"SELECT {COLUMNS} FROM {T} e WHERE e.investigation_id::text = %s ORDER BY e.created_at", (inv_id,))
+    return _inv_view(r, [_view(e) for e in entries])
+
+
+def investigations(status: str, branches: Optional[tuple]) -> list[dict]:
+    rows = db.fetch(f"""SELECT id::text, * FROM {T_INV} WHERE (%(st)s = '' OR status = %(st)s)
+                          AND (%(all)s OR branch_code = ANY(%(br)s)) ORDER BY report_no DESC LIMIT 500""",
+                    {"st": status if status in ("open", "closed") else "", "all": branches is None, "br": list(branches or [])})
+    counts = {r["inv"]: r["n"] for r in db.fetch(
+        f"SELECT investigation_id::text AS inv, count(*)::int AS n FROM {T} WHERE investigation_id IS NOT NULL GROUP BY 1")}
+    return [{**_inv_view(r), "entries": counts.get(r["id"], 0)} for r in rows]
+
+
+def save_investigation(inv_id: str, report: Optional[dict], signatures: Optional[dict], status: Optional[str],
+                       user: dict) -> Optional[dict]:
+    """The report (sections A–D) and the signatures {made|checked|approved: {name, role, image}}; closing it keeps the
+    entries investigating until Cost Control approves or rejects them."""
+    cur = investigation(inv_id)
+    if cur is None:
+        return None
+    sigs = dict(cur["signatures"])
+    for k, v in (signatures or {}).items():
+        if k not in SIGNERS:
+            raise WasteError("Penanda tangan tidak dikenal")
+        if v is None:
+            sigs.pop(k, None)
+            continue
+        image = v.get("image")
+        if image:
+            parse_photo(image)  # a valid image
+        sigs[k] = {"name": (v.get("name") or "").strip()[:120], "role": (v.get("role") or "").strip()[:120],
+                   "image": image, "at": v.get("at") or today().isoformat()}
+    if status and status not in ("open", "closed"):
+        raise WasteError("Status investigasi tidak dikenal")
+    _exec(f"""UPDATE {T_INV} SET report = coalesce(%s::jsonb, report), signatures = %s::jsonb,
+                   status = coalesce(%s, status), updated_by = %s, updated_at = now() WHERE id::text = %s""",
+               (json.dumps(report) if report is not None else None, json.dumps(sigs), status,
+                user.get("full_name") or user["username"], inv_id))
+    return investigation(inv_id)

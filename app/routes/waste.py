@@ -17,6 +17,13 @@
     GET    /api/waste/daily                 monitor / review: per branch and day whether waste was reported, the usage
                                            list filled, the branches not reported yet (?dateFrom&dateTo&branch&group)
     GET    /api/waste/usage                 monitor / review: the Usage Management quantities of the period
+    GET    /api/waste/categories            every category of Form Waste (scope waste) and Usage Management (usage)
+    POST   /api/waste/categories            page cc.waste-review: {"scope", "name"}  PATCH /api/waste/categories/{id}
+                                           {"name"?, "isActive"?, "sort"?} (outlets only pick; migration 055)
+    POST   /api/waste/investigations        page cc.waste-review: {"ids"} entries of one branch -> investigation (FM-QAQC-03)
+    GET    /api/waste/investigations[/{id}] monitor / review: the investigations, one with its entries
+    PUT    /api/waste/investigations/{id}   page cc.waste-review: {"report", "signatures", "status": open|closed}
+    GET    /api/waste/entries/{id}/signature  the signature given before submitting (migration 055)
 
 Role "user" / "outlet" see their own branches only (app/scope.py, app/pic_checkin.branch_options).
 """
@@ -49,6 +56,7 @@ class EntryIn(BaseModel):
     productionDate: Optional[date] = None
     expiredDate: Optional[date] = None
     photo: str = Field(min_length=20, max_length=5_000_000)
+    signature: Optional[str] = Field(None, max_length=2_000_000)  # required (migration 055), checked in app/waste.py
     takenAt: Optional[datetime] = None
     latitude: Optional[float] = Field(None, ge=-90, le=90)
     longitude: Optional[float] = Field(None, ge=-180, le=180)
@@ -69,12 +77,34 @@ class UsageIn(BaseModel):
     businessDate: Optional[date] = None
     # a line per SKU (category, reason and photo, migration 045); null removes the SKU
     lines: dict[str, Optional[UsageLine]] = Field(max_length=500)
+    signature: Optional[str] = Field(None, max_length=2_000_000)  # required when lines are kept (migration 055)
 
 
 class NoWasteIn(BaseModel):
     branchCode: str = Field(min_length=1, max_length=40)
     businessDate: Optional[date] = None
     noWaste: bool = True
+
+
+class CategoryIn(BaseModel):
+    scope: Literal["waste", "usage"]
+    name: str = Field(min_length=1, max_length=120)
+
+
+class CategoryPatch(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=120)
+    isActive: Optional[bool] = None
+    sort: Optional[int] = Field(None, ge=0, le=10_000)
+
+
+class InvestigateIn(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=200)
+
+
+class InvestigationIn(BaseModel):
+    report: Optional[dict] = None
+    signatures: Optional[dict] = None
+    status: Optional[Literal["open", "closed"]] = None
 
 
 class ReviewIn(BaseModel):
@@ -158,6 +188,87 @@ def review(body: ReviewIn, request: Request, user: dict = Depends(require_page(R
                     summary=f"Waste {verdict}: {len(rows)} item" + (f" ({next(iter(names))})" if len(names) == 1 else ""),
                     details={"ids": [r["id"] for r in rows], "status": body.status, "note": body.note})
     return {"updated": len(rows), "status": body.status}
+
+
+@router.get("/categories")
+def categories(_user: dict = Depends(require_page("waste", MON, REV))) -> dict:
+    return {"data": waste.categories()}
+
+
+@router.post("/categories", status_code=201)
+def add_category(body: CategoryIn, request: Request, user: dict = Depends(require_page(REV))) -> dict:
+    try:
+        out = waste.add_category(body.scope, body.name)
+    except waste.CheckInError as exc:
+        _refuse(exc)
+    activity.record("waste.category", user=user, request=request, page="/cost-control/waste/reviews",
+                    summary=f"Kategori {'Usage' if body.scope == 'usage' else 'Waste'} ditambah: {out['name']}", details=out)
+    return out
+
+
+@router.patch("/categories/{cat_id}")
+def patch_category(cat_id: int, body: CategoryPatch, request: Request, user: dict = Depends(require_page(REV))) -> dict:
+    try:
+        out = waste.update_category(cat_id, body.name, body.isActive, body.sort)
+    except waste.CheckInError as exc:
+        _refuse(exc)
+    activity.record("waste.category", user=user, request=request, page="/cost-control/waste/reviews",
+                    summary=f"Kategori diubah: {out['name']}", details={"id": cat_id, **body.model_dump(exclude_none=True)})
+    return out
+
+
+@router.post("/investigations", status_code=201)
+def investigate(body: InvestigateIn, request: Request, user: dict = Depends(require_page(REV))) -> dict:
+    try:
+        out = waste.open_investigation(body.ids, user, allowed_branches())
+    except waste.CheckInError as exc:
+        _refuse(exc)
+    activity.record("waste.investigate", user=user, request=request, page="/cost-control/waste/reviews",
+                    summary=f"Investigasi waste No. {out['reportNo']}: {out['branchName']} ({len(body.ids)} item)",
+                    details={"id": out["id"], "ids": body.ids})
+    return out
+
+
+@router.get("/investigations")
+def investigations(status: str = "", _user: dict = Depends(require_page(MON, REV))) -> dict:
+    return {"data": waste.investigations(status, allowed_branches())}
+
+
+def _inv(inv_id: str) -> dict:
+    out = waste.investigation(inv_id)
+    scope = allowed_branches()
+    if out is None or (scope is not None and out["branchCode"] not in scope):
+        raise HTTPException(404, detail="Investigasi tidak ditemukan")
+    return out
+
+
+@router.get("/investigations/{inv_id}")
+def investigation(inv_id: str, _user: dict = Depends(require_page(MON, REV))) -> dict:
+    return _inv(inv_id)
+
+
+@router.put("/investigations/{inv_id}")
+def save_investigation(inv_id: str, body: InvestigationIn, request: Request, user: dict = Depends(require_page(REV))) -> dict:
+    _inv(inv_id)
+    try:
+        out = waste.save_investigation(inv_id, body.report, body.signatures, body.status, user)
+    except waste.CheckInError as exc:
+        _refuse(exc)
+    activity.record("waste.investigation", user=user, request=request, page="/cost-control/waste/reviews",
+                    summary=f"Investigasi waste No. {out['reportNo']} disimpan" + (" (ditutup)" if body.status == "closed" else ""),
+                    details={"id": inv_id})
+    return out
+
+
+@router.get("/entries/{entry_id}/signature")
+def signature(entry_id: str, request: Request, user: dict = Depends(current_user)) -> Response:
+    row = waste.signature_of(entry_id)
+    if row is None:
+        raise HTTPException(404, detail="Tanda tangan tidak ditemukan")
+    scope = allowed_branches()
+    if not ((scope is None or row["branch_code"] in scope) and any(has_page(user, p) for p in ("waste", MON, REV))):
+        deny(request, user)
+    return Response(bytes(row["photo"]), media_type=row["photo_type"], headers={"Cache-Control": "private, max-age=86400"})
 
 
 @router.get("/entries/{entry_id}/photo")

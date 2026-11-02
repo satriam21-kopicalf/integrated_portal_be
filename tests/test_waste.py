@@ -1,5 +1,6 @@
 """Waste (app/waste.py, app/routes/waste.py): access follows the pages, every item needs a category and a photo, the
 author deletes an entry until it is reviewed, Cost Control reviews many at once."""
+import pytest
 from datetime import date, datetime, timezone
 
 from app import access, waste
@@ -9,7 +10,8 @@ from tests.test_pic_checkin import _jpeg
 KEMANG = {"code": "CCI01", "name": "Kopi Calf Kemang", "latitude": None, "longitude": None, "radius_m": None}
 CATALOG = {"items": {"waste": [{"code": "RMFR-00003", "name": "DIMSUM", "unit": "PCS"}], "usage": [],
                      "premix": [{"code": "PREMIX-MAGIC", "name": "PREMIX MAGIC", "unit": "GR", "type": "PREMIX"}]},
-           "categories": ["Packaging Rusak", "Premix Expired/ Over Stock"], "scopes": waste.SCOPES}
+           "categories": ["Packaging Rusak", "Premix Expired/ Over Stock"], "usageCategories": ["Customer Supplies"],
+           "scopes": waste.SCOPES}
 
 
 def _row(**kw):
@@ -43,7 +45,7 @@ def test_entry_needs_category_photo_and_a_known_item(anon, store, fake_db, page_
     monkeypatch.setattr(waste.db, "fetchrow", insert)
     body = {"branchCode": "CCI01", "businessDate": "2026-10-31", "scope": "premix", "itemCode": "PREMIX-MAGIC",
             "qty": 250, "category": "Premix Expired/ Over Stock", "note": "tumpah", "photo": _jpeg(),
-            "productionDate": "2026-10-25", "expiredDate": "2026-11-05"}
+            "productionDate": "2026-10-25", "expiredDate": "2026-11-05", "signature": _jpeg()}
     login(anon, "kasir", "Kasir1234")  # role user (a PIC): the waste input is a page of the role, Cost Control is not
     assert anon.get("/api/waste/monitor").status_code == 403 and anon.get("/api/waste/reviews").status_code == 403
     for bad, msg in (({"category": "Lainnya"}, "kategori"), ({"itemCode": "NOPE"}, "Item tidak ada"),
@@ -52,6 +54,8 @@ def test_entry_needs_category_photo_and_a_known_item(anon, store, fake_db, page_
         r = anon.post("/api/waste/entries", json={**body, **bad})
         assert r.status_code == 422 and msg in r.json()["error"], (bad, r.json())
     assert anon.post("/api/waste/entries", json={**body, "photo": ""}).status_code == 422  # photo required
+    r = anon.post("/api/waste/entries", json={**body, "signature": None})  # signed before submitting (migration 055)
+    assert r.status_code == 422 and "Tanda tangan" in r.json()["error"]
     assert not saved
     r = anon.post("/api/waste/entries", json=body)
     assert r.status_code == 201 and r.json()["scope"] == "premix" and saved["unit"] == "GR" and saved["g"] == 250 and saved["n"] == "tumpah" and str(saved["ed"]) == "2026-11-05"
@@ -119,8 +123,14 @@ def test_usage_list_and_no_waste(anon, store, fake_db, page_access, monkeypatch)
     conn = _tx(monkeypatch)
     login(anon, "kasir", "Kasir1234")
     monkeypatch.setattr(waste.db, "fetch", lambda q, p=None: [])  # no photo saved yet
-    line = {"qty": 2, "category": "Packaging Rusak", "note": "sobek", "photo": _jpeg()}
-    body = {"branchCode": "CCI01", "businessDate": "2026-10-31", "lines": {"INSU-00005": line, "AIIR-00001": None}}
+    line = {"qty": 2, "category": "Customer Supplies", "note": "sobek", "photo": _jpeg()}
+    body = {"branchCode": "CCI01", "businessDate": "2026-10-31", "lines": {"INSU-00005": line, "AIIR-00001": None},
+            "signature": _jpeg()}
+    # the categories of Usage Management are its own (migration 055), and the list is signed
+    r = anon.put("/api/waste/usage", json={**body, "lines": {"INSU-00005": {**line, "category": "Packaging Rusak"}}})
+    assert r.status_code == 422 and "kategori" in r.json()["error"]
+    r = anon.put("/api/waste/usage", json={**body, "signature": None})
+    assert r.status_code == 422 and "Tanda tangan" in r.json()["error"]
     assert anon.put("/api/waste/usage", json={**body, "lines": {"NOPE": {"qty": 1}}}).status_code == 422
     # every SKU needs its category and a photo (migration 045)
     r = anon.put("/api/waste/usage", json={**body, "lines": {"INSU-00005": {**line, "category": ""}}})
@@ -173,3 +183,17 @@ def test_premix_is_entered_like_the_stock_opname_wip():
         raise AssertionError("unknown unit accepted")
     except waste.WasteError as e:
         assert "Satuan" in str(e)
+
+
+def test_investigation_prefills_the_form_of_one_branch(monkeypatch):
+    rows = [{"id": "a", "branch_code": "CCI01", "branch_name": "Kopi Calf Kemang", "status": "submitted", "investigation_id": None,
+             "business_date": date(2026, 10, 30), "category": "Premix Expired/ Over Stock", "item_name": "PREMIX MATCHA",
+             "qty": 500, "unit": "GR", "full_name": "Andri", "username": "andri", "note": "asam"},
+            {"id": "b", "branch_code": "CCI02", "branch_name": "Kopi Calf Pademangan", "status": "submitted",
+             "investigation_id": None, "business_date": date(2026, 10, 30), "category": "x", "item_name": "y", "qty": 1,
+             "unit": "PCS", "full_name": None, "username": "z", "note": None}]
+    monkeypatch.setattr(waste.db, "fetch", lambda q, p=None: rows)
+    with pytest.raises(waste.WasteError, match="cabang yang sama"):
+        waste.open_investigation(["a", "b"], {"username": "cc", "full_name": "CC"}, None)
+    with pytest.raises(waste.WasteError, match="di luar cabang"):
+        waste.open_investigation(["a", "b"], {"username": "cc"}, ("CCI01",))

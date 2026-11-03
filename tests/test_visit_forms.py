@@ -218,3 +218,11 @@ def test_one_visit_per_branch_per_day(monkeypatch):
     except vf.VisitError as e:
         assert "besok" in str(e)
     vf._not_today("product", {"id": "u"}, "CCI01", "Other")  # another branch is fine
+
+
+def test_the_pic_filling_a_form_never_gets_the_score():
+    from app.routes.visit_forms import _no_score
+    state = {"recent": [{"id": "v1", "score": 87.5, "counts": {"under": 1, "rated": 8, "total": 8, "score": 87.5}}],
+             "drafts": [{"counts": {"rated": 2, "total": 8, "score": None}}], "user": {"name": "Andi"}}
+    assert _no_score(state) == {"recent": [{"id": "v1", "counts": {"under": 1, "rated": 8, "total": 8}}],
+                                "drafts": [{"counts": {"rated": 2, "total": 8}}], "user": {"name": "Andi"}}

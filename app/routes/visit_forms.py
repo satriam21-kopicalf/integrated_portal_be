@@ -8,6 +8,7 @@
     POST   /api/forms/{form}/visits/{id}/photos           page form.<form>: {"item", "photo", "latitude", "longitude", "takenAt"}
     DELETE /api/forms/{form}/visits/{id}/photos/{photo}   page form.<form>
     POST   /api/forms/{form}/visits/{id}/submit           page form.<form>: {"latitude", "longitude", "accuracyM"}
+    (the /api/forms responses carry no score: the PIC never sees it, only monitoring does)
     DELETE /api/forms/{form}/visits/{id}                  page form.<form>: discard the draft
     GET    /api/monitoring/{form}                         page mon.<form>: ?dateFrom&dateTo&branch&userId
     GET    /api/monitoring/{form}/visits/{id}             page mon.<form>: one submitted visit (branches in scope)
@@ -66,9 +67,18 @@ def _form_page(form: str, request: Request, user: dict) -> None:
         deny(request, user)
 
 
+def _no_score(v):
+    """The PIC filling a form never sees a score (top level or in the counts): it is for the management in monitoring."""
+    if isinstance(v, dict):
+        return {k: _no_score(x) for k, x in v.items() if k != "score"}
+    if isinstance(v, list):
+        return [_no_score(x) for x in v]
+    return v
+
+
 def _run(fn, *args):
     try:
-        return fn(*args)
+        return _no_score(fn(*args))
     except LookupError as e:
         raise HTTPException(404, detail=str(e)) from None
     except CheckInError as e:  # VisitError, or a photo / signature that cannot be read
@@ -78,7 +88,7 @@ def _run(fn, *args):
 @router.get("/api/forms/{form}")
 def form_state(form: str, request: Request, user: dict = Depends(current_user)) -> dict:
     _form_page(form, request, user)
-    return vf.form_state(form, user)
+    return _no_score(vf.form_state(form, user))
 
 
 @router.post("/api/forms/{form}/visits")
@@ -93,7 +103,7 @@ def get_visit(form: str, visit_id: str, request: Request, user: dict = Depends(c
     row = vf.get_visit(visit_id)
     if row is None or row["form"] != form or row["user_id"] != str(user["id"]):
         raise HTTPException(404, detail="Kunjungan tidak ditemukan")
-    return vf.full(visit_id)
+    return _no_score(vf.full(visit_id))
 
 
 @router.patch("/api/forms/{form}/visits/{visit_id}")
@@ -130,7 +140,7 @@ def submit(form: str, visit_id: str, body: SubmitIn, request: Request, user: dic
     activity.record(f"form.{form}_visit", user=user, request=request, page=f"/forms/{form}",
                     summary=f"{vf.DEFINITIONS[form]['title']} {out['branchName']}: {c['under']} UNDER · {c['meet']} MEET · {c['exceed']} EXCEED",
                     details={"id": visit_id, "branch": out["branchCode"], "counts": c, "distanceM": out["distanceM"]})
-    return out
+    return _no_score(out)
 
 
 @router.delete("/api/forms/{form}/visits/{visit_id}")

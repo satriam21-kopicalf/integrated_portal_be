@@ -32,3 +32,17 @@ def test_audit_against_the_pic_item_by_item():
     assert out["pic"]["conformity"] == 50.0 and out["swatScore"] == 50.0 and out["swatUnder"] == 2
     assert [r["verdict"] for r in out["items"][:4]] == ["overrated", "agree", "agree", "underrated"]
     assert wwwr._compare(swat, "product", None)["pic"] is None
+
+
+def test_the_lead_sends_only_with_the_evaluation(monkeypatch):
+    monkeypatch.setattr(wwwr.db, "fetchrow", lambda *a: {"summary": None, "revisit_on": None, "n": 0})
+    assert wwwr.evaluation_gaps("v1") == ["summary", "revisit", "actions"]
+    monkeypatch.setattr(wwwr.db, "fetchrow", lambda *a: {"summary": "Bar kurang rapi", "revisit_on": "2026-11-10", "n": 2})
+    assert wwwr.evaluation_gaps("v1") == []
+
+
+def test_status_follows_the_follow_up():
+    assert wwwr._status({"status": "scheduled", "visit_status": None}) == "scheduled"
+    assert wwwr._status({"status": "scheduled", "visit_status": "DRAFT"}) == "in_progress"
+    assert wwwr._status({"status": "scheduled", "visit_status": "SUBMITTED", "completed_at": None}) == "follow_up"
+    assert wwwr._status({"status": "scheduled", "visit_status": "SUBMITTED", "completed_at": "x"}) == "completed"

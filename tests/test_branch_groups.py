@@ -22,14 +22,18 @@ def sources(monkeypatch):
                                                               {"id": "g2", "code": "CTG", "name": "CTG", "branches": [1, 2]}], "unassigned": []})
     monkeypatch.setattr(bg, "codes_of", lambda g: [o["code"] for o in OUTLETS if o["group_code"] == g or o["group_id"] == g])
     monkeypatch.setattr(mo.pic_checkin, "monitor", lambda a, b, branches, limit=0: {"data": [
-        {"branchCode": "CTG54", "userId": "u1", "outsideRadius": False, "visitedAt": "2026-10-20T02:00:00+00:00"},
-        {"branchCode": "CTG54", "userId": "u2", "outsideRadius": True, "visitedAt": "2026-10-21T02:00:00+00:00"}]})
+        {"branchCode": "CTG54", "userId": "u1", "name": "Andi", "outsideRadius": False, "visitedAt": "2026-10-20T02:00:00+00:00"},
+        {"branchCode": "CTG54", "userId": "u2", "name": "Budi", "outsideRadius": True, "visitedAt": "2026-10-21T02:00:00+00:00"}]})
+    monkeypatch.setattr(mo.wwwr, "comparison", lambda a, b, branches: {
+        "audits": [{"branchCode": "CTG54", "score": 88.0}], "summary": {"conformity": 75.0, "overrated": 3},
+        "pics": [{"id": "u1", "audits": 1, "conformity": 75.0, "overrated": 3}]})
+    monkeypatch.setattr(mo.wwwr, "actions_of", lambda branches: [{"branch_code": "CTG54", "n": 2}])
 
     def monitor(form, a, b, branches, limit=0):
-        data = [{"branchCode": "CTG54", "userId": "u1", "score": 90.0 if form == "product" else 80.0,
+        data = [{"branchCode": "CTG54", "userId": "u1", "name": "Andi", "score": 90.0 if form == "product" else 80.0,
                  "counts": {"under": 2 if form == "outlet" else 0}, "submittedAt": "2026-10-20T03:00:00+00:00"}]
         if form == "product":
-            data.append({"branchCode": "CCI01", "userId": "u3", "score": 100.0, "counts": {"under": 0}, "submittedAt": "2026-10-21T03:00:00+00:00"})
+            data.append({"branchCode": "CCI01", "userId": "u3", "name": "Citra", "score": 100.0, "counts": {"under": 0}, "submittedAt": "2026-10-21T03:00:00+00:00"})
         return {"data": [d for d in data if d["branchCode"] in branches], "sections": [], "findings": []}
     monkeypatch.setattr(mo.vf, "monitor", monitor)
 
@@ -43,6 +47,12 @@ def test_overview_per_group_and_outlet(sources):
     assert g["CTG"]["outlets"] == 2 and g["CTG"]["visited"] == 1 and g["CTG"]["productScore"] == 90.0
     assert g["CCI"]["visited"] == 1 and g["—"]["outlets"] == 1 and g["—"]["visited"] == 0  # without a group
     assert [t["date"] for t in o["trend"]] == ["2026-10-20", "2026-10-21"] and o["trend"][0]["checkins"] == 1
+    # the assessment per PIC: own visits and the SWAT agreement; per outlet the SWAT audits and open action plans
+    pics = {p["id"]: p for p in o["picAssessment"]}
+    assert (pics["u1"]["productScore"], pics["u1"]["outletScore"], pics["u1"]["conformity"], pics["u1"]["overrated"], pics["u1"]["openActions"]) == (90.0, 80.0, 75.0, 3, 2)
+    assert pics["u2"]["checkinDays"] == 1 and pics["u2"]["conformity"] is None and o["picAssessment"][0]["id"] == "u1"
+    ctg = next(b for b in o["branches"] if b["code"] == "CTG54")
+    assert (ctg["swatAudits"], ctg["swatScore"], ctg["openActions"]) == (1, 88.0, 2) and o["swat"]["openActions"] == 2
     only = mo.overview(date(2026, 10, 1), date(2026, 10, 21), None, "CTG")
     assert only["summary"]["outlets"] == 2 and [x["code"] for x in only["groups"]] == ["CTG"]
     scoped = mo.overview(date(2026, 10, 1), date(2026, 10, 21), ["CCI01"], None)

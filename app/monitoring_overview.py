@@ -1,6 +1,8 @@
 """Monitoring → Overview (2026-10-21): the PIC Check In, Monitoring Product and Monitoring Outlet of a period together,
 per branch group (CCI, CTG, CTGP …, app/branch_groups.py) and per outlet: coverage (outlets visited), check-ins, visits,
-scores, findings, the trend per day and the performance per category of both checklists."""
+scores, findings, the trend per day and the performance per category of both checklists. The assessment of every PIC
+(2026-11-03): their check-in days, the average score of their own Product and Outlet visits and, from the SWAT audits
+(Form WW-WR, app/wwwr.py), how far their ratings agree with the team's; per outlet the SWAT audits and open action plans."""
 from datetime import date, datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -8,6 +10,7 @@ from zoneinfo import ZoneInfo
 from app import branch_groups as bg
 from app import pic_checkin
 from app import visit_forms as vf
+from app import wwwr
 
 WIB = ZoneInfo("Asia/Jakarta")
 LIMIT = 10000
@@ -68,6 +71,50 @@ def overview(date_from: date, date_to: date, scope: Optional[list[str]], group: 
             b.setdefault(f"{f}Visits", 0)
             b[f"{f}Visits"] = b.get(f"{f}Visits", 0) + 1
 
+    # SWAT audits (WW-WR): per outlet the audits sent and the open action plans; per PIC the agreement with the team
+    comp = wwwr.comparison(date_from, date_to, branches) if branches else {"audits": [], "pics": []}
+    open_actions = {r["branch_code"]: r["n"] for r in wwwr.actions_of(branches)} if branches else {}
+    swat_scores: dict[str, list[float]] = {}
+    for a in comp["audits"]:
+        if a["branchCode"] in per and a["score"] is not None:
+            swat_scores.setdefault(a["branchCode"], []).append(a["score"])
+
+    # the assessment per PIC
+    people: dict[str, dict] = {}
+
+    def person(uid: str, name: str) -> dict:
+        return people.setdefault(uid, {"id": uid, "name": name, "checkinDays": set(), "checkins": 0, "outside": 0, "branches": set(),
+                                       "product": [], "outlet": [], "productVisits": 0, "outletVisits": 0, "under": 0})
+    for c in checkins:
+        if c["branchCode"] not in per:
+            continue
+        x = person(c["userId"], c["name"])
+        x["checkins"] += 1
+        x["checkinDays"].add(_day(c["visitedAt"]))
+        x["outside"] += 1 if c["outsideRadius"] else 0
+        x["branches"].add(c["branchCode"])
+    for f in ("product", "outlet"):
+        for v in forms[f]["data"]:
+            if v["branchCode"] not in per:
+                continue
+            x = person(v["userId"], v["name"])
+            x[f"{f}Visits"] += 1
+            x["under"] += v["counts"]["under"]
+            x["branches"].add(v["branchCode"])
+            if v["score"] is not None:
+                x[f].append(v["score"])
+    swat_of = {p["id"]: p for p in comp["pics"]}
+    pic_rows = []
+    for x in people.values():
+        sw = swat_of.get(x["id"])
+        pic_rows.append({"id": x["id"], "name": x["name"], "branches": len(x["branches"]), "checkins": x["checkins"], "checkinDays": len(x["checkinDays"]),
+                         "outside": x["outside"], "productVisits": x["productVisits"], "productScore": _avg(x["product"]),
+                         "outletVisits": x["outletVisits"], "outletScore": _avg(x["outlet"]), "under": x["under"],
+                         "swatAudits": sw["audits"] if sw else 0, "conformity": sw["conformity"] if sw else None,
+                         "overrated": sw["overrated"] if sw else 0,
+                         "openActions": sum(open_actions.get(b, 0) for b in x["branches"])})
+    pic_rows.sort(key=lambda r: (r["conformity"] is None, r["conformity"] or 0, -(r["overrated"] or 0), r["name"].lower()))
+
     rows = []
     for b in per.values():
         rows.append({
@@ -76,6 +123,7 @@ def overview(date_from: date, date_to: date, scope: Optional[list[str]], group: 
             "productVisits": b.get("productVisits", 0), "productScore": _avg(b["product"]),
             "outletVisits": b.get("outletVisits", 0), "outletScore": _avg(b["outlet"]),
             "under": b["under"], "lastVisit": b["lastVisit"],
+            "swatAudits": len(swat_scores.get(b["code"], [])), "swatScore": _avg(swat_scores.get(b["code"], [])), "openActions": open_actions.get(b["code"], 0),
             "visited": b["checkins"] > 0 or b.get("productVisits", 0) > 0 or b.get("outletVisits", 0) > 0,
         })
 
@@ -108,5 +156,8 @@ def overview(date_from: date, date_to: date, scope: Optional[list[str]], group: 
                    "productScore": _avg(t["productScores"]), "outletScore": _avg(t["outletScores"])} for t in days],
         "product": {"sections": forms["product"]["sections"], "findings": forms["product"]["findings"][:10]},
         "outlet": {"sections": forms["outlet"]["sections"], "findings": forms["outlet"]["findings"][:10]},
+        "picAssessment": pic_rows,
+        "swat": {"audits": len(comp["audits"]), "conformity": comp.get("summary", {}).get("conformity"),
+                 "overrated": comp.get("summary", {}).get("overrated", 0), "openActions": sum(open_actions.values())},
         "groupOptions": [{"id": g["id"], "code": g["code"], "name": g["name"], "branches": len(g["branches"])} for g in groups["groups"]],
     }

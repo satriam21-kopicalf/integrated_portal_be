@@ -24,6 +24,10 @@ POST /api/forms/wwwr/visits {"auditId"} opens the shared visit; the lead sends i
     POST   /api/monitoring/wwwr/schedule/{id}/cancel
     GET    /api/monitoring/wwwr/comparison                ?dateFrom&dateTo&branch&group: audits against the PIC visits
     GET    /api/monitoring/wwwr/comparison/{visit id}     one audit item by item against the PIC
+The team (page form.wwwr, migration 065): GET /api/forms/wwwr/colleagues; POST /api/forms/wwwr/audits/{id}/members
+{"ids"} and DELETE …/members/{user} (the lead); PUT …/audits/{id}/evaluation {"summary", "revisitOn", "actions"};
+POST /api/forms/wwwr/actions/{id} {"done", "note"}; POST …/audits/{id}/complete {"note"} (the lead).
+Public (no sign-in): GET /api/public/wwwr/{token} and …/photos/{photo}: the result shared with the PIC.
 """
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -171,6 +175,101 @@ def discard(form: str, visit_id: str, request: Request, user: dict = Depends(cur
 def _mon_page(form: str, request: Request, user: dict) -> None:
     if not has_page(user, f"mon.{form}"):
         deny(request, user)
+
+
+# ---------------------------------------------------------------- WW-WR: the team, the evaluation, the follow-up
+
+class MembersIn(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=30)
+
+
+class ActionIn(BaseModel):
+    id: Optional[str] = Field(None, max_length=40)
+    title: str = Field(max_length=300)
+    detail: Optional[str] = Field(None, max_length=2000)
+    assigneeId: Optional[str] = Field(None, max_length=40)
+    dueOn: Optional[date] = None
+
+
+class EvaluationIn(BaseModel):
+    summary: Optional[str] = Field(None, max_length=4000)
+    revisitOn: Optional[date] = None
+    actions: Optional[list[ActionIn]] = Field(None, max_length=50)
+
+
+class DoneIn(BaseModel):
+    done: bool
+    note: Optional[str] = Field(None, max_length=1000)
+
+
+class NoteIn(BaseModel):
+    note: Optional[str] = Field(None, max_length=2000)
+
+
+def _swat(request: Request, user: dict) -> None:
+    _form_page("wwwr", request, user)
+
+
+@router.get("/api/forms/wwwr/colleagues")
+def wwwr_colleagues(request: Request, user: dict = Depends(current_user)) -> list[dict]:
+    _swat(request, user)
+    return wwwr.team()
+
+
+@router.post("/api/forms/wwwr/audits/{audit_id}/members")
+def wwwr_add_members(audit_id: str, body: MembersIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _swat(request, user)
+    out = _run(wwwr.add_members, user, audit_id, body.ids)
+    activity.record("wwwr.team", user=user, request=request, page="/forms/wwwr", summary=f"WW-WR {out['branchName']}: rekan ditambahkan", details={"id": audit_id, "ids": body.ids})
+    return _no_score(out)
+
+
+@router.delete("/api/forms/wwwr/audits/{audit_id}/members/{member_id}")
+def wwwr_remove_member(audit_id: str, member_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    _swat(request, user)
+    return _no_score(_run(wwwr.remove_member, user, audit_id, member_id))
+
+
+@router.put("/api/forms/wwwr/audits/{audit_id}/evaluation")
+def wwwr_evaluation(audit_id: str, body: EvaluationIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _swat(request, user)
+    data = body.model_dump()
+    if body.actions is None:
+        data.pop("actions")
+    return _no_score(_run(wwwr.save_evaluation, user, audit_id, data))
+
+
+@router.post("/api/forms/wwwr/actions/{action_id}")
+def wwwr_action(action_id: str, body: DoneIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _swat(request, user)
+    out = _run(wwwr.set_action, user, action_id, body.done, body.note)
+    activity.record("wwwr.action", user=user, request=request, page="/forms/wwwr",
+                    summary=f"WW-WR {out['branchName']}: action plan {'selesai' if body.done else 'dibuka lagi'}", details={"id": action_id})
+    return _no_score(out)
+
+
+@router.post("/api/forms/wwwr/audits/{audit_id}/complete")
+def wwwr_complete(audit_id: str, body: NoteIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _swat(request, user)
+    out = _run(wwwr.complete, user, audit_id, body.note)
+    activity.record("wwwr.complete", user=user, request=request, page="/forms/wwwr", summary=f"WW-WR {out['branchName']} selesai", details={"id": audit_id})
+    return _no_score(out)
+
+
+@router.get("/api/public/wwwr/{token}")
+def wwwr_shared(token: str) -> dict:
+    out = wwwr.shared(token)
+    if out is None:
+        raise HTTPException(404, detail="Link tidak ditemukan")
+    return out
+
+
+@router.get("/api/public/wwwr/{token}/photos/{photo_id}")
+def wwwr_shared_photo(token: str, photo_id: str) -> Response:
+    row = wwwr.shared_photo(token, photo_id)
+    if row is None:
+        raise HTTPException(404, detail="Foto tidak ditemukan")
+    return Response(bytes(row["photo"]), media_type=row["photo_type"], headers={"Cache-Control": "private, max-age=3600"})
 
 
 # ---------------------------------------------------------------- WW-WR: schedule and comparison (page mon.wwwr)

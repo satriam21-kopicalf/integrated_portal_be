@@ -561,6 +561,11 @@ def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Opti
         a = audit_of(visit_id)
         if not a or a["lead_id"] != str(user["id"]):
             raise VisitError("Hanya ketua tim yang dapat mengirim audit WW-WR")
+        from app import wwwr
+        gaps = wwwr.evaluation_gaps(visit_id)
+        if gaps:
+            need = {"summary": "evaluasi umum", "revisit": "tanggal kunjungan kembali", "actions": "minimal satu action plan"}
+            raise VisitError("Lengkapi evaluasi sebelum mengirim: " + ", ".join(need.get(g, g) for g in gaps))
     else:
         _not_today(form, user, row["branch_code"], row["branch_name"])
     photos = photos_of(visit_id)

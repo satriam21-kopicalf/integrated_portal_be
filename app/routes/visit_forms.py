@@ -43,6 +43,7 @@ from app.activity import client_ip
 from app.routes.auth import current_user
 from app.scope import NO_BRANCH, allowed_branches, scoped_branch
 from app.utils import parse_branches, today
+from app.thumbs import image_response
 
 router = APIRouter(tags=["visit forms"])
 FORMS = tuple(vf.DEFINITIONS)
@@ -265,11 +266,11 @@ def wwwr_shared(token: str) -> dict:
 
 
 @router.get("/api/public/wwwr/{token}/photos/{photo_id}")
-def wwwr_shared_photo(token: str, photo_id: str) -> Response:
+def wwwr_shared_photo(token: str, photo_id: str, w: Optional[int] = Query(None, ge=48, le=1600)) -> Response:
     row = wwwr.shared_photo(token, photo_id)
     if row is None:
         raise HTTPException(404, detail="Foto tidak ditemukan")
-    return Response(bytes(row["photo"]), media_type=row["photo_type"], headers={"Cache-Control": "private, max-age=3600"})
+    return image_response(row["photo"], row["photo_type"], w, "private, max-age=3600")
 
 
 # ---------------------------------------------------------------- WW-WR: schedule and comparison (page mon.wwwr)
@@ -413,7 +414,7 @@ def monitoring_visit(form: str, visit_id: str, request: Request, user: dict = De
     return {"definition": vf.DEFINITIONS[form], **(wwwr.with_team(out) if form == "wwwr" else out)}
 
 
-def _image(row: Optional[dict], request: Request, user: dict) -> Response:
+def _image(row: Optional[dict], request: Request, user: dict, w: Optional[int] = None) -> Response:
     if row is None:
         raise HTTPException(404, detail="Foto tidak ditemukan")
     own = has_page(user, f"form.{row['form']}") and vf.can_fill(row, user)  # WW-WR: a member of the audit
@@ -421,12 +422,12 @@ def _image(row: Optional[dict], request: Request, user: dict) -> Response:
     monitor = row["status"] == "SUBMITTED" and has_page(user, f"mon.{row['form']}") and (scope is None or row["branch_code"] in scope)
     if not (own or monitor):
         deny(request, user)
-    return Response(bytes(row["photo"]), media_type=row["photo_type"], headers={"Cache-Control": "private, max-age=86400"})
+    return image_response(row["photo"], row["photo_type"], w, "private, max-age=86400")
 
 
 @router.get("/api/visit-photos/{photo_id}")
-def photo(photo_id: str, request: Request, user: dict = Depends(current_user)) -> Response:
-    return _image(vf.photo(photo_id), request, user)
+def photo(photo_id: str, request: Request, w: Optional[int] = Query(None, ge=48, le=1600), user: dict = Depends(current_user)) -> Response:
+    return _image(vf.photo(photo_id), request, user, w)
 
 
 @router.get("/api/visit-signatures/{visit_id}")

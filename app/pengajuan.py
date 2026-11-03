@@ -200,7 +200,7 @@ def file_row(file_id: str) -> Optional[dict]:
 
 # ---------------------------------------------------------------- reading
 
-COLS = f"""p.id::text, p.number, p.status, p.user_id::text, p.username, p.full_name, p.branch_code, p.branch_name, p.baristas,
+COLS = """p.id::text, p.number, p.status, p.user_id::text, p.username, p.full_name, p.branch_code, p.branch_name, p.baristas,
     p.period_from, p.period_to, p.opening_balance, p.opening_expected, p.opening_note, p.income_amount, p.income_note, p.total_out,
     p.closing_balance, p.note, p.approved_amount, p.paid_amount, p.paid_on, p.paid_note, p.created_at, p.updated_at, p.submitted_at,
     p.first_submitted_at, p.approved_at, p.approved_by, p.paid_at, p.paid_by, p.closed_at, p.kind, p.approval_step,

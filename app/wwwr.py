@@ -16,7 +16,7 @@ of the SWAT team; "agree" when both pass (MEET / EXCEED) or both fail (UNDER), "
 team found UNDER, "underrated" the other way. Conformity = agree / items rated by both — material to evaluate the PICs.
 """
 import re
-from datetime import date, timedelta
+from datetime import date
 from typing import Any, Iterable, Optional
 
 from app import database as db

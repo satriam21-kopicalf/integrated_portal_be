@@ -40,6 +40,7 @@ from app.activity import client_ip
 from app.routes.auth import current_user
 from app.scope import NO_BRANCH, allowed_branches, scoped_branch
 from app.utils import parse_branches, today
+from app.thumbs import image_response
 
 router = APIRouter(prefix="/api/waste", tags=["waste"])
 MON, REV = "cc.waste-monitor", "cc.waste-review"
@@ -272,7 +273,7 @@ def signature(entry_id: str, request: Request, user: dict = Depends(current_user
 
 
 @router.get("/entries/{entry_id}/photo")
-def photo(entry_id: str, request: Request, user: dict = Depends(current_user)) -> Response:
+def photo(entry_id: str, request: Request, w: Optional[int] = Query(None, ge=48, le=1600), user: dict = Depends(current_user)) -> Response:
     row = waste.photo_of(entry_id)
     if row is None:
         raise HTTPException(404, detail="Waste tidak ditemukan")
@@ -280,7 +281,7 @@ def photo(entry_id: str, request: Request, user: dict = Depends(current_user)) -
     in_scope = scope is None or row["branch_code"] in scope
     if not (in_scope and any(has_page(user, p) for p in ("waste", MON, REV))):
         deny(request, user)
-    return Response(bytes(row["photo"]), media_type=row["photo_type"], headers={"Cache-Control": "private, max-age=86400"})
+    return image_response(row["photo"], row["photo_type"], w, "private, max-age=86400")
 
 
 @router.put("/usage")
@@ -296,14 +297,14 @@ def save_usage(body: UsageIn, request: Request, user: dict = Depends(require_pag
 
 
 @router.get("/usage/{branch_code}/{day}/{item_code}/photo")
-def usage_photo(branch_code: str, day: date, item_code: str, request: Request, user: dict = Depends(current_user)) -> Response:
+def usage_photo(branch_code: str, day: date, item_code: str, request: Request, w: Optional[int] = Query(None, ge=48, le=1600), user: dict = Depends(current_user)) -> Response:
     row = waste.usage_photo(branch_code, day, item_code)
     if row is None:
         raise HTTPException(404, detail="Foto tidak ditemukan")
     scope = allowed_branches()
     if not ((scope is None or branch_code in scope) and any(has_page(user, p) for p in ("waste", MON, REV))):
         deny(request, user)
-    return Response(bytes(row["photo"]), media_type=row["photo_type"], headers={"Cache-Control": "private, max-age=300"})
+    return image_response(row["photo"], row["photo_type"], w, "private, max-age=300")
 
 
 @router.put("/no-waste")

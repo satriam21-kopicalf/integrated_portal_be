@@ -59,7 +59,6 @@ from datetime import date, datetime, timedelta
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app import activity, cotr
@@ -67,6 +66,7 @@ from app.access import deny, has_page, require_page
 from app.pic_checkin import CheckInError
 from app.routes.auth import current_user, require_roles
 from app.utils import today
+from app.thumbs import image_response
 
 router = APIRouter(prefix="/api/cotr", tags=["cotr"])
 driver_only = require_roles("driver")
@@ -328,11 +328,11 @@ def master_image_put(entity: Literal["drivers", "fleet"], code: str, slot: Liter
 
 
 @router.get("/masters/{entity}/{code}/image/{slot}")
-def master_image(entity: Literal["drivers", "fleet"], code: str, slot: Literal["photo", "qris"], user: dict = Depends(_cotr_reader)):
+def master_image(entity: Literal["drivers", "fleet"], code: str, slot: Literal["photo", "qris"], w: Optional[int] = Query(None, ge=48, le=1600), user: dict = Depends(_cotr_reader)):
     row = cotr.image(entity, code, slot) if slot in cotr.IMAGES[entity] else None
     if not row or not row["data"]:
         raise HTTPException(404, detail="Gambar tidak ditemukan")
-    return Response(bytes(row["data"]), media_type=row["type"], headers={"Cache-Control": "private, max-age=300"})
+    return image_response(row["data"], row["type"], w, "private, max-age=300")
 
 
 @router.get("/fleet/{code}/card")
@@ -541,7 +541,7 @@ def waste_delete(waste_id: str, _: dict = Depends(require_page("cotr.production"
 
 
 @router.get("/photos/{kind}/{row_id}")
-def photo(kind: Literal["check-in", "signature", "request"], row_id: str, request: Request, user: dict = Depends(current_user)):
+def photo(kind: Literal["check-in", "signature", "request"], row_id: str, request: Request, w: Optional[int] = Query(None, ge=48, le=1600), user: dict = Depends(current_user)):
     if not has_page(user, "cotr.check-in"):
         d = cotr.driver_of(user) if user["role"] == "driver" else None
         if not d or cotr.photo_owner(kind, row_id) != d["code"]:
@@ -549,7 +549,7 @@ def photo(kind: Literal["check-in", "signature", "request"], row_id: str, reques
     row = cotr.photo(kind, row_id)
     if not row or not row["photo"]:
         raise HTTPException(404, detail="Foto tidak ditemukan")
-    return Response(bytes(row["photo"]), media_type=row["photo_type"], headers={"Cache-Control": "private, max-age=86400"})
+    return image_response(row["photo"], row["photo_type"], w, "private, max-age=86400")
 
 
 # ---------------------------------------------------------------- label QR of an armada (no sign-in, migration 063)
@@ -570,18 +570,18 @@ def public_fleet(token: str):
 
 
 @public_router.get("/api/public/fleet/{token}/photo")
-def public_fleet_photo(token: str):
+def public_fleet_photo(token: str, w: Optional[int] = Query(None, ge=48, le=1600)):
     row = cotr.image("fleet", _fleet_of(token), "photo")
     if not row or not row["data"]:
         raise HTTPException(404, detail="Foto tidak ada")
-    return Response(bytes(row["data"]), media_type=row["type"], headers={"Cache-Control": "public, max-age=300"})
+    return image_response(row["data"], row["type"], w, "public, max-age=300")
 
 
 @public_router.get("/api/public/fleet/{token}/driver/{driver}/photo")
-def public_driver_photo(token: str, driver: str):
+def public_driver_photo(token: str, driver: str, w: Optional[int] = Query(None, ge=48, le=1600)):
     code = _fleet_of(token)
     d = cotr.db.fetchrow(f"SELECT 1 FROM {cotr.P}.cotr_driver WHERE code = %s AND fleet_code = %s AND status <> 'inactive'", (driver, code))
     row = cotr.image("drivers", driver, "photo") if d else None
     if not row or not row["data"]:
         raise HTTPException(404, detail="Foto tidak ada")
-    return Response(bytes(row["data"]), media_type=row["type"], headers={"Cache-Control": "public, max-age=300"})
+    return image_response(row["data"], row["type"], w, "public, max-age=300")

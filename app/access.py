@@ -34,6 +34,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("form.outlet", "Monitoring Outlet (form)", "Form"),
     ("form.damaged-equipment", "Damaged Equipment (form)", "Form"),
     ("form.pengajuan", "Pengajuan (form)", "Form"),
+    ("form.wwwr", "WW-WR (form, SWAT)", "Form"),
     ("cc.monitor", "Monitor", "Cost Control · Stock opname"),
     ("cc.reviews", "Review", "Cost Control · Stock opname"),
     ("cc.entry", "Enter / import SO", "Cost Control · Stock opname"),
@@ -56,6 +57,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("mon.surveyor-check-in", "Cost Control Check In", "Cost Control · Check In"),
     ("mon.product", "Monitoring Product", "Monitoring"),
     ("mon.outlet", "Monitoring Outlet", "Monitoring"),
+    ("mon.wwwr", "Monitoring WW-WR", "Monitoring"),
     ("mon.damaged-equipment", "Damaged Equipment", "Monitoring"),
     ("mon.branch-groups", "Branch groups", "Monitoring"),
     # Form Pengajuan (2026-10-28): the monitoring and its two approval steps (not menu entries of their own)
@@ -86,7 +88,7 @@ PLATFORMS = ("portal", "operations", "cotr")
 DRIVER_MENU = (("driver.transaksi", "Transaksi"), ("driver.reload", "Reload"), ("driver.pengajuan", "Pengajuan"))
 OPERATIONS_PAGES = ("overview", "sales", "rating.grabfood", "rating.google-maps", "rating.shopeefood", "rating.gofood",
                     "form.pic-check-in", "form.surveyor-check-in", "form.product", "form.outlet",
-                    "form.damaged-equipment", "stock-opname", "waste", "form.pengajuan")
+                    "form.damaged-equipment", "stock-opname", "waste", "form.pengajuan", "form.wwwr")
 MENU_KEYS = PAGE_KEYS + tuple(k for k, _ in DRIVER_MENU)
 
 
@@ -136,7 +138,7 @@ def clean_hidden(pages) -> list[str]:
 CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))
 EDITABLE_ROLES = ("cost_control", "user", "outlet")
 # the Surveyor Check In is given per account (migration 039), not to a role
-PER_USER_FORMS = ("form.surveyor-check-in",)
+PER_USER_FORMS = ("form.surveyor-check-in", "form.wwwr")  # WW-WR: the SWAT team (2026-11-03)
 FORM_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("form.") and k not in PER_USER_FORMS)
 # role "user" = Area Supervisor / PIC: Dashboard, Sales, Stock Opname, Waste, the Guide and every form (a new form page
 # is added to the role by its migration); role "outlet" = the shared outlet / HUB CK / HUB WH accounts (2026-10-28)

@@ -15,7 +15,15 @@
     GET    /api/visit-photos/{photo}                      the photo: the PIC's own visit or monitoring (scope)
     GET    /api/visit-signatures/{id}                     the visit's signature: same access as its photos
 
-{form} = product | outlet.
+{form} = product | outlet | wwwr (the SWAT audit, app/wwwr.py: GET /api/forms/wwwr lists the audits of the member,
+POST /api/forms/wwwr/visits {"auditId"} opens the shared visit; the lead sends it). Monitoring WW-WR (page mon.wwwr):
+    GET    /api/monitoring/wwwr/team                      the accounts with the page form.wwwr
+    GET    /api/monitoring/wwwr/schedule                  ?dateFrom&dateTo&branch: the audits scheduled
+    POST   /api/monitoring/wwwr/schedule                  {"branchCode", "day", "leadId", "memberIds", "note"}
+    PUT    /api/monitoring/wwwr/schedule/{id}             the same, until it is sent
+    POST   /api/monitoring/wwwr/schedule/{id}/cancel
+    GET    /api/monitoring/wwwr/comparison                ?dateFrom&dateTo&branch&group: audits against the PIC visits
+    GET    /api/monitoring/wwwr/comparison/{visit id}     one audit item by item against the PIC
 """
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -24,7 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from app import activity, branch_groups, visit_forms as vf
+from app import activity, branch_groups, visit_forms as vf, wwwr
 from app.pic_checkin import CheckInError
 from app.access import deny, has_page
 from app.activity import client_ip
@@ -37,7 +45,8 @@ FORMS = tuple(vf.DEFINITIONS)
 
 
 class OpenIn(BaseModel):
-    branchCode: str = Field(min_length=1, max_length=40)
+    branchCode: Optional[str] = Field(None, min_length=1, max_length=40)
+    auditId: Optional[str] = Field(None, min_length=1, max_length=40)  # WW-WR
 
 
 class AnswersIn(BaseModel):
@@ -88,12 +97,18 @@ def _run(fn, *args):
 @router.get("/api/forms/{form}")
 def form_state(form: str, request: Request, user: dict = Depends(current_user)) -> dict:
     _form_page(form, request, user)
-    return _no_score(vf.form_state(form, user))
+    return _no_score(wwwr.state(user) if form == "wwwr" else vf.form_state(form, user))
 
 
 @router.post("/api/forms/{form}/visits")
 def open_visit(form: str, body: OpenIn, request: Request, user: dict = Depends(current_user)) -> dict:
     _form_page(form, request, user)
+    if form == "wwwr":
+        if not body.auditId:
+            raise HTTPException(422, detail="Pilih jadwal audit")
+        return _run(wwwr.open_audit, user, body.auditId)
+    if not body.branchCode:
+        raise HTTPException(422, detail="Pilih cabang")
     return _run(vf.open_visit, form, user, body.branchCode)
 
 
@@ -101,9 +116,10 @@ def open_visit(form: str, body: OpenIn, request: Request, user: dict = Depends(c
 def get_visit(form: str, visit_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
     _form_page(form, request, user)
     row = vf.get_visit(visit_id)
-    if row is None or row["form"] != form or row["user_id"] != str(user["id"]):
+    if row is None or row["form"] != form or not vf.can_fill(row, user):
         raise HTTPException(404, detail="Kunjungan tidak ditemukan")
-    return _no_score(vf.full(visit_id))
+    out = vf.full(visit_id)
+    return _no_score(wwwr.with_team(out) if form == "wwwr" else out)
 
 
 @router.patch("/api/forms/{form}/visits/{visit_id}")
@@ -157,6 +173,92 @@ def _mon_page(form: str, request: Request, user: dict) -> None:
         deny(request, user)
 
 
+# ---------------------------------------------------------------- WW-WR: schedule and comparison (page mon.wwwr)
+
+class AuditIn(BaseModel):
+    branchCode: str = Field(min_length=1, max_length=40)
+    day: date
+    leadId: str = Field(min_length=1, max_length=40)
+    memberIds: list[str] = Field(default_factory=list, max_length=30)
+    note: Optional[str] = Field(None, max_length=500)
+
+
+def _wwwr_scope(request: Request, user: dict, branch: Optional[str], group: Optional[str] = None) -> Optional[list[str]]:
+    _mon_page("wwwr", request, user)
+    scoped = scoped_branch(branch)
+    branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
+    return branch_groups.narrow(branches, group)
+
+
+def _period(dateFrom: Optional[date], dateTo: Optional[date], back: int = 29) -> tuple[date, date]:
+    end = dateTo or today()
+    start = dateFrom or end - timedelta(days=back)
+    if start > end or (end - start).days > 366:
+        raise HTTPException(422, detail="Periode tidak valid (maksimal 1 tahun)")
+    return start, end
+
+
+@router.get("/api/monitoring/wwwr/team")
+def wwwr_team(request: Request, user: dict = Depends(current_user)) -> list[dict]:
+    _mon_page("wwwr", request, user)
+    return wwwr.team()
+
+
+@router.get("/api/monitoring/wwwr/schedule")
+def wwwr_schedule(request: Request, dateFrom: Optional[date] = None, dateTo: Optional[date] = None, branch: Optional[str] = None,
+                  user: dict = Depends(current_user)) -> dict:
+    branches = _wwwr_scope(request, user, branch)
+    end = dateTo or today() + timedelta(days=30)
+    start = dateFrom or today() - timedelta(days=30)
+    if start > end or (end - start).days > 366:
+        raise HTTPException(422, detail="Periode tidak valid (maksimal 1 tahun)")
+    return {"from": start.isoformat(), "to": end.isoformat(), "data": wwwr.schedule(start, end, branches)}
+
+
+@router.post("/api/monitoring/wwwr/schedule", status_code=201)
+def wwwr_add(body: AuditIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _wwwr_scope(request, user, None)
+    out = _run(wwwr.save_audit, user, None, body.model_dump())
+    activity.record("wwwr.schedule", user=user, request=request, page="/monitoring/wwwr",
+                    summary=f"Jadwal WW-WR {out['branchName']} {out['day']} ({len(out['members'])} anggota)", details={"id": out["id"]})
+    return out
+
+
+@router.put("/api/monitoring/wwwr/schedule/{audit_id}")
+def wwwr_update(audit_id: str, body: AuditIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _wwwr_scope(request, user, None)
+    out = _run(wwwr.save_audit, user, audit_id, body.model_dump())
+    activity.record("wwwr.schedule", user=user, request=request, page="/monitoring/wwwr",
+                    summary=f"Jadwal WW-WR {out['branchName']} {out['day']} diubah", details={"id": audit_id})
+    return out
+
+
+@router.post("/api/monitoring/wwwr/schedule/{audit_id}/cancel")
+def wwwr_cancel(audit_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    _wwwr_scope(request, user, None)
+    _run(wwwr.cancel_audit, audit_id)
+    activity.record("wwwr.schedule", user=user, request=request, page="/monitoring/wwwr", summary="Jadwal WW-WR dibatalkan", details={"id": audit_id})
+    return {"ok": True}
+
+
+@router.get("/api/monitoring/wwwr/comparison")
+def wwwr_comparison(request: Request, dateFrom: Optional[date] = None, dateTo: Optional[date] = None, branch: Optional[str] = None,
+                    group: Optional[str] = Query(None, max_length=60), user: dict = Depends(current_user)) -> dict:
+    branches = _wwwr_scope(request, user, branch, group)
+    start, end = _period(dateFrom, dateTo)
+    return wwwr.comparison(start, end, branches)
+
+
+@router.get("/api/monitoring/wwwr/comparison/{visit_id}")
+def wwwr_comparison_of(visit_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    _mon_page("wwwr", request, user)
+    out = wwwr.comparison_of(visit_id)
+    scope = allowed_branches()
+    if out is None or (scope is not None and out["branchCode"] not in scope):
+        raise HTTPException(404, detail="Audit tidak ditemukan")
+    return out
+
+
 @router.get("/api/monitoring/{form}")
 def monitoring(form: str, request: Request, dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None),
                branch: Optional[str] = None, userId: Optional[str] = None, group: Optional[str] = Query(None, max_length=60),
@@ -173,7 +275,12 @@ def monitoring(form: str, request: Request, dateFrom: Optional[date] = Query(Non
     scoped = scoped_branch(branch)
     branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
     branches = branch_groups.narrow(branches, group)  # Monitoring → Branch groups (CCI, CTG, CTGP …)
-    return {"period": {"from": start.isoformat(), "to": end.isoformat()}, **vf.monitor(form, start, end, branches, userId)}
+    out = vf.monitor(form, start, end, branches, userId)
+    if form == "wwwr":
+        teams = wwwr.teams_of([v["id"] for v in out["data"]])
+        for v in out["data"]:
+            v["audit"] = teams.get(v["id"])
+    return {"period": {"from": start.isoformat(), "to": end.isoformat()}, **out}
 
 
 @router.get("/api/monitoring/{form}/attendance")
@@ -203,13 +310,14 @@ def monitoring_visit(form: str, visit_id: str, request: Request, user: dict = De
     scope = allowed_branches()
     if row is None or row["form"] != form or row["status"] != "SUBMITTED" or (scope is not None and row["branch_code"] not in scope):
         raise HTTPException(404, detail="Kunjungan tidak ditemukan")
-    return {"definition": vf.DEFINITIONS[form], **vf.full(visit_id)}
+    out = vf.full(visit_id)
+    return {"definition": vf.DEFINITIONS[form], **(wwwr.with_team(out) if form == "wwwr" else out)}
 
 
 def _image(row: Optional[dict], request: Request, user: dict) -> Response:
     if row is None:
         raise HTTPException(404, detail="Foto tidak ditemukan")
-    own = row["user_id"] == str(user["id"]) and has_page(user, f"form.{row['form']}")
+    own = has_page(user, f"form.{row['form']}") and vf.can_fill(row, user)  # WW-WR: a member of the audit
     scope = allowed_branches()
     monitor = row["status"] == "SUBMITTED" and has_page(user, f"mon.{row['form']}") and (scope is None or row["branch_code"] in scope)
     if not (own or monitor):

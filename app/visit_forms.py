@@ -11,6 +11,8 @@ photo — material for the analysis (2026-10-23; before: UNDER only); items left
 Daily (2026-10-23): one visit per PIC, form and branch per day (WIB) — the next one the day after; a day without any
 visit of a PIC counts as a day off in the monitoring (attendance).
 Tables integration_portal.visit_form and visit_form_photo (migration 023).
+Form WW-WR (2026-11-03, migration 064, app/wwwr.py): the SWAT audit of an outlet, every item of both forms in one
+visit (keys "product:…" / "outlet:…"), filled by the members of a scheduled audit and sent by its lead.
 """
 import json
 from datetime import date, datetime, timedelta
@@ -252,6 +254,42 @@ DEFINITIONS: dict[str, dict] = {
 }
 
 
+PARTS = {"product": "Product", "outlet": "Outlet"}
+
+
+def _combined() -> dict:
+    """WW-WR: the groups of Monitoring Product then Monitoring Outlet, every key prefixed with its form ("product:…")."""
+    groups = []
+    for form, label in PARTS.items():
+        for g in DEFINITIONS[form]["groups"]:
+            groups.append({**g, "key": f"{form}:{g['key']}", "part": form, "title": f"{label} · {g['title']}",
+                           "titleEn": f"{label} · {g.get('titleEn', g['title'])}",
+                           "sections": [{**sec, "key": f"{form}:{sec['key']}",
+                                         "items": [{**it, "key": f"{form}:{it['key']}"} for it in sec["items"]]}
+                                        for sec in g["sections"]]})
+    return {"title": "WW-WR", "titleEn": "WW-WR", "groups": groups}
+
+
+DEFINITIONS["wwwr"] = _combined()
+AUDIT = "integration_portal.wwwr_audit"
+AUDIT_MEMBER = "integration_portal.wwwr_audit_member"
+
+
+def audit_of(visit_id: str) -> Optional[dict]:
+    """The WW-WR audit of a visit: its lead and members."""
+    return db.fetchrow(f"""SELECT a.id::text, a.lead_id::text, a.status, a.day,
+                                  array(SELECT m.user_id::text FROM {AUDIT_MEMBER} m WHERE m.audit_id = a.id) AS members
+                             FROM {AUDIT} a WHERE a.visit_id::text = %s""", (visit_id,))
+
+
+def can_fill(row: dict, user: dict) -> bool:
+    """The PIC's own visit; a WW-WR visit: a member of its audit (not cancelled)."""
+    if row["form"] != "wwwr":
+        return row["user_id"] == str(user["id"])
+    a = audit_of(row["id"])
+    return bool(a and a["status"] != "cancelled" and str(user["id"]) in (a["members"] or []))
+
+
 def all_items(form: str, retired: bool = False) -> list[dict]:
     """Every item of a form with its group and section (retired: also the lists no longer asked, for the history)."""
     out = []
@@ -400,7 +438,7 @@ def open_visit(form: str, user: dict, branch_code: str) -> dict:
 
 def own_draft(form: str, user: dict, visit_id: str) -> dict:
     row = get_visit(visit_id)
-    if row is None or row["form"] != form or row["user_id"] != str(user["id"]):
+    if row is None or row["form"] != form or not can_fill(row, user):
         raise LookupError("Kunjungan tidak ditemukan")
     if row["status"] != "DRAFT":
         raise VisitError("Kunjungan ini sudah dikirim")
@@ -450,6 +488,8 @@ def save_answers(form: str, user: dict, visit_id: str, patch: dict) -> dict:
                 if not 0 <= qty <= MAX_QTY_G:
                     raise VisitError("Gramasi harus angka 0 sampai 1.000.000 gram")
             cur["qty"] = qty
+        if form == "wwwr":  # who of the team filled the item
+            cur["by"] = user.get("full_name") or user["username"]
         answers[key] = {k: v for k, v in cur.items() if v is not None}
     answers = {k: v for k, v in answers.items() if v}
     counts = _counts(form, answers)
@@ -517,7 +557,12 @@ def missing(form: str, answers: dict, photos: list[dict], group: Optional[str] =
 def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Optional[float], accuracy: Optional[float],
            device: Optional[str], ip: Optional[str], signature: Optional[str] = None, signed_name: Optional[str] = None) -> dict:
     row = own_draft(form, user, visit_id)
-    _not_today(form, user, row["branch_code"], row["branch_name"])
+    if form == "wwwr":  # one audit per outlet per day is kept by the schedule; the lead sends
+        a = audit_of(visit_id)
+        if not a or a["lead_id"] != str(user["id"]):
+            raise VisitError("Hanya ketua tim yang dapat mengirim audit WW-WR")
+    else:
+        _not_today(form, user, row["branch_code"], row["branch_name"])
     photos = photos_of(visit_id)
     todo = missing(form, row["answers"] or {}, photos, group_of(row["branch_code"]))
     if any(t["need"] == "rating" for t in todo):
@@ -557,6 +602,8 @@ def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Opti
 
 def discard(form: str, user: dict, visit_id: str) -> None:
     own_draft(form, user, visit_id)
+    if form == "wwwr":
+        raise VisitError("Audit WW-WR tidak dapat dihapus; minta management membatalkan jadwalnya")
     db.fetchrow(f"DELETE FROM {T} WHERE id::text = %s AND status = 'DRAFT' RETURNING id", (visit_id,))
 
 
@@ -626,12 +673,12 @@ def monitor(form: str, date_from: date, date_to: date, branches: Optional[list[s
 
 
 def signature_of(visit_id: str) -> Optional[dict]:
-    return db.fetchrow(f"""SELECT signature AS photo, signature_type AS photo_type, user_id::text, branch_code, form, status
+    return db.fetchrow(f"""SELECT id::text, signature AS photo, signature_type AS photo_type, user_id::text, branch_code, form, status
                            FROM {T} WHERE id::text = %s AND signature IS NOT NULL""", (visit_id,))
 
 
 def photo(photo_id: str) -> Optional[dict]:
-    return db.fetchrow(f"""SELECT p.photo, p.photo_type, v.user_id::text, v.branch_code, v.form, v.status
+    return db.fetchrow(f"""SELECT v.id::text, p.photo, p.photo_type, v.user_id::text, v.branch_code, v.form, v.status
                            FROM {TP} p JOIN {T} v ON v.id = p.visit_id WHERE p.id::text = %s""", (photo_id,))
 
 
@@ -641,6 +688,8 @@ def attendance(form: str, date_from: date, date_to: date, branches: Optional[lis
     from app import access
     from app.utils import today as wib_today
     now = wib_today()
+    if form == "wwwr":  # audits follow a schedule: no daily attendance
+        return {"days": [], "today": now.isoformat(), "since": DAILY_SINCE.isoformat(), "pics": []}
     start, end = max(date_from, DAILY_SINCE), min(date_to, now)
     days = [] if end < start else [start + timedelta(days=i) for i in range((end - start).days + 1)]
     users = db.fetch("""SELECT u.id, u.username, u.full_name, u.role,

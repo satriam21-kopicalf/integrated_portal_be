@@ -7,7 +7,7 @@ from app import visit_forms as vf, wwwr
 
 def test_wwwr_has_every_item_of_product_and_outlet_prefixed():
     items = vf.all_items("wwwr")
-    assert len(items) == len(vf.all_items("product")) + len(vf.all_items("outlet")) == 145
+    assert len(items) == len(vf.all_items("product")) + len(vf.all_items("outlet")) == 144
     assert items[0]["key"] == "product:stok-preparation.1" and items[-1]["key"].startswith("outlet:administrasi-finance.")
     assert [g["part"] for g in vf.DEFINITIONS["wwwr"]["groups"]][:2] == ["product", "product"]
     assert vf.DEFINITIONS["wwwr"]["groups"][0]["title"] == "Product · Ketersediaan"

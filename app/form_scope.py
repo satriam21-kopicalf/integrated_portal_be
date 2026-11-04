@@ -93,7 +93,7 @@ def matrix(base_definitions: dict) -> dict:
                                   "required": bool(it.get("required", True)), "groups": cells})
                 if items:
                     sections.append({"key": s["key"], "title": s["title"], "titleEn": s.get("titleEn", s["title"]),
-                                     "group": g.get("titleEn", g["title"]), "items": items})
+                                     "group": g.get("titleEn", g["title"]), "groupTitle": g["title"], "items": items})
         forms.append({"form": form, "sections": sections})
     return {"groups": groups, "forms": forms}
 

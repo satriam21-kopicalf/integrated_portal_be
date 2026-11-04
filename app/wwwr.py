@@ -4,8 +4,8 @@ Product and Monitoring Outlet in one visit (app/visit_forms.py, form "wwwr", key
 The management schedules an audit (Monitoring WW-WR → Schedule): an outlet (any Kopi Calf branch), a day, a lead and
 the members (accounts with the page form.wwwr). One audit per outlet per day. From that day the members see it in
 Operations → Form WW-WR and fill the one shared visit (each answer keeps who filled it); the lead sends it with the
-signature. Nobody outside the team opens it. The lead adds colleagues to the team (job title SWAT / Operations or the
-page form.wwwr; an added member gets the page). Before sending, the team writes the evaluation (migration 065): the
+signature. Nobody outside the team opens it. The lead adds colleagues to the team (accounts assigned the page
+form.wwwr in User Accounts). Before sending, the team writes the evaluation (migration 065): the
 general evaluation, the action plans (who handles each, by when) and the day of the revisit; a sent audit is
 "follow-up" until every action plan is done and the lead closes the revisit, then "completed". The audit is shared
 with the PIC by a read-only link (print / PDF).
@@ -15,7 +15,6 @@ Monitoring Outlet visits the PIC sent for that outlet in the COMPARE_DAYS before
 of the SWAT team; "agree" when both pass (MEET / EXCEED) or both fail (UNDER), "overrated" when the PIC passed what the
 team found UNDER, "underrated" the other way. Conformity = agree / items rated by both — material to evaluate the PICs.
 """
-import re
 from datetime import date
 from typing import Any, Iterable, Optional
 
@@ -35,12 +34,13 @@ class AuditError(vf.VisitError):
 # ---------------------------------------------------------------- team and schedule
 
 def team() -> list[dict]:
-    """Who may be in an audit team: active accounts with the page form.wwwr or the job title SWAT / Operations."""
+    """Who may be in an audit team: the active accounts assigned the page form.wwwr in User Accounts (2026-11-04: the job
+    title SWAT / Operations alone no longer counts, so only the assigned SWAT team shows)."""
     from app import access
     users = db.fetch(f"""SELECT id, username, full_name, role, job_title FROM {P}.user_account
                           WHERE is_active AND role <> 'superadmin' ORDER BY coalesce(full_name, username)""")
     return [{"id": str(u["id"]), "username": u["username"], "name": u["full_name"] or u["username"], "jobTitle": u["job_title"]}
-            for u in users if re.search(r"swat|operation", u["job_title"] or "", re.I) or access.has_page(u, "form.wwwr")]
+            for u in users if access.has_page(u, "form.wwwr")]
 
 
 def _grant(conn: Any, user_ids: Iterable[str], by: Any) -> None:
@@ -338,14 +338,14 @@ def _mine(user: dict, audit_id: str, lead: bool = False) -> dict:
 
 
 def add_members(user: dict, audit_id: str, ids: list[str]) -> dict:
-    """The lead adds colleagues (SWAT / Operations) to the team; they get Form WW-WR and fill the same audit."""
+    """The lead adds colleagues (accounts with the page form.wwwr) to the team; they get Form WW-WR and fill the same audit."""
     a = _mine(user, audit_id, lead=True)
     if a["completed_at"]:
         raise AuditError("Audit sudah selesai")
     allowed = {t["id"] for t in team()}
     ids = {str(i) for i in ids}
     if not ids or ids - allowed:
-        raise AuditError("Rekan harus akun SWAT / Operations")
+        raise AuditError("Rekan harus akun yang di-assign Form WW-WR")
     with db.transaction() as conn:
         for uid in sorted(ids):
             conn.execute(f"INSERT INTO {P}.wwwr_audit_member (audit_id, user_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (a["id"], uid))

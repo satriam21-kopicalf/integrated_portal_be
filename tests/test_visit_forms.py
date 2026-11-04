@@ -17,14 +17,14 @@ def test_items_follow_the_form_visit_workbook():
     assert len(product) == 19 + 19 + 6 + 16 + 5 + 9 == 74
     # Outlet Cleanliness = the Travel Path SOP (2026-10-30), 21 points in 5 zones since Ambience, Grooming & Kesiapan
     # Crew and Cupping & Test Food Daily were removed (2026-11-02)
-    assert len(outlet) == 21 + 5 + 4 + 3 + 4 + 15 + 8 + 4 + 7 == 71  # + Administrasi & Finance (2026-10-21)
+    assert len(outlet) == 21 + 5 + 4 + 3 + 4 + 15 + 8 + 3 + 7 == 70  # + Administrasi & Finance (2026-10-21); − Merchandise (2026-11-04)
     assert not {"Ambience", "Grooming & Kesiapan Crew", "Cupping & Test Food Daily"} & {i["label"] for i in outlet}
     optional = {i["label"]: vf.is_required(i, None) for i in product + outlet}
     assert optional["Cupping Menu Specialty"] is False and optional["Mesin Espresso, Grinder & Kalibrasi"] is False
     assert [g["title"] for g in vf.DEFINITIONS["product"]["groups"]] == ["Ketersediaan", "Kualitas Produk"]
     assert [g["title"] for g in vf.DEFINITIONS["outlet"]["groups"]][0] == "Kebersihan dan Rating Outlet"
     assert [g["title"] for g in vf.DEFINITIONS["outlet"]["groups"]][-2:] == ["Kenyamanan Outlet", "Administrasi & Finance"]
-    assert len({i["key"] for i in product}) == 74 and len({i["key"] for i in outlet}) == 71
+    assert len({i["key"] for i in product}) == 74 and len({i["key"] for i in outlet}) == 70
     late = next(i for i in outlet if i["label"] == "Nama Barista Telat")
     assert late["kind"] == "text" and late["required"] is False  # a name, not a rating; optional
     # every item, section and group has its English text (ENG / IDN, 2026-10-27)
@@ -68,7 +68,7 @@ def test_counts_and_what_blocks_the_submit():
     answers[items[0]["key"]] = {"rating": "UNDER"}
     answers[items[1]["key"]] = {"rating": "EXCEED"}
     c = vf._counts("outlet", answers)
-    assert (c["under"], c["exceed"], c["rated"], c["total"]) == (1, 1, 70, 70) and c["score"] == round(69 * 100 / 70, 1)
+    assert (c["under"], c["exceed"], c["rated"], c["total"]) == (1, 1, 69, 69) and c["score"] == round(68 * 100 / 69, 1)
     required = [i for i in items if vf.is_required(i, "CTG") and not i.get("platform")]
     todo = vf.missing("outlet", answers, [], "CTG")
     by_key = {t["key"]: t["need"] for t in todo}

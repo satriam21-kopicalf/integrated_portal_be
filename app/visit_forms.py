@@ -128,7 +128,7 @@ DEFINITIONS: dict[str, dict] = {
                     ("Ketersediaan Lunch Box S", "Lunch Boxes S Available", O), ("Ketersediaan Lunch Box M", "Lunch Boxes M Available", O),
                     ("Ketersediaan Set Spork", "Spork Sets Available", O), ("Ketersediaan Greeting Card", "Greeting Cards Available"),
                     ("Ketersediaan Beans Card Specialty", "Specialty Beans Cards Available", O),
-                    ("Ketersediaan Plastik Take Away", "Take-Away Bags Available"),
+                    ("Ketersediaan Plastik Takeaway", "Takeaway Plastic Available"),
                 ])),
                 _sec("bahan-baku", "Bahan Baku", "Raw Materials", _list("bahan-baku", [
                     ("Kesesuaian Form Request Bahan Baku", "Raw Material Request Form Matches"),
@@ -141,7 +141,7 @@ DEFINITIONS: dict[str, dict] = {
             _grp("kualitas-produk", "Kualitas Produk", "Product Quality", "5 Indra - Rasa", "5 Senses - Taste", [
                 _sec("kualitas-produk", "Kualitas Produk", "Product Quality", _list("kualitas-produk", [
                     ("Cupping Premium", "Cupping Premium"), ("Cupping Regular", "Cupping Regular"),
-                    ("Cupping Semua Premix", "Cupping All Premixes"), ("Cupping Semua Cream & Foam", "Cupping All Cream & Foam"),
+                    ("Cupping Semua Premix", "Cupping All Premix"), ("Cupping Semua Cream & Foam", "Cupping All Cream & Foam"),
                     # optional (2026-11-02): not every outlet sells the specialty menu
                     ("Cupping Menu Specialty", "Cupping Specialty Menu", O),
                     ("Test Food WIP Side Dish & Main Course", "Test Food WIP Side Dish & Main Course", O),
@@ -215,11 +215,12 @@ DEFINITIONS: dict[str, dict] = {
                         'Hand sink crew · area cuci alat · rak pengeringan', 'Crew hand sink · tool washing area · drying rack',
                         'Air mengalir, sabun dan pengering tangan tersedia. Hand sink tidak dipakai mencuci alat atau menumpuk barang. Alat bersih disimpan terbalik dan kering.',
                         'Running water, soap and hand dryer available. The hand sink is not used to wash tools or store items. Clean tools stored upside down and dry.'),
-                    _tp('Ice Cube & Ice Bin', 'Ice Cubes & Ice Bin', 'Kritikal',
-                        'Ice cube dalam plastik klip di penyimpanan · label tanggal produksi · ice bin dan scoop',
-                        'Ice cubes in clip bags in storage · production date label · ice bin and scoop',
-                        'Plastik klip tertutup rapat dan tidak bocor, berlabel tanggal dan dipakai FIFO, ice bin bersih, scoop disimpan di luar es dengan pegangan tidak menyentuh es.',
-                        'Clip bags sealed and not leaking, date-labelled and used FIFO, ice bin clean, scoop kept out of the ice with the handle not touching it.'),
+                    # Ice Bin → Freezer, FIFO → FEFO (2026-11-04, Operations)
+                    _tp('Ice Cube & Freezer', 'Ice Cubes & Freezer', 'Kritikal',
+                        'Ice cube dalam plastik klip di penyimpanan · label tanggal produksi · freezer dan scoop',
+                        'Ice cubes in clip bags in storage · production date label · freezer and scoop',
+                        'Plastik klip tertutup rapat dan tidak bocor, berlabel tanggal dan dipakai FEFO, freezer bersih, scoop disimpan di luar es dengan pegangan tidak menyentuh es.',
+                        'Clip bags sealed and not leaking, date-labelled and used FEFO, freezer clean, scoop kept out of the ice with the handle not touching it.'),
                     _tp('Waste Bin Area Bar', 'Bar Area Waste Bin', 'Minor',
                         'Waste bin di area bar dan kasir', 'Waste bins at the bar and the cashier',
                         'Tertutup, tidak penuh, kantong tidak bocor, tidak ada cairan menggenang di dasar bin.',
@@ -231,11 +232,11 @@ DEFINITIONS: dict[str, dict] = {
                         'Outside and inside · door seal · temperature display · how the stock is arranged',
                         'Chiller 1–4 °C dan freezer −18 °C atau lebih rendah, angka terbaca di foto. Seal rapat, tidak ada bunga es berlebih atau kebocoran, bahan tertutup dan berlabel, produk siap saji tidak di bawah bahan mentah.',
                         'Chiller 1–4 °C and freezer −18 °C or lower, readable in the photo. Seal tight, no excess frost or leaks, stock covered and labelled, ready-to-serve products not below raw materials.'),
-                    _tp('Storage, FIFO & Label', 'Storage, FIFO & Labels', 'Kritikal',
+                    _tp('Storage, FEFO & Label', 'Storage, FEFO & Labels', 'Kritikal',
                         'Rak dry storage · kemasan bahan baku dan labelnya · lantai dan dinding storage',
                         'Dry storage racks · raw material packaging and labels · storage floor and walls',
-                        'Tersusun FIFO dan berlabel tanggal terima, tidak ada kemasan rusak atau kedaluwarsa, bahan minimal 15 cm di atas lantai dan tidak menempel dinding, area kering dan bebas hama.',
-                        'Arranged FIFO and labelled with the receiving date, no damaged or expired packaging, stock at least 15 cm off the floor and away from the wall, area dry and pest-free.'),
+                        'Tersusun FEFO dan berlabel tanggal terima, tidak ada kemasan rusak atau kedaluwarsa, bahan minimal 15 cm di atas lantai dan tidak menempel dinding, area kering dan bebas hama.',
+                        'Arranged FEFO and labelled with the receiving date, no damaged or expired packaging, stock at least 15 cm off the floor and away from the wall, area dry and pest-free.'),
                     _tp('Chemical & Sanitasi', 'Chemicals & Sanitation', 'Kritikal',
                         'Rak penyimpanan chemical · botol sanitizer dan kain lap · test strip',
                         'Chemical storage rack · sanitizer bottles and cloths · test strips',
@@ -321,7 +322,8 @@ DEFINITIONS: dict[str, dict] = {
                 _sec("kenyamanan", "Kenyamanan Outlet", "Outlet Comfort", _list("kenyamanan", [
                     ("Kondisi Ruangan", "Room Condition"),
                     ("Kondisi Furniture (Sofa, Meja, Karpet, Kursi)", "Furniture Condition (Sofa, Table, Carpet, Chair)"),
-                    ("Kondisi Internet Customer", "Customer Internet"), ("Kondisi Merchandise", "Merchandise Condition", O),
+                    ("Kondisi Internet Customer", "Customer Internet"),
+                    # Kondisi Merchandise removed (2026-11-04, Operations); it was the last item, the keys stay
                 ])),
             ]),
             # added 2026-10-21 (user request): the workbook's ADMINISTRASI & FINANCE; SO Packaging became SO Daily (2026-10-27)

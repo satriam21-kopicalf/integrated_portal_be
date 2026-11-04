@@ -375,10 +375,17 @@ def can_fill(row: dict, user: dict) -> bool:
     return bool(a and a["status"] != "cancelled" and str(user["id"]) in (a["members"] or []))
 
 
+def definition(form: str) -> dict:
+    """The definition of a form with the items each branch group is asked after Monitoring OPS → Branch groups
+    (app/form_scope.py, 2026-11-04): what the screens and the scores use."""
+    from app import form_scope
+    return form_scope.apply(form, DEFINITIONS[form])
+
+
 def all_items(form: str, retired: bool = False) -> list[dict]:
     """Every item of a form with its group and section (retired: also the lists no longer asked, for the history)."""
     out = []
-    for g in DEFINITIONS[form]["groups"]:
+    for g in definition(form)["groups"]:
         for s in g["sections"]:
             if s.get("retired") and not retired:
                 continue
@@ -506,7 +513,7 @@ def form_state(form: str, user: dict) -> dict:
                       (form, str(user["id"])))
     recent = db.fetch(f"""SELECT {COLS} FROM {T} v WHERE v.form = %s AND v.user_id::text = %s AND v.status = 'SUBMITTED'
                          ORDER BY v.submitted_at DESC LIMIT 10""", (form, str(user["id"])))
-    return {"definition": DEFINITIONS[form], "user": {"id": str(user["id"]), "username": user["username"],
+    return {"definition": definition(form), "user": {"id": str(user["id"]), "username": user["username"],
             "name": user.get("full_name") or user["username"]}, "branches": branches,
             "drafts": [_view(r) for r in drafts], "recent": [_view(r) for r in recent], "today": done_today(form, str(user["id"]))}
 
@@ -755,7 +762,7 @@ def monitor(form: str, date_from: date, date_to: date, branches: Optional[list[s
                "exceed": sum(v["counts"]["exceed"] for v in data),
                "score": round(sum(scores) / len(scores), 1) if scores else None,
                "outside": sum(1 for v in data if v["outsideRadius"])}
-    order = {s["key"]: i for i, s in enumerate(s for g in DEFINITIONS[form]["groups"] for s in g["sections"])}
+    order = {s["key"]: i for i, s in enumerate(s for g in definition(form)["groups"] for s in g["sections"])}
     # per branch group: visits, outlets, average score, UNDER (2026-11-02)
     per_group: dict[str, dict] = {}
     for v in data:
@@ -780,7 +787,7 @@ def monitor(form: str, date_from: date, date_to: date, branches: Optional[list[s
             vals = [float(a["stars"]) for r in rows if (a := (r["answers"] or {}).get(it["key"]) or {}).get("stars") is not None]
             platforms.append({"key": it["key"], "platform": it["platform"], "label": it["label"], "labelEn": it.get("labelEn"),
                               "stars": round(sum(vals) / len(vals), 2) if vals else None, "visits": len(vals)})
-    return {"definition": DEFINITIONS[form], "data": data, "summary": summary, "platforms": platforms, "groups": by_group,
+    return {"definition": definition(form), "data": data, "summary": summary, "platforms": platforms, "groups": by_group,
             "attendance": attendance(form, date_from, date_to, branches),
             "sections": sorted(sections.values(), key=lambda s: order.get(s["key"], 99)),
             "findings": [{**f, "branches": sorted(f["branches"])} for f in top],

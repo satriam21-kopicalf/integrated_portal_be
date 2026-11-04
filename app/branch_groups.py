@@ -28,13 +28,14 @@ def outlets() -> list[dict]:
 
 
 def list_groups() -> dict:
-    groups = db.fetch(f"SELECT id::text, code, name, description, sort, checkin_max_per_day, updated_at FROM {TG} ORDER BY sort, code")
+    groups = db.fetch(f"SELECT id::text, code, name, description, sort, checkin_max_per_day, checkin_deadline, updated_at FROM {TG} ORDER BY sort, code")
     branches = outlets()
     by_group: dict[str, list[dict]] = {}
     for b in branches:
         if b["group_id"]:
             by_group.setdefault(b["group_id"], []).append({"code": b["code"], "name": b["name"]})
-    out = [{**g, "updated_at": g["updated_at"].isoformat(), "branches": sorted(by_group.get(g["id"], []), key=lambda x: x["name"])} for g in groups]
+    out = [{**g, "updated_at": g["updated_at"].isoformat(),
+            "checkin_deadline": g["checkin_deadline"].strftime("%H:%M") if g.get("checkin_deadline") else None, "branches": sorted(by_group.get(g["id"], []), key=lambda x: x["name"])} for g in groups]
     return {"groups": out, "unassigned": sorted(({"code": b["code"], "name": b["name"]} for b in branches if not b["group_id"]), key=lambda x: x["name"])}
 
 
@@ -49,8 +50,11 @@ def _clean(code: str, name: str) -> tuple[str, str]:
 
 
 def save_group(group_id: Optional[str], code: str, name: str, description: Optional[str], sort: int, actor: Optional[str],
-               checkin_max: Optional[int] = None) -> dict:
-    """checkin_max: the PIC check-ins an outlet of the group takes per day (None = once a day, migration 066)."""
+               checkin_max: Optional[int] = None, checkin_deadline: Optional[str] = None) -> dict:
+    """checkin_max: the PIC check-ins an outlet of the group takes per day (None = once a day, migration 066).
+    checkin_deadline: HH:MM, the first check-in of the PIC's day by then is on time (migration 069; None = 11:00)."""
+    from app import pic_settings
+    deadline = pic_settings.group_deadline(checkin_deadline)
     code, name = _clean(code, name)
     clash = db.fetchrow(f"SELECT id::text FROM {TG} WHERE code = %s AND (%s::uuid IS NULL OR id <> %s::uuid)", (code, group_id, group_id))
     if clash:
@@ -58,13 +62,13 @@ def save_group(group_id: Optional[str], code: str, name: str, description: Optio
     desc = (description or "").strip()[:300] or None
     if group_id:
         row = db.fetchrow(f"""UPDATE {TG} SET code = %s, name = %s, description = %s, sort = %s, checkin_max_per_day = %s,
-                                     updated_at = now(), updated_by = %s
-                              WHERE id::text = %s RETURNING id::text""", (code, name, desc, sort, checkin_max, actor, group_id))
+                                     checkin_deadline = %s, updated_at = now(), updated_by = %s
+                              WHERE id::text = %s RETURNING id::text""", (code, name, desc, sort, checkin_max, deadline, actor, group_id))
         if row is None:
             raise LookupError("Grup tidak ditemukan")
     else:
-        row = db.fetchrow(f"""INSERT INTO {TG} (code, name, description, sort, checkin_max_per_day, updated_by) VALUES (%s, %s, %s, %s, %s, %s)
-                              RETURNING id::text""", (code, name, desc, sort, checkin_max, actor))
+        row = db.fetchrow(f"""INSERT INTO {TG} (code, name, description, sort, checkin_max_per_day, checkin_deadline, updated_by)
+                              VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id::text""", (code, name, desc, sort, checkin_max, deadline, actor))
     return {"id": row["id"]}
 
 

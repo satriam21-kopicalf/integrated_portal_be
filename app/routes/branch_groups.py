@@ -7,6 +7,14 @@ generic /api/monitoring/{form} routes.
     DELETE /api/monitoring/branch-groups/{id}          page mon.branch-groups (its branches become "without a group")
     PUT    /api/monitoring/branch-groups/{id}/branches page mon.branch-groups: {"branchCodes": [...]}
     GET    /api/monitoring/overview                    page mon.overview: ?dateFrom&dateTo&group
+
+The PIC assessment settings (migration 069, app/pic_settings.py, app/form_scope.py), page mon.branch-groups to change:
+    GET    /api/monitoring/outlet-settings             every outlet: group deadline, own check-in deadline, time zone
+    PUT    /api/monitoring/outlet-settings/{code}      {"deadline": "HH:MM" | null, "timezone": "Asia/Makassar" …}
+    GET    /api/monitoring/form-items                  the Product / Outlet items asked per branch group
+    PUT    /api/monitoring/form-items                  {"changes": [{"form", "itemKey", "group", "shown"}]}
+    GET    /api/monitoring/sales-targets?month=YYYY-MM the net sales target of every outlet and the net sales so far
+    PUT    /api/monitoring/sales-targets               {"month", "rows": [{"code", "target"}]}
 """
 from datetime import date, timedelta
 from typing import Optional
@@ -16,7 +24,8 @@ from pydantic import BaseModel, Field
 
 from app import activity
 from app import branch_groups as bg
-from app import monitoring_overview
+from app import form_scope, monitoring_overview, pic_settings
+from app import visit_forms as vf
 from app.access import PAGE_KEYS, deny, has_page
 from app.routes.auth import current_user
 from app.scope import allowed_branches
@@ -32,6 +41,7 @@ class GroupIn(BaseModel):
     description: Optional[str] = Field(None, max_length=300)
     sort: int = Field(0, ge=0, le=9999)
     checkinMaxPerDay: Optional[int] = Field(None, ge=1, le=50)  # PIC check-ins per outlet per day (migration 066)
+    checkinDeadline: Optional[str] = Field(None, max_length=5)   # HH:MM, on time until then (migration 069)
 
 
 class MembersIn(BaseModel):
@@ -48,7 +58,7 @@ def _run(fn, *args):
         return fn(*args)
     except LookupError as e:
         raise HTTPException(404, detail=str(e)) from None
-    except bg.GroupError as e:
+    except (bg.GroupError, pic_settings.SettingError, ValueError) as e:
         raise HTTPException(422, detail=str(e)) from None
 
 
@@ -61,7 +71,7 @@ def groups(request: Request, user: dict = Depends(current_user)) -> dict:
 @router.post("/api/monitoring/branch-groups", status_code=201)
 def create(body: GroupIn, request: Request, user: dict = Depends(current_user)) -> dict:
     _need(request, user, "mon.branch-groups")
-    out = _run(bg.save_group, None, body.code, body.name, body.description, body.sort, str(user["id"]), body.checkinMaxPerDay)
+    out = _run(bg.save_group, None, body.code, body.name, body.description, body.sort, str(user["id"]), body.checkinMaxPerDay, body.checkinDeadline)
     activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups", summary=f"Membuat grup cabang {body.code.upper()}")
     return out
 
@@ -69,7 +79,7 @@ def create(body: GroupIn, request: Request, user: dict = Depends(current_user)) 
 @router.patch("/api/monitoring/branch-groups/{group_id}")
 def update(group_id: str, body: GroupIn, request: Request, user: dict = Depends(current_user)) -> dict:
     _need(request, user, "mon.branch-groups")
-    out = _run(bg.save_group, group_id, body.code, body.name, body.description, body.sort, str(user["id"]), body.checkinMaxPerDay)
+    out = _run(bg.save_group, group_id, body.code, body.name, body.description, body.sort, str(user["id"]), body.checkinMaxPerDay, body.checkinDeadline)
     activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups", summary=f"Mengubah grup cabang {body.code.upper()}")
     return out
 
@@ -104,3 +114,76 @@ def overview(request: Request, dateFrom: Optional[date] = Query(None), dateTo: O
     scope = allowed_branches()
     return {"period": {"from": start.isoformat(), "to": end.isoformat()},
             **monitoring_overview.overview(start, end, None if scope is None else list(scope), group or None)}
+
+
+# ---------------------------------------------------------------- PIC assessment settings (migration 069)
+
+class OutletSettingIn(BaseModel):
+    deadline: Optional[str] = Field(None, max_length=5)
+    timezone: Optional[str] = Field(None, max_length=30)
+
+
+class ScopeChange(BaseModel):
+    form: str = Field(pattern="^(product|outlet)$")
+    itemKey: str = Field(max_length=40)
+    group: str = Field(max_length=20)
+    shown: bool
+
+
+class ScopeIn(BaseModel):
+    changes: list[ScopeChange] = Field(max_length=2000)
+
+
+class TargetRow(BaseModel):
+    code: str = Field(max_length=40)
+    target: Optional[float] = Field(None, ge=0, le=1e13)
+
+
+class TargetsIn(BaseModel):
+    month: str = Field(pattern=r"^\d{4}-\d{2}$")
+    rows: list[TargetRow] = Field(max_length=2000)
+
+
+@router.get("/api/monitoring/outlet-settings")
+def outlet_settings(request: Request, user: dict = Depends(current_user)) -> dict:
+    _need(request, user, *MON_PAGES)
+    return pic_settings.outlet_settings()
+
+
+@router.put("/api/monitoring/outlet-settings/{code}")
+def save_outlet_setting(code: str, body: OutletSettingIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _need(request, user, "mon.branch-groups")
+    out = _run(pic_settings.save_outlet, code, body.deadline, body.timezone, str(user["id"]))
+    activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups",
+                    summary=f"Mengatur batas check in {code}", details=out)
+    return out
+
+
+@router.get("/api/monitoring/form-items")
+def form_items(request: Request, user: dict = Depends(current_user)) -> dict:
+    _need(request, user, *MON_PAGES)
+    return form_scope.matrix(vf.DEFINITIONS)
+
+
+@router.put("/api/monitoring/form-items")
+def save_form_items(body: ScopeIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _need(request, user, "mon.branch-groups")
+    out = _run(form_scope.save, [c.model_dump() for c in body.changes], str(user["id"]), vf.DEFINITIONS)
+    activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups",
+                    summary=f"Mengatur butir form per grup ({out['saved']} perubahan)")
+    return out
+
+
+@router.get("/api/monitoring/sales-targets")
+def sales_targets(request: Request, month: str = Query(..., pattern=r"^\d{4}-\d{2}$"), user: dict = Depends(current_user)) -> dict:
+    _need(request, user, "mon.branch-groups", "mon.overview")
+    return _run(pic_settings.targets, month)
+
+
+@router.put("/api/monitoring/sales-targets")
+def save_sales_targets(body: TargetsIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _need(request, user, "mon.branch-groups")
+    out = _run(pic_settings.save_targets, body.month, [r.model_dump() for r in body.rows], str(user["id"]))
+    activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups",
+                    summary=f"Mengatur target net sales {body.month} ({out['saved']} outlet)")
+    return out

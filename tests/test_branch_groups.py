@@ -1,10 +1,13 @@
 """Branch groups and Monitoring → Overview (app/branch_groups.py, app/monitoring_overview.py)."""
-from datetime import date
+from datetime import date, datetime, time, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from app import branch_groups as bg
+from app import form_scope
 from app import monitoring_overview as mo
+from app import pic_settings as ps
 from tests.test_auth import anon, login, store  # noqa: F401 (fixtures)
 
 OUTLETS = [
@@ -30,6 +33,9 @@ def sources(monkeypatch):
     monkeypatch.setattr(mo.wwwr, "actions_of", lambda branches: [{"branch_code": "CTG54", "n": 2}])
     monkeypatch.setattr(mo, "_assigned", lambda ids: {"u1": ["CTG54"]})
     monkeypatch.setattr(mo.pic_checkin, "daily_limits", lambda codes: {c: 1 for c in codes})
+    # CTG: on time until 10:30 WIB; the net sales of CTG54 at 80 % of its target
+    monkeypatch.setattr(mo.ps, "deadlines", lambda codes: {c: {"deadline": time(10, 30), "zone": ZoneInfo("Asia/Jakarta"), "source": "group"} for c in codes})
+    monkeypatch.setattr(mo.ps, "sales_scores", lambda codes, a, b: {c: (80.0 if c == "CTG54" else None) for c in codes})
 
     def monitor(form, a, b, branches, limit=0):
         data = [{"branchCode": "CTG54", "userId": "u1", "name": "Andi", "score": 90.0 if form == "product" else 80.0,
@@ -53,9 +59,14 @@ def test_overview_per_group_and_outlet(sources):
     pics = {p["id"]: p for p in o["picAssessment"]}
     assert (pics["u1"]["productScore"], pics["u1"]["outletScore"], pics["u1"]["conformity"], pics["u1"]["overrated"], pics["u1"]["openActions"]) == (90.0, 80.0, 75.0, 3, 2)
     assert pics["u2"]["checkinDays"] == 1 and pics["u2"]["conformity"] is None
-    # the PIC score: check-ins (1 of 1 outlet × 18 working days of 21), punctual (09:00 WIB), visits, scores, SWAT
-    assert pics["u1"]["checkinTarget"] == 18 and pics["u1"]["punctuality"] == 100.0 and pics["u1"]["score"] is not None
-    assert mo._score({"checkin": 50.0, "punctuality": None, "visits": None, "product": None, "outlet": None, "swat": 80.0}) == round((50 * 15 + 80 * 30) / 45, 1)
+    # the PIC score: check-ins (1 of 1 outlet × 18 working days of 21: 21 − ⌊21 / 7⌋), punctual (09:00 WIB by 10:30),
+    # Product / Outlet (done against the target and the score), SWAT and net sales
+    u1 = pics["u1"]
+    assert u1["checkinTarget"] == 18 and u1["punctuality"] == 100.0 and u1["punctualityLegacy"] == 100.0
+    assert u1["productDone"] == round(100 / 18, 1) and u1["productPart"] == round((round(100 / 18, 1) + 90.0) / 2, 1)
+    assert u1["salesScore"] == 80.0 and u1["salesOutlets"] == 1 and u1["score"] is not None
+    assert mo._score({"checkin": 50.0, "punctuality": None, "product": None, "outlet": None, "swat": 80.0, "sales": None}) == round((50 * 15 + 80 * 15) / 30, 1)
+    assert mo._score({"checkin": 100.0, "punctuality": 100.0, "product": 100.0, "outlet": 100.0, "swat": 100.0, "sales": 0.0}) == 75.0
     ctg = next(b for b in o["branches"] if b["code"] == "CTG54")
     assert (ctg["swatAudits"], ctg["swatScore"], ctg["openActions"]) == (1, 88.0, 2) and o["swat"]["openActions"] == 2
     only = mo.overview(date(2026, 10, 1), date(2026, 10, 21), None, "CTG")
@@ -79,3 +90,34 @@ def test_pages_follow_access(anon, store, page_access, monkeypatch, sources):
     assert anon.get("/api/monitoring/overview").status_code == 200
     assert anon.get("/api/monitoring/branch-groups").status_code == 200  # read by any monitoring page (filters)
     assert anon.post("/api/monitoring/branch-groups", json={"code": "X", "name": "X"}).status_code == 403
+
+
+def test_working_days_follow_the_6_1_schedule():
+    assert [ps.working_days(n) for n in (28, 29, 30, 31, 7, 6, 0)] == [24, 25, 26, 27, 6, 6, 0]
+
+
+def test_check_in_deadline_on_the_outlet_clock():
+    wib = {"deadline": time(10, 30), "zone": ZoneInfo("Asia/Jakarta"), "source": "group"}
+    wita = {"deadline": time(10, 30), "zone": ZoneInfo("Asia/Makassar"), "source": "outlet"}
+    at = datetime(2026, 11, 4, 2, 0, tzinfo=timezone.utc)  # 09:00 WIB = 10:00 WITA
+    assert ps.on_time(at, wib) and ps.on_time(at, wita)
+    late = datetime(2026, 11, 4, 3, 0, tzinfo=timezone.utc)  # 10:00 WIB = 11:00 WITA: late in Bali only
+    assert ps.on_time(late, wib) and not ps.on_time(late, wita)
+    night = datetime(2026, 11, 3, 18, 0, tzinfo=timezone.utc)  # 01:00 WIB: not on time (the workbook counted it)
+    assert not ps.on_time(night, wib)
+    with pytest.raises(ps.SettingError):
+        ps.group_deadline("25:00")
+    assert ps.group_deadline("10:15") == time(10, 15) and ps.group_deadline(None) is None
+
+
+def test_form_items_per_group(monkeypatch):
+    rows = {("product", "a.1"): {"CTG": False}, ("product", "a.2"): {"CTGP": True}}
+    monkeypatch.setattr(form_scope, "_load", lambda: (rows, ["CCI", "CTG", "CTGP"]))
+    assert form_scope.effective_only_for("product", "a.1", None) == ["CCI", "CTGP"]  # hidden at CTG
+    assert form_scope.effective_only_for("product", "a.2", ["CCI"]) == ["CCI", "CTGP"]  # also asked at CTGP
+    assert form_scope.effective_only_for("product", "a.3", ["CCI"]) == ["CCI"]  # untouched
+    d = {"groups": [{"sections": [{"items": [{"key": "a.1"}, {"key": "a.2", "onlyFor": ["CCI"]}]}]}]}
+    out = form_scope.apply("product", d)
+    assert out["groups"][0]["sections"][0]["items"][0]["onlyFor"] == ["CCI", "CTGP"] and "onlyFor" not in d["groups"][0]["sections"][0]["items"][0]
+    w = {"groups": [{"sections": [{"items": [{"key": "product:a.1"}]}]}]}
+    assert form_scope.apply("wwwr", w)["groups"][0]["sections"][0]["items"][0]["onlyFor"] == ["CCI", "CTGP"]  # WW-WR too

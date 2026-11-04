@@ -411,7 +411,7 @@ def monitoring_visit(form: str, visit_id: str, request: Request, user: dict = De
     if row is None or row["form"] != form or row["status"] != "SUBMITTED" or (scope is not None and row["branch_code"] not in scope):
         raise HTTPException(404, detail="Kunjungan tidak ditemukan")
     out = vf.full(visit_id)
-    return {"definition": vf.DEFINITIONS[form], **(wwwr.with_team(out) if form == "wwwr" else out)}
+    return {"definition": vf.definition(form), **(wwwr.with_team(out) if form == "wwwr" else out)}
 
 
 def _image(row: Optional[dict], request: Request, user: dict, w: Optional[int] = None) -> Response:

@@ -4,26 +4,33 @@ scores, findings, the trend per day and the performance per category of both che
 (2026-11-03): their check-in days, the average score of their own Product and Outlet visits and, from the SWAT audits
 (Form WW-WR, app/wwwr.py), how far their ratings agree with the team's; per outlet the SWAT audits and open action plans.
 
-The PIC score (2026-11-02, after the workbook "[Kopi Calf Group] [Masterfile] Store Performance"): the check-ins done
-against the target (the outlets of the PIC × the check-ins a day of their branch group × the working days, 26 of 30),
-the punctuality (the first check-in of the day before 11:00 WIB), the Product and Outlet visits done against the same
-target and their scores, and the agreement with the SWAT audits. Weighted by WEIGHTS over the parts that have data;
-the net sales of the outlets will join it later."""
+The PIC score (2026-11-04, after the workbook "[Kopi Calf Group] [Masterfile] Store Performance" and the user's
+decisions), every part in % per outlet-day so a PIC of one outlet and of five are judged alike:
+  checkin      check-ins done (within the radius) against the outlets of the PIC × the check-ins a day of their group ×
+               the working days of the period (6-1 schedule: n − ⌊n / 7⌋, app/pic_settings.py);
+  punctuality  the days whose first check-in was made by the deadline of its outlet on the outlet's clock (CCI 10:00,
+               CTGP 10:15, CTG 10:30, or the outlet's own; never before 05:00); punctualityLegacy keeps the workbook's
+               rule (before 11:00 WIB) to compare;
+  product / outlet  the average of the visits done against the target and the score of those visits (the items the
+               outlet's group is asked, app/form_scope.py);
+  swat         the agreement of the PIC's ratings with the SWAT audits (Form WW-WR);
+  sales        the net sales of the PIC's outlets against their monthly targets, prorated to the period.
+Weighted by WEIGHTS over the parts that have data."""
 from datetime import date, datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 from app import branch_groups as bg
 from app import pic_checkin
+from app import pic_settings as ps
 from app import visit_forms as vf
 from app import wwwr
 
 WIB = ZoneInfo("Asia/Jakarta")
 LIMIT = 10000
-PUNCTUAL_BEFORE = 11          # the first check-in of the day before 11:00 WIB is on time (Store Performance)
-WORKING_DAYS = 26 / 30        # 26 working days a month (Store Performance: daily × 26 = monthly)
-# the parts of the PIC score (%), over the parts that have data; net sales to come
-WEIGHTS = {"checkin": 15, "punctuality": 10, "visits": 15, "product": 15, "outlet": 15, "swat": 30}
+PUNCTUAL_BEFORE = 11          # the workbook rule (first check-in of the day before 11:00 WIB), kept as punctualityLegacy
+# the parts of the PIC score (%), over the parts that have data (user decision 2026-11-04)
+WEIGHTS = {"checkin": 15, "punctuality": 15, "product": 15, "outlet": 15, "swat": 15, "sales": 25}
 
 
 def _day(iso: str) -> str:
@@ -117,7 +124,7 @@ def overview(date_from: date, date_to: date, scope: Optional[list[str]], group: 
     def person(uid: str, name: str) -> dict:
         return people.setdefault(uid, {"id": uid, "name": name, "checkinDays": set(), "checkins": 0, "outside": 0, "branches": set(),
                                        "product": [], "outlet": [], "productVisits": 0, "outletVisits": 0, "under": 0})
-    first: dict[tuple[str, str], datetime] = {}
+    first: dict[tuple[str, str], tuple[datetime, str]] = {}
     for c in checkins:
         if c["branchCode"] not in per:
             continue
@@ -126,8 +133,8 @@ def overview(date_from: date, date_to: date, scope: Optional[list[str]], group: 
         d = _day(c["visitedAt"])
         x["checkinDays"].add(d)
         at = datetime.fromisoformat(c["visitedAt"]).astimezone(WIB)
-        if (c["userId"], d) not in first or at < first[(c["userId"], d)]:
-            first[(c["userId"], d)] = at
+        if (c["userId"], d) not in first or at < first[(c["userId"], d)][0]:
+            first[(c["userId"], d)] = (at, c["branchCode"])
         x["outside"] += 1 if c["outsideRadius"] else 0
         x["branches"].add(c["branchCode"])
     for f in ("product", "outlet"):
@@ -145,17 +152,26 @@ def overview(date_from: date, date_to: date, scope: Optional[list[str]], group: 
     limits = pic_checkin.daily_limits(sorted({c for cs in assigned.values() for c in cs} | {c for x in people.values() for c in x["branches"]}))
     today = datetime.now(WIB).date()
     days = max(0, (min(date_to, today) - date_from).days + 1)
-    work = max(1, round(days * WORKING_DAYS)) if days else 0
+    work = max(1, ps.working_days(days)) if days else 0
+    all_codes = sorted({c for cs in assigned.values() for c in cs} | {c for x in people.values() for c in x["branches"]})
+    deadline_of = ps.deadlines(all_codes)
+    sales_of = ps.sales_scores([c for c in all_codes if c in per], date_from, date_to)
     pic_rows = []
     for x in people.values():
         sw = swat_of.get(x["id"])
         outlets_of = [c for c in (assigned.get(x["id"]) or sorted(x["branches"])) if c in per]
         target = sum(limits.get(c, 1) for c in outlets_of) * work
         visit_target = len(outlets_of) * work
-        punctual = sum(1 for (u, _), at in first.items() if u == x["id"] and at.hour < PUNCTUAL_BEFORE)
+        mine = [(at, code) for (u, _), (at, code) in first.items() if u == x["id"]]
+        punctual = sum(1 for at, code in mine if ps.on_time(at, deadline_of.get(code) or ps.deadlines([code])[code]))
+        legacy = sum(1 for at, _ in mine if at.hour < PUNCTUAL_BEFORE)
+        product_done = _rate(x["productVisits"], visit_target)
+        outlet_done = _rate(x["outletVisits"], visit_target)
+        sales = [sales_of[c] for c in outlets_of if sales_of.get(c) is not None]
         parts = {"checkin": _rate(x["checkins"], target), "punctuality": _rate(punctual, len(x["checkinDays"])),
-                 "visits": _rate(x["productVisits"] + x["outletVisits"], 2 * visit_target),
-                 "product": _avg(x["product"]), "outlet": _avg(x["outlet"]), "swat": sw["conformity"] if sw else None}
+                 "product": _avg([v for v in (product_done, _avg(x["product"])) if v is not None]),
+                 "outlet": _avg([v for v in (outlet_done, _avg(x["outlet"])) if v is not None]),
+                 "swat": sw["conformity"] if sw else None, "sales": _avg(sales)}
         pic_rows.append({"id": x["id"], "name": x["name"], "branches": len(x["branches"]), "checkins": x["checkins"], "checkinDays": len(x["checkinDays"]),
                          "outside": x["outside"], "productVisits": x["productVisits"], "productScore": _avg(x["product"]),
                          "outletVisits": x["outletVisits"], "outletScore": _avg(x["outlet"]), "under": x["under"],
@@ -163,8 +179,11 @@ def overview(date_from: date, date_to: date, scope: Optional[list[str]], group: 
                          "overrated": sw["overrated"] if sw else 0,
                          "openActions": sum(open_actions.get(b, 0) for b in x["branches"]),
                          "outlets": len(outlets_of), "checkinTarget": target, "checkinRate": parts["checkin"],
-                         "punctualDays": punctual, "punctuality": parts["punctuality"], "visitTarget": 2 * visit_target,
-                         "visitRate": parts["visits"], "score": _score(parts)})
+                         "punctualDays": punctual, "punctuality": parts["punctuality"],
+                         "punctualityLegacy": _rate(legacy, len(x["checkinDays"])),
+                         "visitTarget": 2 * visit_target, "visitRate": _rate(x["productVisits"] + x["outletVisits"], 2 * visit_target),
+                         "productDone": product_done, "outletDone": outlet_done, "productPart": parts["product"], "outletPart": parts["outlet"],
+                         "salesScore": parts["sales"], "salesOutlets": len(sales), "score": _score(parts)})
     pic_rows.sort(key=lambda r: (r["score"] is None, r["score"] or 0, r["name"].lower()))
 
     rows = []

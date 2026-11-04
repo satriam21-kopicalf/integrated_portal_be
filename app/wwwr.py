@@ -177,7 +177,7 @@ def state(user: dict) -> dict:
         r.pop("score", None)  # the team never sees a score: it is for the management
         if r["counts"]:
             r["counts"] = {k: v for k, v in r["counts"].items() if k != "score"}
-    return {"definition": vf.DEFINITIONS["wwwr"], "user": {"id": uid, "username": user["username"],
+    return {"definition": vf.definition("wwwr"), "user": {"id": uid, "username": user["username"],
             "name": user.get("full_name") or user["username"]}, "audits": rows}
 
 
@@ -453,7 +453,7 @@ def shared(token: str) -> Optional[dict]:
         if r:
             counts[it["key"].split(":")[0]][r.lower()] += 1
     a["counts"] = counts
-    return {"audit": a, "definition": vf.DEFINITIONS["wwwr"], "answers": v["answers"] or {}, "photos": photos,
+    return {"audit": a, "definition": vf.definition("wwwr"), "answers": v["answers"] or {}, "photos": photos,
             "submittedAt": v["submitted_at"].isoformat() if v["submitted_at"] else None, "signedName": v["signed_name"]}
 
 

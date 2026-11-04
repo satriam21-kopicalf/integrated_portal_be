@@ -418,6 +418,7 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
                       "system": round(v["qty"], 3),
                       "soStart": round(a["start"], 3) if a else None, "purchased": round(a["bought"], 3) if a else None,
                       "soEnd": round(a["end"], 3) if a else None, "actual": round(a["actual"], 3) if a else None,
+                      "purchasedOther": [{"uom": k, "qty": round(q, 3)} for k, q in sorted(a["skipped"].items())] if a else [],
                       "variance": round(a["actual"] - v["qty"], 3) if a else None,
                       "price": p, "systemValue": round(v["qty"] * p, 2) if p is not None else None,
                       "actualValue": round(a["actual"] * p, 2) if a and p is not None else None})
@@ -569,29 +570,53 @@ def _purchases(d_from: date, d_to: date, branches: list[str]) -> dict[str, dict[
     return out
 
 
-def _bought(rows: dict[tuple[str, str], float], code: str, unit: str, esb: Optional[tuple[str, float]]) -> float:
-    """What a branch bought of an item, in `unit`: purchases in that unit, in a unit it converts to (KG → GR), or in the
-    ESB unit of the portal count list (× its factor); other packs are left out."""
+def item_units(codes: list[str]) -> dict[str, tuple[str, dict[str, float]]]:
+    """{item code: (base unit, {UOM: base units in one})} of kc_master (the packs of an item, e.g. PCS = 500 GR)."""
+    out: dict[str, tuple[str, dict[str, float]]] = {}
+    if not codes:
+        return out
+    for r in db.fetch("""SELECT i.code, upper(coalesce(i.base_uom, '')) AS base, upper(u.uom) AS uom, u.factor
+                           FROM kc_master.item i JOIN kc_master.item_uom u ON u.item_id = i.id
+                          WHERE i.code = ANY(%s) AND u.is_active""", (codes,)):
+        out.setdefault(r["code"], (r["base"], {}))[1][r["uom"]] = _f(r["factor"])
+    return out
+
+
+def _bought(rows: dict[tuple[str, str], float], code: str, unit: str, esb: Optional[tuple[str, float]],
+            packs: Optional[tuple[str, dict[str, float]]] = None, skipped: Optional[dict[str, float]] = None) -> float:
+    """What a branch bought of an item, in `unit`: purchases in that unit, in a unit it converts to (KG → GR), in a pack
+    of the item master (kc_master.item_uom, × its factor) or in the ESB unit of the portal count list (× its factor).
+    A purchase in any other unit is left out and added to `skipped` ({UOM: qty})."""
     total = 0.0
     for (c, uom), qty in rows.items():
         if c != code:
             continue
         v = to_unit(qty, uom, unit)
+        if v is None and packs and uom in packs[1]:
+            v = to_unit(qty * packs[1][uom], packs[0], unit)
         if v is None and esb and uom == esb[0]:
             v = qty * esb[1]
-        total += v or 0.0
+        if v is None:
+            if skipped is not None:
+                skipped[uom] = skipped.get(uom, 0.0) + qty
+            continue
+        total += v
     return total
 
 
 def actual_usage(d_from: date, d_to: date, branches: Optional[list[str]], units: dict[str, str]) -> dict:
     """SO awal + purchases − SO akhir per item (in the unit of the recipe cards, `units`) over the branches that have
     both counts: SO awal = the stock at the start of d_from, SO akhir = the stock at the end of d_to (stock_at).
-    {items: {code: {start, bought, end, actual}}, branches: [{code, start, end}], covered: [codes]}."""
+    {items: {code: {start, bought, end, actual, skipped: {UOM: qty}}}, branches: [{code, start, end}], covered: [codes]}."""
     try:
         start = stock_at(d_from, d_from - timedelta(days=1), branches)
         end = stock_at(d_to + timedelta(days=1), d_to, branches)
         covered = sorted(b for b in start if b in end)
         bought = _purchases(d_from, d_to, covered) if covered else {}
+        try:
+            packs = item_units(sorted(units))
+        except Exception:  # noqa: BLE001 - no item master: purchases in the unit of the card only
+            packs = {}
     except Exception:  # noqa: BLE001 - no stock data: the report shows the system usage only
         return {"items": {}, "branches": [], "covered": []}
     items: dict[str, dict] = {}
@@ -605,8 +630,8 @@ def actual_usage(d_from: date, d_to: date, branches: Optional[list[str]], units:
             va, vz = to_unit(qa, ua, unit), to_unit(qz, uz, unit)
             if va is None or vz is None:
                 continue  # counted in a unit that cannot be compared with the card
-            got = _bought(bought.get(b, {}), code, unit, a["esb"].get(code) or z["esb"].get(code))
-            row = items.setdefault(code, {"start": 0.0, "bought": 0.0, "end": 0.0})
+            row = items.setdefault(code, {"start": 0.0, "bought": 0.0, "end": 0.0, "skipped": {}})
+            got = _bought(bought.get(b, {}), code, unit, a["esb"].get(code) or z["esb"].get(code), packs.get(code), row["skipped"])
             row["start"] += va
             row["bought"] += got
             row["end"] += vz

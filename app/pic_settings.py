@@ -71,6 +71,16 @@ def deadlines(codes: list[str]) -> dict[str, dict]:
     return out
 
 
+def deadline_labels(codes: list[str]) -> dict[str, dict]:
+    """{branch code: {deadline: "HH:MM", zone: "WITA", wib: "HH:MM"}}: the deadline as the PIC sees it in Operations."""
+    out = {}
+    for code, s in deadlines(codes).items():
+        local = datetime.combine(date.today(), s["deadline"], tzinfo=s["zone"])
+        out[code] = {"deadline": s["deadline"].strftime("%H:%M"), "zone": ZONES.get(str(s["zone"]), "WIB"),
+                     "wib": local.astimezone(ZoneInfo("Asia/Jakarta")).strftime("%H:%M")}
+    return out
+
+
 def on_time(at: datetime, setting: dict) -> bool:
     """Is a check-in at `at` (aware) on time for an outlet with this setting (its own clock)?"""
     local = at.astimezone(setting["zone"]).time()

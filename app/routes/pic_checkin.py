@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from app import activity, branch_groups, pic_checkin
+from app import activity, branch_groups, pic_checkin, pic_settings
 from app.access import deny, has_page, require_page
 from app.activity import client_ip
 from app.routes.auth import current_user
@@ -83,9 +83,16 @@ def _add(kind: str) -> None:
 
     @router.get(f"/api/forms/{slug}", name=f"{kind}_form")
     def form(user: dict = Depends(require_page(form_page))) -> dict:
+        branches = pic_checkin.branch_options(user, every=kind == "surveyor")
+        if kind == "pic":  # the on-time deadline of every outlet, as set in Monitoring OPS → Branch Groups (migration 069)
+            try:
+                labels = pic_settings.deadline_labels([b["code"] for b in branches])
+            except Exception:  # never keep a PIC from checking in over a setting
+                labels = {}
+            branches = [{**b, "checkinDeadline": labels.get(b["code"])} for b in branches]
         return {
             "user": {"id": str(user["id"]), "username": user["username"], "name": user.get("full_name") or user["username"]},
-            "branches": pic_checkin.branch_options(user, every=kind == "surveyor"),
+            "branches": branches,
             "recent": pic_checkin.recent_of(str(user["id"]), kind=kind),
             "today": pic_checkin.done_today(str(user["id"]), kind),  # branches already checked in today
             "serverTime": datetime.now().astimezone().isoformat(),

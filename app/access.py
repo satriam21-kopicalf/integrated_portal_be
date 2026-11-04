@@ -139,6 +139,9 @@ CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))
 EDITABLE_ROLES = ("cost_control", "user", "outlet")
 # the Surveyor Check In is given per account (migration 039), not to a role
 PER_USER_FORMS = ("form.surveyor-check-in", "form.wwwr")  # WW-WR: the SWAT team (2026-11-03)
+# the WW-WR team (2026-11-04): accounts assigned Form WW-WR or Monitoring WW-WR; a super admin opens every page anyway, so
+# for one these are kept as markers only (user_page rows) that put it in the team
+TEAM_PAGES = ("form.wwwr", "mon.wwwr")
 FORM_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("form.") and k not in PER_USER_FORMS)
 # role "user" = Area Supervisor / PIC: Dashboard, Sales, Stock Opname, Waste, the Guide and every form (a new form page
 # is added to the role by its migration); role "outlet" = the shared outlet / HUB CK / HUB WH accounts (2026-10-28)
@@ -298,7 +301,7 @@ def set_user_overrides(user_id: str, overrides: dict[str, bool], actor_id: Optio
 def clean_overrides(role: str, overrides: dict) -> dict[str, bool]:
     """Keeps only real exceptions (a page the role already has is not "added", and so on)."""
     if role == "superadmin":
-        return {}
+        return {p: True for p in TEAM_PAGES if overrides.get(p)}
     unknown = sorted(set(overrides) - set(PAGE_KEYS))
     if unknown:
         raise ValueError(f"Halaman tidak dikenal: {', '.join(unknown)}")

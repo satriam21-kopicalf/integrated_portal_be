@@ -34,13 +34,19 @@ class AuditError(vf.VisitError):
 # ---------------------------------------------------------------- team and schedule
 
 def team() -> list[dict]:
-    """Who may be in an audit team: the active accounts assigned the page form.wwwr in User Accounts (2026-11-04: the job
-    title SWAT / Operations alone no longer counts, so only the assigned SWAT team shows)."""
+    """Who may be in an audit team (2026-11-04): the active accounts assigned Form WW-WR or Monitoring WW-WR in User
+    Accounts, and the super admins marked for those pages there (a super admin opens every page, so only its marker
+    counts). The job title alone no longer counts."""
     from app import access
+
+    def member(u: dict) -> bool:
+        if u["role"] == "superadmin":
+            return any(access.user_overrides(str(u["id"])).get(p) for p in access.TEAM_PAGES)
+        return any(access.has_page(u, p) for p in access.TEAM_PAGES)
     users = db.fetch(f"""SELECT id, username, full_name, role, job_title FROM {P}.user_account
-                          WHERE is_active AND role <> 'superadmin' ORDER BY coalesce(full_name, username)""")
+                          WHERE is_active ORDER BY coalesce(full_name, username)""")
     return [{"id": str(u["id"]), "username": u["username"], "name": u["full_name"] or u["username"], "jobTitle": u["job_title"]}
-            for u in users if access.has_page(u, "form.wwwr")]
+            for u in users if member(u)]
 
 
 def _grant(conn: Any, user_ids: Iterable[str], by: Any) -> None:

@@ -205,7 +205,8 @@ def update_user(user_id: UUID, body: UserFields, request: Request, actor: dict =
 def _view(row: dict) -> dict:
     """A user for this page: the account, the pages it opens and the exceptions to its role."""
     return {**accounts.public_user(row), "pages": access.pages_for(row),
-            "pageOverrides": {} if row["role"] == "superadmin" else access.user_overrides(str(row["id"]))}
+            "pageOverrides": ({p: v for p, v in access.user_overrides(str(row["id"])).items() if p in access.TEAM_PAGES and v}
+                              if row["role"] == "superadmin" else access.user_overrides(str(row["id"])))}
 
 
 def _after_save(user: dict, body: UserFields, actor: dict) -> Optional[JSONResponse]:

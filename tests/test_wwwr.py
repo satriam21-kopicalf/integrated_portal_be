@@ -46,3 +46,18 @@ def test_status_follows_the_follow_up():
     assert wwwr._status({"status": "scheduled", "visit_status": "DRAFT"}) == "in_progress"
     assert wwwr._status({"status": "scheduled", "visit_status": "SUBMITTED", "completed_at": None}) == "follow_up"
     assert wwwr._status({"status": "scheduled", "visit_status": "SUBMITTED", "completed_at": "x"}) == "completed"
+
+
+def test_the_team_is_the_assigned_accounts_and_the_marked_super_admins(monkeypatch):
+    from app import access
+    users = [{"id": "a", "username": "swat", "full_name": "SWAT", "role": "user", "job_title": "SWAT"},          # Form WW-WR
+             {"id": "b", "username": "mon", "full_name": "Mon", "role": "cost_control", "job_title": None},       # Monitoring WW-WR
+             {"id": "c", "username": "ops", "full_name": "Ops", "role": "user", "job_title": "Operations"},      # job title only
+             {"id": "d", "username": "boss", "full_name": "Boss", "role": "superadmin", "job_title": None},     # marked
+             {"id": "e", "username": "root", "full_name": "Root", "role": "superadmin", "job_title": None}]     # not marked
+    pages = {"a": ["form.wwwr"], "b": ["mon.wwwr"], "c": ["form.pic-check-in"]}
+    monkeypatch.setattr(wwwr.db, "fetch", lambda sql, params=None: users)
+    monkeypatch.setattr(access, "has_page", lambda u, p: p in pages.get(str(u["id"]), []))
+    monkeypatch.setattr(access, "user_overrides", lambda uid: {"mon.wwwr": True} if uid == "d" else {})
+    assert [t["id"] for t in wwwr.team()] == ["a", "b", "d"]
+    assert access.clean_overrides("superadmin", {"form.wwwr": True, "mon.wwwr": False, "users": True}) == {"form.wwwr": True}

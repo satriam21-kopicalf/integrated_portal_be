@@ -7,11 +7,14 @@ Menu cards  a recipe card per menu as the production calculator: lines of raw ma
             recipes (kc_recipe active version, in grams, exploded into their ingredients per gram of batch); ESB POS
             menus are assigned to a card (cc_menu_recipe_map, by menu id), several menus may share one card.
 Report      for a period and branches, from the POS sales per menu (agg_menu_daily):
-            1. Material Required Planning: average daily sales × horizon days (+ buffer) exploded into raw materials;
-            2. Usage actual vs system: system = sold × cards (exploded), actual = SO awal + purchases − SO akhir per
-               item of the branches with both ESB stock opname documents (chosen as Outlet ratio, app/ratio.py);
-            3. COGS bahan baku: system usage × pricelist; per menu the HPP of a portion, the cost of the sold portions
-               and the ratio to the menu's sales.
+            1. Material Required Planning: average daily sales × horizon days (+ buffer) exploded into raw materials,
+               less the latest stock of the branches (on_hand) = what to order;
+            2. Usage actual vs system over the branches with SO awal and SO akhir (stock_at: the portal stock opname
+               from 28 Oct 2026, else the ESB document): system = sold × cards (exploded), actual = SO awal +
+               purchases − SO akhir per item;
+            3. COGS Material: system usage × pricelist; per menu the HPP of a portion, the cost of the sold portions
+               and the ratio to the menu's sales; and the actual COGS (actual usage × pricelist) of the branches with
+               both counts against all their sales.
 """
 import math
 from datetime import date, timedelta
@@ -327,7 +330,9 @@ def delete_extra(extra_id: int) -> bool:
         return conn.execute(f"DELETE FROM {P}.cc_extra_item WHERE id = %s", (extra_id,)).rowcount > 0
 
 
-def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int = 7, buffer_pct: float = 10) -> dict:
+def _sold(d_from: date, d_to: date, branches: Optional[list[str]], cards: dict, mapped: dict, wip: dict, horizon: int,
+          buffer_pct: float) -> dict:
+    """The menus sold by the branches exploded through the cards (system usage, the plan) with the additional items."""
     days = (d_to - d_from).days + 1
     sold = db.fetch(
         f"""WITH br AS ({BRANCH_COMPANY})
@@ -338,9 +343,6 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
              WHERE a.sales_date BETWEEN %(a)s AND %(b)s AND a.menu_id <> '?'
                AND (%(br)s::text[] IS NULL OR a.branch_code = ANY(%(br)s)) GROUP BY 1 ORDER BY 4 DESC""",
         {"a": d_from, "b": d_to, "br": branches, "main": MAIN_COMPANY})
-    cards = {r["code"]: r for r in recipes() if r["isActive"]}
-    mapped = {m["id"]: code for code, c in cards.items() for m in c["menus"]}
-    wip = wips()
     system: dict[str, dict] = {}
     plan: dict[str, dict] = {}
     per_menu, unmapped = [], []
@@ -369,6 +371,17 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
             row = target.setdefault(key, {"code": e["code"], "name": e["name"], "unit": e["unit"], "price": e["price"], "extra": True})
             row["qty"] = row.get("qty", 0.0) + amount
         extra_rows.append({**e, "count": counts[e["basis"]], "used": round(used, 3)})
+    return {"system": system, "plan": plan, "menus": per_menu, "unmapped": unmapped, "extras": extra_rows, "counts": counts,
+            "allSales": sum(m["sales"] for m in per_menu) + sum(m["sales"] for m in unmapped)}
+
+
+def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int = 7, buffer_pct: float = 10) -> dict:
+    days = (d_to - d_from).days + 1
+    cards = {r["code"]: r for r in recipes() if r["isActive"]}
+    mapped = {m["id"]: code for code, c in cards.items() for m in c["menus"]}
+    wip = wips()
+    got = _sold(d_from, d_to, branches, cards, mapped, wip, horizon, buffer_pct)
+    system, plan, per_menu, extra_rows = got["system"], got["plan"], got["menus"], got["extras"]
     codes = [k for k in system if not k.startswith(("wip:", "n:", "o:"))]
     price = prices_on(d_to, codes or None)
     # HPP of a portion of every card used
@@ -387,74 +400,238 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
         m["hpp"] = round(unit, 2) if unit is not None else None
         m["cogs"] = round(unit * m["qty"], 2) if unit is not None else None
         m["ratio"] = round(m["cogs"] / m["sales"], 6) if m["cogs"] is not None and m["sales"] else None
-    actual = actual_usage(d_from, d_to, branches)
-    usage = []
-    for k, v in sorted(system.items(), key=lambda kv: kv[1]["name"]):
-        a = actual.get(v["code"] or "")
-        p = price.get(v["code"]) if v["code"] else v.get("price")
-        usage.append({"code": v["code"], "name": v["name"], "unit": v["unit"], "isStock": v.get("isStock", True), "extra": v.get("extra", False),
-                      "system": round(v["qty"], 3), "actual": round(a, 3) if a is not None else None,
-                      "variance": round(a - v["qty"], 3) if a is not None else None,
-                      "price": p, "systemValue": round(v["qty"] * p, 2) if p is not None else None,
-                      "actualValue": round(a * p, 2) if a is not None and p is not None else None})
+
     def unit_price(v: dict) -> Optional[float]:
         return price.get(v["code"]) if v["code"] else v.get("price")
-    mrp = [{"code": v["code"], "name": v["name"], "unit": v["unit"], "isStock": v.get("isStock", True), "extra": v.get("extra", False),
-            "qty": math.ceil(round(v["qty"], 6)),
-            "value": round(math.ceil(round(v["qty"], 6)) * unit_price(v), 2) if unit_price(v) is not None else None}
-           for v in sorted(plan.values(), key=lambda x: x["name"])]
+
+    # usage actual vs system: both over the branches with SO awal and SO akhir (portal counts, else ESB documents)
+    units = {v["code"]: str(v["unit"] or "").upper() for v in system.values() if v.get("code")}
+    actual = actual_usage(d_from, d_to, branches, units)
+    covered = actual["covered"]
+    same = covered and (branches is not None and sorted(branches) == covered)
+    scope = got if same or not covered else _sold(d_from, d_to, covered, cards, mapped, wip, horizon, buffer_pct)
+    usage = []
+    for k, v in sorted(scope["system"].items(), key=lambda kv: kv[1]["name"]):
+        a = actual["items"].get(v["code"] or "") if covered else None
+        p = unit_price(v)
+        usage.append({"code": v["code"], "name": v["name"], "unit": v["unit"], "isStock": v.get("isStock", True), "extra": v.get("extra", False),
+                      "system": round(v["qty"], 3),
+                      "soStart": round(a["start"], 3) if a else None, "purchased": round(a["bought"], 3) if a else None,
+                      "soEnd": round(a["end"], 3) if a else None, "actual": round(a["actual"], 3) if a else None,
+                      "variance": round(a["actual"] - v["qty"], 3) if a else None,
+                      "price": p, "systemValue": round(v["qty"] * p, 2) if p is not None else None,
+                      "actualValue": round(a["actual"] * p, 2) if a and p is not None else None})
+    # material required planning: the plan less the latest stock of the branches
+    plan_units = {v["code"]: str(v["unit"] or "").upper() for v in plan.values() if v.get("code")}
+    try:
+        have = on_hand(branches, plan_units)
+    except Exception:  # noqa: BLE001 - no stock data: the gross requirement only
+        have = {"items": {}, "branches": 0, "from": None, "to": None}
+    mrp = []
+    for v in sorted(plan.values(), key=lambda x: x["name"]):
+        need = math.ceil(round(v["qty"], 6))
+        stock = have["items"].get(v["code"] or "") if v.get("code") else None
+        order = max(0, math.ceil(round(need - stock, 6))) if stock is not None else need
+        p = unit_price(v)
+        mrp.append({"code": v["code"], "name": v["name"], "unit": v["unit"], "isStock": v.get("isStock", True), "extra": v.get("extra", False),
+                    "qty": need, "onHand": round(stock, 3) if stock is not None else None, "toOrder": order,
+                    "value": round(need * p, 2) if p is not None else None, "orderValue": round(order * p, 2) if p is not None else None})
     extra_cost = sum((e["used"] * (unit_price({"code": e["code"], "price": e["price"]}) or 0.0)) for e in extra_rows)
     sales = sum(m["sales"] for m in per_menu)
     cogs = sum(m["cogs"] or 0 for m in per_menu)
+    actual_cogs = sum(u["actualValue"] or 0 for u in usage) if covered else None
     return {"period": {"from": d_from.isoformat(), "to": d_to.isoformat(), "days": days, "horizon": horizon, "buffer": buffer_pct},
-            "menus": per_menu, "unmapped": unmapped, "usage": usage, "mrp": mrp, "extras": extra_rows, "counts": counts,
+            "menus": per_menu, "unmapped": got["unmapped"], "usage": usage, "mrp": mrp, "extras": extra_rows, "counts": got["counts"],
+            "stock": {"branches": actual["branches"], "covered": covered, "onHand": {k: have[k] for k in ("branches", "from", "to")}},
             "total": {"sales": sales, "cogs": cogs + extra_cost, "menuCogs": cogs, "extraCogs": round(extra_cost, 2),
                       "ratio": round((cogs + extra_cost) / sales, 6) if sales else None,
-                      "menusMapped": len(per_menu), "menusUnmapped": len(unmapped),
+                      "menusMapped": len(per_menu), "menusUnmapped": len(got["unmapped"]),
                       "unpriced": sum(1 for m in per_menu if m["hpp"] is None),
                       "systemValue": sum(u["systemValue"] or 0 for u in usage),
-                      "actualValue": sum(u["actualValue"] or 0 for u in usage)}}
+                      "actualValue": actual_cogs or 0,
+                      "actualCogs": round(actual_cogs, 2) if actual_cogs is not None else None,
+                      "actualSales": scope["allSales"] if covered else None,
+                      "actualRatio": round(actual_cogs / scope["allSales"], 6) if covered and scope["allSales"] else None,
+                      "branchesCovered": len(covered)}}
 
 
-def actual_usage(d_from: date, d_to: date, branches: Optional[list[str]]) -> dict[str, float]:
-    """{product code: SO awal + purchases − SO akhir} over the branches that have both ESB stock opname documents (the
-    document closest to the day before the period and to its last day, as Outlet ratio); a purchase counts when its
-    unit is the unit the item is counted in. Empty when the ESB documents cannot be read."""
-    from app import ratio  # the stock opname documents of a day, chosen as the Outlet ratio does
+# ---------------------------------------------------------------- stock: SO awal / SO akhir (2026-11-04)
+# The stock of a branch on a day comes from its stock opname counted in the portal (kopicalf core kc_inventory, the
+# current line of every item = after a Cost Control correction, qty_base + qty_wip in the item base unit), counted
+# before the outlet opens: a count dated D is the stock at the start of D. Before the portal counts (the Weekly SO of
+# 28 Oct 2026) or for a branch without one, the ESB stock opname document closest to the day (as Outlet ratio): its
+# quantity at the end of its day.
 
-    try:
-        start, end = ratio.so_values(d_from - timedelta(days=1), branches), ratio.so_values(d_to, branches)
-        both = [b for b in start if b in end]
-        if not both:
-            return {}
+PORTAL_SO_FROM = date(2026, 10, 28)
+LIVE_COUNTS = ("SUBMITTED", "RECOUNT_REQUESTED", "APPROVED", "EXPORTED")
+UNIT_FACTOR = {("KG", "GR"): 1000, ("KG", "G"): 1000, ("L", "ML"): 1000, ("LTR", "ML"): 1000, ("LITER", "ML"): 1000}
 
-        def counted(docs: list[str]) -> dict[str, tuple[float, str]]:
-            out: dict[str, tuple[float, str]] = {}
-            for r in db.fetch(
-                    f"""SELECT product_code, upper(coalesce(uom_name, '')) AS uom, sum(qty) AS qty
-                          FROM {SCHEMA}.erp_document_lines
-                         WHERE module = 'stock_opname' AND line_type = 'detail' AND doc_num = ANY(%s) AND product_code IS NOT NULL
-                         GROUP BY 1, 2""", (docs,)):
-                qty, _ = out.get(r["product_code"], (0.0, r["uom"]))
-                out[r["product_code"]] = (qty + _f(r["qty"]), r["uom"])
-            return out
-        so_a = counted([start[b]["doc"] for b in both])
-        so_b = counted([end[b]["doc"] for b in both])
-        bought: dict[tuple[str, str], float] = {}
-        for r in db.fetch(
-                f"""SELECT l.product_code, upper(coalesce(l.uom_name, '')) AS uom, sum(l.qty) AS qty
-                      FROM {SCHEMA}.erp_documents d
-                      JOIN {SCHEMA}.erp_document_lines l ON l.module = d.module AND l.doc_num = d.doc_num AND l.line_type = 'detail'
-                      JOIN {SCHEMA}.master_branches b ON b.branch_id::text = d.branch_id::text
-                     WHERE d.module = 'purchase_invoice' AND d.doc_date BETWEEN %s AND %s AND d.deleted_at IS NULL
-                       AND d.status_name <> ALL(%s) AND b.branch_code = ANY(%s) AND l.product_code IS NOT NULL
-                     GROUP BY 1, 2""", (d_from, d_to, list(SKIP_STATUSES), both)):
-            bought[(r["product_code"], r["uom"])] = _f(r["qty"])
-    except Exception:  # noqa: BLE001 - no ESB documents: the report shows the system usage only
+
+def to_unit(qty: float, have: Optional[str], want: Optional[str]) -> Optional[float]:
+    """qty in `have` converted to `want` (same unit, KG ↔ GR, L ↔ ML); None when they cannot be compared."""
+    have, want = (have or "").upper(), (want or "").upper()
+    if not want or not have or have == want:
+        return qty
+    if (have, want) in UNIT_FACTOR:
+        return qty * UNIT_FACTOR[(have, want)]
+    if (want, have) in UNIT_FACTOR:
+        return qty / UNIT_FACTOR[(want, have)]
+    return None
+
+
+def portal_counts(day: date, branches: Optional[list[str]], back: int = 1, ahead: int = 1) -> dict[str, dict]:
+    """{branch: {source, date, refs, items: {code: (qty, unit)}, esb: {code: (unit, factor)}}}: the portal counts of the
+    branch on the business day closest to `day` (within -back..+ahead days, every count of that day together)."""
+    lo, hi = max(day - timedelta(days=back), PORTAL_SO_FROM), day + timedelta(days=ahead)
+    if hi < lo:
         return {}
-    out = {}
-    for code in set(so_a) | set(so_b):
-        a, ua = so_a.get(code, (0.0, ""))
-        b, ub = so_b.get(code, (0.0, ua))
-        out[code] = a + bought.get((code, ua or ub), 0.0) - b
+    rows = db.fetch(
+        f"""SELECT b.branch_code, c.business_date, c.number, it.code, upper(coalesce(l.base_uom, '')) AS unit,
+                   upper(coalesce(l.esb_uom, '')) AS esb_uom, coalesce(l.esb_factor, 1) AS esb_factor,
+                   sum(coalesce(l.qty_base, 0) + coalesce(l.qty_wip, 0)) AS qty
+              FROM kc_inventory.stock_count c
+              JOIN kc_master.facility_esb_map m ON m.facility_id = c.facility_id
+              JOIN {SCHEMA}.master_branches b ON b.company_code = m.company_code AND b.branch_id::text = m.esb_id
+              JOIN kc_inventory.stock_count_line l ON l.count_id = c.id AND l.is_current
+                   AND (l.qty_base IS NOT NULL OR coalesce(l.qty_wip, 0) > 0)
+              JOIN kc_master.item it ON it.id = l.item_id
+             WHERE c.status = ANY(%(live)s) AND c.business_date BETWEEN %(lo)s AND %(hi)s
+               AND (%(br)s::text[] IS NULL OR b.branch_code = ANY(%(br)s))
+             GROUP BY 1, 2, 3, 4, 5, 6, 7""",
+        {"live": list(LIVE_COUNTS), "lo": lo, "hi": hi, "br": branches})
+    best: dict[str, date] = {}
+    for r in rows:
+        d = r["business_date"]
+        cur = best.get(r["branch_code"])
+        if cur is None or abs((d - day).days) < abs((cur - day).days) or (abs((d - day).days) == abs((cur - day).days) and d < cur):
+            best[r["branch_code"]] = d
+    out: dict[str, dict] = {}
+    for r in rows:
+        if r["business_date"] != best[r["branch_code"]]:
+            continue
+        b = out.setdefault(r["branch_code"], {"source": "portal", "date": r["business_date"].isoformat(), "refs": set(), "items": {}, "esb": {}})
+        b["refs"].add(r["number"])
+        qty, _ = b["items"].get(r["code"], (0.0, r["unit"]))
+        b["items"][r["code"]] = (qty + _f(r["qty"]), r["unit"])
+        if r["esb_uom"]:
+            b["esb"][r["code"]] = (r["esb_uom"], _f(r["esb_factor"]) or 1.0)
+    for b in out.values():
+        b["refs"] = sorted(b["refs"])
     return out
+
+
+def esb_counts(day: date, branches: Optional[list[str]]) -> dict[str, dict]:
+    """The same from the ESB stock opname document of every branch closest to `day` (app/ratio.py so_values)."""
+    from app import ratio
+
+    docs = ratio.so_values(day, branches)
+    if not docs:
+        return {}
+    by_doc = {v["doc"]: b for b, v in docs.items()}
+    out = {b: {"source": "esb", "date": v["date"], "refs": [v["doc"]], "items": {}, "esb": {}} for b, v in docs.items()}
+    for r in db.fetch(
+            f"""SELECT doc_num, product_code, upper(coalesce(uom_name, '')) AS uom, sum(qty) AS qty
+                  FROM {SCHEMA}.erp_document_lines
+                 WHERE module = 'stock_opname' AND line_type = 'detail' AND doc_num = ANY(%s) AND product_code IS NOT NULL
+                 GROUP BY 1, 2, 3""", (list(by_doc),)):
+        items = out[by_doc[r["doc_num"]]]["items"]
+        qty, _ = items.get(r["product_code"], (0.0, r["uom"]))
+        items[r["product_code"]] = (qty + _f(r["qty"]), r["uom"])
+    return out
+
+
+def stock_at(portal_day: date, esb_day: date, branches: Optional[list[str]], back: int = 1) -> dict[str, dict]:
+    """The stock of every branch: its portal count of `portal_day` (start of the day), else its ESB document of
+    `esb_day` (end of the day)."""
+    try:
+        esb = esb_counts(esb_day, branches)
+    except Exception:  # noqa: BLE001 - the ESB documents unreachable: the portal counts alone
+        esb = {}
+    try:
+        portal = portal_counts(portal_day, branches, back=back)
+    except Exception:  # noqa: BLE001 - kopicalf core unreachable: the ESB documents alone
+        portal = {}
+    return {**esb, **portal}
+
+
+def _purchases(d_from: date, d_to: date, branches: list[str]) -> dict[str, dict[tuple[str, str], float]]:
+    """{branch: {(product code, UOM): qty}} of the ESB purchase invoices of the period."""
+    out: dict[str, dict[tuple[str, str], float]] = {}
+    for r in db.fetch(
+            f"""SELECT b.branch_code, l.product_code, upper(coalesce(l.uom_name, '')) AS uom, sum(l.qty) AS qty
+                  FROM {SCHEMA}.erp_documents d
+                  JOIN {SCHEMA}.erp_document_lines l ON l.module = d.module AND l.doc_num = d.doc_num AND l.line_type = 'detail'
+                  JOIN {SCHEMA}.master_branches b ON b.branch_id::text = d.branch_id::text
+                 WHERE d.module = 'purchase_invoice' AND d.doc_date BETWEEN %s AND %s AND d.deleted_at IS NULL
+                   AND d.status_name <> ALL(%s) AND b.branch_code = ANY(%s) AND l.product_code IS NOT NULL
+                 GROUP BY 1, 2, 3""", (d_from, d_to, list(SKIP_STATUSES), branches)):
+        out.setdefault(r["branch_code"], {})[(r["product_code"], r["uom"])] = _f(r["qty"])
+    return out
+
+
+def _bought(rows: dict[tuple[str, str], float], code: str, unit: str, esb: Optional[tuple[str, float]]) -> float:
+    """What a branch bought of an item, in `unit`: purchases in that unit, in a unit it converts to (KG → GR), or in the
+    ESB unit of the portal count list (× its factor); other packs are left out."""
+    total = 0.0
+    for (c, uom), qty in rows.items():
+        if c != code:
+            continue
+        v = to_unit(qty, uom, unit)
+        if v is None and esb and uom == esb[0]:
+            v = qty * esb[1]
+        total += v or 0.0
+    return total
+
+
+def actual_usage(d_from: date, d_to: date, branches: Optional[list[str]], units: dict[str, str]) -> dict:
+    """SO awal + purchases − SO akhir per item (in the unit of the recipe cards, `units`) over the branches that have
+    both counts: SO awal = the stock at the start of d_from, SO akhir = the stock at the end of d_to (stock_at).
+    {items: {code: {start, bought, end, actual}}, branches: [{code, start, end}], covered: [codes]}."""
+    try:
+        start = stock_at(d_from, d_from - timedelta(days=1), branches)
+        end = stock_at(d_to + timedelta(days=1), d_to, branches)
+        covered = sorted(b for b in start if b in end)
+        bought = _purchases(d_from, d_to, covered) if covered else {}
+    except Exception:  # noqa: BLE001 - no stock data: the report shows the system usage only
+        return {"items": {}, "branches": [], "covered": []}
+    items: dict[str, dict] = {}
+    for b in covered:
+        a, z = start[b], end[b]
+        for code, unit in units.items():
+            if code not in a["items"] and code not in z["items"]:
+                continue
+            qa, ua = a["items"].get(code, (0.0, unit))
+            qz, uz = z["items"].get(code, (0.0, unit))
+            va, vz = to_unit(qa, ua, unit), to_unit(qz, uz, unit)
+            if va is None or vz is None:
+                continue  # counted in a unit that cannot be compared with the card
+            got = _bought(bought.get(b, {}), code, unit, a["esb"].get(code) or z["esb"].get(code))
+            row = items.setdefault(code, {"start": 0.0, "bought": 0.0, "end": 0.0})
+            row["start"] += va
+            row["bought"] += got
+            row["end"] += vz
+    for row in items.values():
+        row["actual"] = row["start"] + row["bought"] - row["end"]
+
+    def side(v: dict) -> dict:
+        return {"source": v["source"], "date": v["date"], "refs": v["refs"]}
+    every = sorted(set(start) | set(end))
+    return {"items": items, "covered": covered,
+            "branches": [{"code": b, "start": side(start[b]) if b in start else None, "end": side(end[b]) if b in end else None} for b in every]}
+
+
+def on_hand(branches: Optional[list[str]], units: dict[str, str]) -> dict:
+    """The latest stock of the branches (portal count of the last 8 days, else the ESB document around yesterday), per
+    item in the unit of the cards: what the Material Required Planning has already."""
+    today = date.today()
+    snap = stock_at(today, today - timedelta(days=1), branches, back=8)
+    items: dict[str, float] = {}
+    for v in snap.values():
+        for code, unit in units.items():
+            if code in v["items"]:
+                q, u = v["items"][code]
+                q = to_unit(q, u, unit)
+                if q is not None:
+                    items[code] = items.get(code, 0.0) + q
+    dates = sorted({v["date"] for v in snap.values()})
+    return {"items": items, "branches": len(snap), "from": dates[0] if dates else None, "to": dates[-1] if dates else None}

@@ -40,13 +40,33 @@ def test_actual_usage_from_the_stock_opname_and_purchases(monkeypatch):
     from datetime import date
 
     from app import ratio
-    docs = {date(2026, 10, 31): {"A": {"doc": "SO-1"}, "B": {"doc": "SO-9"}}, date(2026, 11, 7): {"A": {"doc": "SO-2"}}}
+    # A: ESB documents both ends; B: ESB SO awal only (left out); C: portal counts (they win over its ESB documents)
+    docs = {date(2026, 10, 31): {"A": {"doc": "SO-1", "date": "2026-10-31"}, "B": {"doc": "SO-9", "date": "2026-10-31"}},
+            date(2026, 11, 7): {"A": {"doc": "SO-2", "date": "2026-11-07"}, "C": {"doc": "SO-7", "date": "2026-11-07"}}}
     monkeypatch.setattr(ratio, "so_values", lambda day, codes: docs[day])
+    portal = {date(2026, 11, 1): {"C": {"source": "portal", "date": "2026-11-01", "refs": ["SC-1"], "items": {"RM-MILK": (1.5, "KG")}, "esb": {}}},
+              date(2026, 11, 8): {"C": {"source": "portal", "date": "2026-11-08", "refs": ["SC-2"], "items": {"RM-MILK": (500.0, "GR")},
+                                        "esb": {"RM-MILK": ("PACK", 1000.0)}}}}
+    monkeypatch.setattr(mc, "portal_counts", lambda day, codes, back=1, ahead=1: portal[day])
 
     def fetch(sql, params=None):
         if "stock_opname" in sql:
-            return [{"product_code": "RM-MILK", "uom": "GR", "qty": 5000 if "SO-1" in params[0] else 2000}]
-        assert params[3] == ["A"]  # only the branches with both documents
-        return [{"product_code": "RM-MILK", "uom": "GR", "qty": 10000}, {"product_code": "RM-MILK", "uom": "PACK", "qty": 3}]
+            return [{"doc_num": d, "product_code": "RM-MILK", "uom": "GR", "qty": q} for d, q in (("SO-1", 5000), ("SO-2", 2000), ("SO-7", 9))
+                    if d in params[0]]
+        assert params[3] == ["A", "C"]  # only the branches with both counts
+        return [{"branch_code": "A", "product_code": "RM-MILK", "uom": "GR", "qty": 10000},
+                {"branch_code": "A", "product_code": "RM-MILK", "uom": "PACK", "qty": 3},       # A has no pack factor: left out
+                {"branch_code": "C", "product_code": "RM-MILK", "uom": "PACK", "qty": 2}]       # C: the count list says 1000 GR
     monkeypatch.setattr(mc.db, "fetch", fetch)
-    assert mc.actual_usage(date(2026, 11, 1), date(2026, 11, 7), None) == {"RM-MILK": 5000 + 10000 - 2000}
+    out = mc.actual_usage(date(2026, 11, 1), date(2026, 11, 7), None, {"RM-MILK": "GR"})
+    assert out["covered"] == ["A", "C"]
+    milk = out["items"]["RM-MILK"]
+    assert milk["start"] == 5000 + 1500 and milk["bought"] == 10000 + 2000 and milk["end"] == 2000 + 500
+    assert milk["actual"] == (5000 + 10000 - 2000) + (1500 + 2000 - 500)
+    c = next(b for b in out["branches"] if b["code"] == "C")
+    assert c["start"]["source"] == "portal" and c["end"]["refs"] == ["SC-2"]
+
+
+def test_units_compare_only_when_they_convert():
+    assert mc.to_unit(1.5, "KG", "GR") == 1500 and mc.to_unit(500, "GR", "kg") == 0.5 and mc.to_unit(2, "PCS", "PCS") == 2
+    assert mc.to_unit(2, "PACK", "GR") is None

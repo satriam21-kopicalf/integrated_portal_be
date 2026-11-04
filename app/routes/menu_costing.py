@@ -11,7 +11,7 @@
     GET/POST /api/cost-control/sales-calc/extras, PUT/DELETE /.../extras/{id}   items outside the cards (cable ties,
                                                                 plastic …) per bill / portion / outlet-day (migration 057)
     GET    /api/cost-control/sales-calc/report?dateFrom&dateTo&branch&horizon&buffer
-                                                                MRP, usage actual vs system, COGS bahan baku
+                                                                MRP, usage actual vs system, COGS Material
 A role "user" given a page sees only its own branches (app/scope.py).
 """
 from datetime import date, timedelta

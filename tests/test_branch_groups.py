@@ -125,7 +125,7 @@ def test_form_items_per_group(monkeypatch):
     assert form_scope.apply("wwwr", w)["groups"][0]["sections"][0]["items"][0]["onlyFor"] == ["CCI", "CTGP"]  # WW-WR too
 
 
-def test_net_sales_against_the_outlets_own_months_before(monkeypatch):
+def test_net_sales_against_the_outlets_own_month_before(monkeypatch):
     seen = []
 
     def fake(codes, a, b):
@@ -136,5 +136,5 @@ def test_net_sales_against_the_outlets_own_months_before(monkeypatch):
 
     monkeypatch.setattr(ps, "daily_sales", fake)
     assert ps.sales_scores(["A", "B", "C", "D"], date(2026, 11, 1), date(2026, 11, 10)) == {"A": 90.0, "B": 100.0, "C": None, "D": None}
-    assert seen[1] == (date(2026, 8, 1), date(2026, 10, 31))  # the 3 full months before
-    assert ps._baseline_window(date(2026, 2, 15)) == (date(2025, 11, 1), date(2026, 1, 31))
+    assert seen[1] == (date(2026, 10, 1), date(2026, 10, 31))  # the full month before
+    assert ps._baseline_window(date(2026, 1, 15)) == (date(2025, 12, 1), date(2025, 12, 31))  # over the new year

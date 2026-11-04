@@ -129,7 +129,7 @@ def group_deadline(value: Optional[str]) -> Optional[time]:
 # in the period against its net sales per selling day over the BASELINE_MONTHS full months before the period. Both
 # come from the Sales Transactions (ESB) aggregates, so a big and a small outlet are judged alike.
 
-BASELINE_MONTHS = 3
+BASELINE_MONTHS = 1          # the month before only (user decision 2026-11-04; was 3)
 
 
 def _month(v: str) -> date:

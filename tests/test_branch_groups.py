@@ -2,6 +2,8 @@
 from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
+from decimal import Decimal
+
 import pytest
 
 from app import branch_groups as bg
@@ -121,3 +123,18 @@ def test_form_items_per_group(monkeypatch):
     assert out["groups"][0]["sections"][0]["items"][0]["onlyFor"] == ["CCI", "CTGP"] and "onlyFor" not in d["groups"][0]["sections"][0]["items"][0]
     w = {"groups": [{"sections": [{"items": [{"key": "product:a.1"}]}]}]}
     assert form_scope.apply("wwwr", w)["groups"][0]["sections"][0]["items"][0]["onlyFor"] == ["CCI", "CTGP"]  # WW-WR too
+
+
+def test_net_sales_against_the_outlets_own_months_before(monkeypatch):
+    seen = []
+
+    def fake(codes, a, b):
+        seen.append((a, b))
+        if a.month == 11:  # the period: A sells 90 a day, B 130 a day, C nothing yet
+            return {"A": (Decimal(900), 10), "B": (Decimal(1300), 10)}
+        return {"A": (Decimal(7200), 72), "B": (Decimal(7200), 72), "C": (Decimal(500), 5)}  # 100 a day before
+
+    monkeypatch.setattr(ps, "daily_sales", fake)
+    assert ps.sales_scores(["A", "B", "C", "D"], date(2026, 11, 1), date(2026, 11, 10)) == {"A": 90.0, "B": 100.0, "C": None, "D": None}
+    assert seen[1] == (date(2026, 8, 1), date(2026, 10, 31))  # the 3 full months before
+    assert ps._baseline_window(date(2026, 2, 15)) == (date(2025, 11, 1), date(2026, 1, 31))

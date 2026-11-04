@@ -14,7 +14,8 @@ decisions), every part in % per outlet-day so a PIC of one outlet and of five ar
   product / outlet  the average of the visits done against the target and the score of those visits (the items the
                outlet's group is asked, app/form_scope.py);
   swat         the agreement of the PIC's ratings with the SWAT audits (Form WW-WR);
-  sales        the net sales of the PIC's outlets against their monthly targets, prorated to the period.
+  sales        the net sales per selling day of the PIC's outlets against their own of the 3 months before (Sales
+               Transactions, app/pic_settings.py sales_scores; no target set by hand).
 Weighted by WEIGHTS over the parts that have data."""
 from datetime import date, datetime
 from typing import Optional

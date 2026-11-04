@@ -13,8 +13,7 @@ The PIC assessment settings (migration 069, app/pic_settings.py, app/form_scope.
     PUT    /api/monitoring/outlet-settings/{code}      {"deadline": "HH:MM" | null, "timezone": "Asia/Makassar" …}
     GET    /api/monitoring/form-items                  the Product / Outlet items asked per branch group
     PUT    /api/monitoring/form-items                  {"changes": [{"form", "itemKey", "group", "shown"}]}
-    GET    /api/monitoring/sales-targets?month=YYYY-MM the net sales target of every outlet and the net sales so far
-    PUT    /api/monitoring/sales-targets               {"month", "rows": [{"code", "target"}]}
+    GET    /api/monitoring/sales-targets?month=YYYY-MM the net sales of every outlet against its own months before
 """
 from datetime import date, timedelta
 from typing import Optional
@@ -134,16 +133,6 @@ class ScopeIn(BaseModel):
     changes: list[ScopeChange] = Field(max_length=2000)
 
 
-class TargetRow(BaseModel):
-    code: str = Field(max_length=40)
-    target: Optional[float] = Field(None, ge=0, le=1e13)
-
-
-class TargetsIn(BaseModel):
-    month: str = Field(pattern=r"^\d{4}-\d{2}$")
-    rows: list[TargetRow] = Field(max_length=2000)
-
-
 @router.get("/api/monitoring/outlet-settings")
 def outlet_settings(request: Request, user: dict = Depends(current_user)) -> dict:
     _need(request, user, *MON_PAGES)
@@ -177,13 +166,4 @@ def save_form_items(body: ScopeIn, request: Request, user: dict = Depends(curren
 @router.get("/api/monitoring/sales-targets")
 def sales_targets(request: Request, month: str = Query(..., pattern=r"^\d{4}-\d{2}$"), user: dict = Depends(current_user)) -> dict:
     _need(request, user, "mon.branch-groups", "mon.overview")
-    return _run(pic_settings.targets, month)
-
-
-@router.put("/api/monitoring/sales-targets")
-def save_sales_targets(body: TargetsIn, request: Request, user: dict = Depends(current_user)) -> dict:
-    _need(request, user, "mon.branch-groups")
-    out = _run(pic_settings.save_targets, body.month, [r.model_dump() for r in body.rows], str(user["id"]))
-    activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups",
-                    summary=f"Mengatur target net sales {body.month} ({out['saved']} outlet)")
-    return out
+    return _run(pic_settings.sales_overview, month)

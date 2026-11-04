@@ -10,7 +10,7 @@ The working days of a period follow the 6-1 schedule of the PICs (six days on, o
 working_days(n) = n − ⌊n / 7⌋, so a month of 28 / 29 / 30 / 31 days holds 24 / 25 / 26 / 27 working days (30 → 26, as
 the workbook)."""
 from calendar import monthrange
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -19,7 +19,7 @@ from app import branch_groups as bg
 from app import database as db
 
 TS = "integration_portal.outlet_setting"
-TT = "integration_portal.outlet_sales_target"
+TT = "integration_portal.outlet_sales_target"   # migration 069; unused since 2026-11-04 (net sales against the outlet itself)
 DEFAULT_DEADLINE = time(11, 0)     # an outlet without a group nor its own deadline (the workbook's 11:00)
 EARLIEST = time(5, 0)
 ZONES = {"Asia/Jakarta": "WIB", "Asia/Makassar": "WITA", "Asia/Jayapura": "WIT"}
@@ -124,7 +124,13 @@ def group_deadline(value: Optional[str]) -> Optional[time]:
     return _time(value)
 
 
-# ---------------------------------------------------------------- net sales targets
+# ---------------------------------------------------------------- net sales (Sales Transactions of the outlet)
+# No target is set by hand (user decision 2026-11-04): an outlet is compared with itself. Its net sales per selling day
+# in the period against its net sales per selling day over the BASELINE_MONTHS full months before the period. Both
+# come from the Sales Transactions (ESB) aggregates, so a big and a small outlet are judged alike.
+
+BASELINE_MONTHS = 3
+
 
 def _month(v: str) -> date:
     try:
@@ -134,86 +140,65 @@ def _month(v: str) -> date:
         raise SettingError("Bulan harus YYYY-MM") from None
 
 
-def net_sales(codes: list[str], start: date, end: date) -> dict[str, Decimal]:
-    """{branch code: net sales of the sales bills from start to end} (the Dashboard aggregates)."""
+def _months_back(d: date, n: int) -> date:
+    y, m = d.year, d.month - n
+    while m < 1:
+        y, m = y - 1, m + 12
+    return date(y, m, 1)
+
+
+def _baseline_window(start: date) -> tuple[date, date]:
+    first = date(start.year, start.month, 1)
+    return _months_back(first, BASELINE_MONTHS), first - timedelta(days=1)
+
+
+def daily_sales(codes: list[str], start: date, end: date) -> dict[str, tuple[Decimal, int]]:
+    """{branch code: (net sales of the sales bills from start to end, days with sales)} (the Dashboard aggregates)."""
     if not codes or start > end:
         return {}
-    rows = db.fetch("""SELECT branch_code, sum(nett_sales) AS n FROM integration_portal.agg_sales_daily
+    rows = db.fetch("""SELECT branch_code, sum(nett_sales) AS n, count(DISTINCT sales_date) FILTER (WHERE nett_sales > 0) AS d
+                       FROM integration_portal.agg_sales_daily
                        WHERE tx_type = 'sales' AND sales_date BETWEEN %s AND %s AND branch_code = ANY(%s) GROUP BY branch_code""",
                     (start, end, codes))
-    return {r["branch_code"]: Decimal(r["n"] or 0) for r in rows}
+    return {r["branch_code"]: (Decimal(r["n"] or 0), int(r["d"] or 0)) for r in rows}
 
 
-def targets(month: str) -> dict:
-    """The outlets with the net sales target of a month and the net sales so far (and the share of the month elapsed)."""
-    m = _month(month)
-    last = date(m.year, m.month, monthrange(m.year, m.month)[1])
-    outs = sorted(bg.outlets(), key=lambda x: x["name"])
-    got = {r["branch_code"]: r["target"] for r in db.fetch(f"SELECT branch_code, target FROM {TT} WHERE month = %s", (m,))}
-    upto = min(last, date.today())
-    sales = net_sales([o["code"] for o in outs], m, upto)
-    elapsed = 0 if upto < m else (upto - m).days + 1
-    days = monthrange(m.year, m.month)[1]
-    data = []
-    for o in outs:
-        t = got.get(o["code"])
-        n = sales.get(o["code"], Decimal(0))
-        due = (t * working_days(elapsed) / working_days(days)) if t and elapsed else None
-        data.append({"code": o["code"], "name": o["name"], "groupCode": o["group_code"], "target": float(t) if t else None,
-                     "netSales": float(n), "achievement": round(float(n * 100 / t), 1) if t else None,
-                     "onPace": round(float(n * 100 / due), 1) if due else None})
-    return {"month": m.isoformat()[:7], "days": days, "elapsed": elapsed, "data": data}
-
-
-def save_targets(month: str, rows: list[dict], actor: Optional[str]) -> dict:
-    """rows: [{code, target}] (target empty / 0 removes it)."""
-    m = _month(month)
-    known = {o["code"] for o in bg.outlets()}
-    n = 0
-    with db.transaction() as conn:
-        for r in rows:
-            code = r.get("code")
-            if code not in known:
-                raise SettingError(f"Outlet {code} tidak dikenal")
-            try:
-                t = Decimal(str(r.get("target") or 0))
-            except Exception:
-                raise SettingError(f"Target {code} harus angka") from None
-            if t < 0:
-                raise SettingError(f"Target {code} tidak boleh negatif")
-            if t == 0:
-                conn.execute(f"DELETE FROM {TT} WHERE branch_code = %s AND month = %s", (code, m))
-            else:
-                conn.execute(f"""INSERT INTO {TT} (branch_code, month, target, updated_by) VALUES (%s, %s, %s, %s)
-                                 ON CONFLICT (branch_code, month) DO UPDATE SET target = EXCLUDED.target, updated_at = now(),
-                                 updated_by = EXCLUDED.updated_by""", (code, m, t, actor))
-            n += 1
-    return {"saved": n}
+def _per_day(v: Optional[tuple[Decimal, int]]) -> Optional[Decimal]:
+    return v[0] / v[1] if v and v[1] and v[0] > 0 else None
 
 
 def sales_scores(codes: list[str], start: date, end: date) -> dict[str, Optional[float]]:
-    """{branch code: net sales against the target of the period, %, at most 100}: per month of the period its target
-    prorated by the working days of the month inside the period (and up to today), against the net sales of those days.
-    None for an outlet without a target in the period."""
+    """{branch code: net sales per selling day of the period against its own per day of the BASELINE_MONTHS before, %,
+    at most 100}. None for an outlet without sales in the period or in the baseline (a new outlet)."""
     if not codes:
         return {}
     end = min(end, date.today())
-    rows = db.fetch(f"SELECT branch_code, month, target FROM {TT} WHERE branch_code = ANY(%s) AND month BETWEEN %s AND %s",
-                    (codes, date(start.year, start.month, 1), end))
-    if not rows:
-        return {c: None for c in codes}
-    due: dict[str, Decimal] = {}
-    got: dict[str, Decimal] = {}
-    months = sorted({r["month"] for r in rows})
-    for m in months:
-        days = monthrange(m.year, m.month)[1]
-        a, b = max(start, m), min(end, date(m.year, m.month, days))
-        if a > b:
-            continue
-        share = Decimal(working_days((b - a).days + 1)) / Decimal(working_days(days))
-        month_rows = [r for r in rows if r["month"] == m]
-        sales = net_sales([r["branch_code"] for r in month_rows], a, b)
-        for r in month_rows:
-            due[r["branch_code"]] = due.get(r["branch_code"], Decimal(0)) + r["target"] * share
-            got[r["branch_code"]] = got.get(r["branch_code"], Decimal(0)) + sales.get(r["branch_code"], Decimal(0))
-    return {c: (round(min(100.0, float(got[c] * 100 / due[c])), 1) if due.get(c) else None) for c in codes}
+    a, b = _baseline_window(start)
+    now, base = daily_sales(codes, start, end), daily_sales(codes, a, b)
+    out = {}
+    for c in codes:
+        n, m = _per_day(now.get(c)), _per_day(base.get(c))
+        out[c] = round(min(100.0, float(n * 100 / m)), 1) if n is not None and m else None
+    return out
+
+
+def sales_overview(month: str) -> dict:
+    """Every outlet: its net sales of the month so far and per selling day against its own per day of the months before."""
+    m = _month(month)
+    last = date(m.year, m.month, monthrange(m.year, m.month)[1])
+    upto = min(last, date.today())
+    outs = sorted(bg.outlets(), key=lambda x: x["name"])
+    codes = [o["code"] for o in outs]
+    a, b = _baseline_window(m)
+    now, base = daily_sales(codes, m, upto), daily_sales(codes, a, b)
+    data = []
+    for o in outs:
+        n, bm = now.get(o["code"]), base.get(o["code"])
+        pn, pb = _per_day(n), _per_day(bm)
+        data.append({"code": o["code"], "name": o["name"], "groupCode": o["group_code"],
+                     "netSales": float(n[0]) if n else 0.0, "days": n[1] if n else 0,
+                     "perDay": float(pn) if pn is not None else None, "baselinePerDay": float(pb) if pb is not None else None,
+                     "vsBaseline": round(float(pn * 100 / pb), 1) if pn is not None and pb else None,
+                     "score": round(min(100.0, float(pn * 100 / pb)), 1) if pn is not None and pb else None})
+    return {"month": m.isoformat()[:7], "baselineFrom": a.isoformat(), "baselineTo": b.isoformat(),
+            "baselineMonths": BASELINE_MONTHS, "upTo": upto.isoformat() if upto >= m else None, "data": data}

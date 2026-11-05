@@ -12,6 +12,11 @@
                                                                 plastic …) per bill / portion / outlet-day (migration 057)
     GET    /api/cost-control/sales-calc/report?dateFrom&dateTo&branch&horizon&buffer
                                                                 MRP, usage actual vs system, COGS Material
+    GET    /api/cost-control/sales-calc/options?days=           the choices sold with the menus (Less Sugar, Extra Shot …)
+    PUT    /api/cost-control/sales-calc/options/rule            {"name", "effect": none | adjust | clear, "lines", "note"}
+    GET    /api/cost-control/sales-calc/esb-boms?search=        the ESB bills of material and the POS menus of their name
+    GET    /api/cost-control/sales-calc/esb-boms/{id}           the card a BOM makes (matched lines and what was not)
+    POST   /api/cost-control/sales-calc/esb-boms/{id}/import    {"code"?, "name"?, "menus"?: [{id, name}]} the card
 A role "user" given a page sees only its own branches (app/scope.py).
 """
 from datetime import date, timedelta
@@ -20,7 +25,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from app import activity, menu_costing as mc
+from app import activity, menu_costing as mc, menu_options as mo
 from app.access import require_page
 from app.scope import NO_BRANCH, scoped_branch
 from app.utils import parse_branches, today
@@ -156,3 +161,45 @@ def report(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Quer
     scoped = scoped_branch(branch)
     branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
     return mc.report(start, end, branches, horizon, buffer)
+
+
+# ---------------------------------------------------------------- variants & modifiers, ESB BOM (migration 071)
+
+@router.get("/sales-calc/options")
+def options(days: int = Query(90, ge=7, le=180), _: dict = Depends(require_page(CALC))) -> dict:
+    return mo.options(days)
+
+
+@router.put("/sales-calc/options/rule")
+def save_option_rule(body: dict, request: Request, user: dict = Depends(require_page(CALC))) -> dict:
+    try:
+        out = mo.save_rule(str(body.get("name") or ""), body, user)
+    except mo.OptionError as exc:
+        _refuse(exc)
+    activity.record("cc.menu-option", user=user, request=request, page="/cost-control/sales-calculator",
+                    summary=f"Aturan pilihan {out['name']}: {out.get('effect') or 'dihapus'}", details=out)
+    return out
+
+
+@router.get("/sales-calc/esb-boms")
+def esb_boms(search: str = Query("", max_length=80), _: dict = Depends(require_page(CALC))) -> dict:
+    return {"data": mo.boms(search)}
+
+
+@router.get("/sales-calc/esb-boms/{bom_id}")
+def esb_bom(bom_id: str, _: dict = Depends(require_page(CALC))) -> dict:
+    try:
+        return mo.bom_card(bom_id)
+    except mo.OptionError as exc:
+        _refuse(exc)
+
+
+@router.post("/sales-calc/esb-boms/{bom_id}/import")
+def import_bom(bom_id: str, body: dict, request: Request, user: dict = Depends(require_page(CALC))) -> dict:
+    try:
+        out = mo.import_bom(bom_id, body, user)
+    except (mo.OptionError, mc.CostingError) as exc:
+        _refuse(exc)
+    activity.record("cc.menu-recipe", user=user, request=request, page="/cost-control/sales-calculator",
+                    summary=f"Resep menu {out['code']} dari BOM ESB", details={"code": out["code"], "bom": bom_id, "menus": len(out["menus"])})
+    return out

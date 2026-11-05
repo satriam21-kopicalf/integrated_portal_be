@@ -356,6 +356,19 @@ def _sold(d_from: date, d_to: date, branches: Optional[list[str]], cards: dict, 
         explode(cards[code], qty / days * horizon * (1 + buffer_pct / 100), wip, plan)
         per_menu.append({"id": s["menu_id"], "name": s["name"], "recipe": code, "recipeName": cards[code]["name"],
                          "qty": qty, "sales": _f(s["sales"])})
+    # the choices sold with the menus (Less / No Sugar, Extra Shot …): their rules change the card of the parent menu
+    from app import menu_options
+    try:
+        pending = menu_options.ensure_days(d_from, d_to)
+        choice_rows, rule = menu_options.sold(d_from, d_to, branches), menu_options.rules()
+    except Exception:  # noqa: BLE001 - no choices data yet: the cards alone
+        pending, choice_rows, rule = [], [], {}
+    option_of, option_rows, unruled = menu_options.adjustments(choice_rows, cards, mapped, wip, rule, explode)
+    for deltas in option_of.values():
+        for k, q in deltas.items():
+            for target, amount in ((system, q), (plan, q / days * horizon * (1 + buffer_pct / 100))):
+                row = target.setdefault(k, {**option_rows[k], "qty": 0.0})
+                row["qty"] = row.get("qty", 0.0) + amount
     # items outside the cards: per bill, per portion sold (menus with a card) or per day of an outlet with sales
     base = db.fetchrow(
         f"""SELECT coalesce(sum(bills) FILTER (WHERE tx_type = 'sales'), 0) AS bills,
@@ -372,7 +385,16 @@ def _sold(d_from: date, d_to: date, branches: Optional[list[str]], cards: dict, 
             row["qty"] = row.get("qty", 0.0) + amount
         extra_rows.append({**e, "count": counts[e["basis"]], "used": round(used, 3)})
     return {"system": system, "plan": plan, "menus": per_menu, "unmapped": unmapped, "extras": extra_rows, "counts": counts,
+            "options": option_of, "unruled": unruled, "optionsPending": len(pending),
             "allSales": sum(m["sales"] for m in per_menu) + sum(m["sales"] for m in unmapped)}
+
+
+def _delta_cost(key: str, qty: float, price: dict[str, float]) -> Optional[float]:
+    """The cost of what a choice changes in one material (None while its price is missing; unpriced items count 0)."""
+    if key.startswith(("wip:", "n:", "o:")):
+        return 0.0
+    p = price.get(key)
+    return None if p is None else qty * p
 
 
 def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int = 7, buffer_pct: float = 10) -> dict:
@@ -397,8 +419,12 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
         hpp[code] = None if missing else sum(v["qty"] * (cost(v) or 0.0) for v in one.values())
     for m in per_menu:
         unit = hpp.get(m["recipe"])
+        # what the choices sold with the menu change (Less Sugar saves sugar, Extra Shot adds espresso …)
+        deltas = got["options"].get(m["id"], {})
+        extra = [_delta_cost(k, q, price) for k, q in deltas.items()]
+        m["optionCogs"] = round(sum(x for x in extra if x is not None), 2) if deltas else 0.0
         m["hpp"] = round(unit, 2) if unit is not None else None
-        m["cogs"] = round(unit * m["qty"], 2) if unit is not None else None
+        m["cogs"] = round(unit * m["qty"] + m["optionCogs"], 2) if unit is not None and None not in extra else None
         m["ratio"] = round(m["cogs"] / m["sales"], 6) if m["cogs"] is not None and m["sales"] else None
 
     def unit_price(v: dict) -> Optional[float]:
@@ -442,7 +468,8 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
     cogs = sum(m["cogs"] or 0 for m in per_menu)
     actual_cogs = sum(u["actualValue"] or 0 for u in usage) if covered else None
     return {"period": {"from": d_from.isoformat(), "to": d_to.isoformat(), "days": days, "horizon": horizon, "buffer": buffer_pct},
-            "menus": per_menu, "unmapped": got["unmapped"], "usage": usage, "mrp": mrp, "extras": extra_rows, "counts": got["counts"],
+            "menus": per_menu, "unmapped": got["unmapped"], "usage": usage,
+            "options": {"unruled": got["unruled"], "pendingDays": got["optionsPending"]}, "mrp": mrp, "extras": extra_rows, "counts": got["counts"],
             "stock": {"branches": actual["branches"], "covered": covered, "onHand": {k: have[k] for k in ("branches", "from", "to")}},
             "total": {"sales": sales, "cogs": cogs + extra_cost, "menuCogs": cogs, "extraCogs": round(extra_cost, 2),
                       "ratio": round((cogs + extra_cost) / sales, 6) if sales else None,

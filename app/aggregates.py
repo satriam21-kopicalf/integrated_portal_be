@@ -118,6 +118,65 @@ FROM line
 GROUP BY branch_code, channel, COALESCE(menu_id, '?'), kind
 """
 
+# the choices sold with a menu (Less / No Sugar, Extra Shot …: its packages / extras) with the menu they belong to
+# (migration 071, Sales Calculator by Menu); a day is marked built in agg_menu_option_done
+SQL_OPTION = [
+    f"DELETE FROM {PORTAL}.agg_menu_option_daily WHERE sales_date = %(day)s",
+    f"""
+INSERT INTO {PORTAL}.agg_menu_option_daily
+SELECT %(day)s::date, h.branch_code, m->>'menuID', p->>'menuID', a.kind, max(COALESCE(NULLIF(TRIM(p->>'menuName'), ''), '?')),
+       sum({_num("p->>'qty'")})
+FROM {TABLE_TRANSACTIONS} h
+     CROSS JOIN LATERAL jsonb_array_elements(COALESCE(h.raw_data->'salesMenus', '[]'::jsonb)) m
+     CROSS JOIN LATERAL (VALUES ('package', m->'packages'), ('extra', m->'extras')) a(kind, items)
+     CROSS JOIN LATERAL jsonb_array_elements(COALESCE(a.items, '[]'::jsonb)) p
+WHERE {DAY_FILTER} AND {TYPE_CONDITIONS['sales']} AND {active_line_sql('m')}
+  AND COALESCE(m->>'menuID', '') <> '' AND COALESCE(p->>'menuID', '') <> ''
+GROUP BY h.branch_code, m->>'menuID', p->>'menuID', a.kind
+""",
+    f"""INSERT INTO {PORTAL}.agg_menu_option_done (sales_date) VALUES (%(day)s)
+        ON CONFLICT (sales_date) DO UPDATE SET built_at = now()""",
+]
+OPTION_BACKFILL_FROM = date(2026, 8, 1)  # the history the calculator reads (3 months before migration 071)
+OPTION_BACKFILL_PER_RUN = 6               # days built by every scheduled run until the history is complete
+
+
+def refresh_options(day: date, conn=None) -> None:
+    """Rebuild the choices sold on one sales date (agg_menu_option_daily)."""
+    params = {"day": day.isoformat()}
+    if conn is not None:
+        for sql in SQL_OPTION:
+            conn.execute(sql, params)
+        return
+    with db.transaction(timeout_ms=DAY_TIMEOUT_MS) as c:
+        for sql in SQL_OPTION:
+            c.execute(sql, params)
+
+
+def options_missing(start: date, end: date) -> list[date]:
+    """The sales dates of [start, end] whose choices are not built yet, latest first."""
+    done = {r["sales_date"] for r in db.fetch(
+        f"SELECT sales_date FROM {PORTAL}.agg_menu_option_done WHERE sales_date BETWEEN %s AND %s", (start, end))}
+    out, day = [], end
+    while day >= start:
+        if day not in done:
+            out.append(day)
+        day -= timedelta(days=1)
+    return out
+
+
+def backfill_options(limit: int = OPTION_BACKFILL_PER_RUN) -> int:
+    """Build a few of the missing days of the history (the scheduled runs complete it bit by bit)."""
+    n = 0
+    for day in options_missing(OPTION_BACKFILL_FROM, today() - timedelta(days=1))[:limit]:
+        try:
+            refresh_options(day)
+            n += 1
+        except Exception:  # noqa: BLE001
+            logger.exception("%s choices failed", day)
+    return n
+
+
 SQL_MONTH = [
     f"DELETE FROM {PORTAL}.agg_menu_monthly WHERE month = %(month)s",
     f"""
@@ -165,6 +224,7 @@ def refresh_day(day: date) -> dict:
         conn.execute(SQL_DAILY, params)
         conn.execute(SQL_HOURLY, params)
         conn.execute(SQL_MENU, params)
+        refresh_options(day, conn)
         rec = conn.execute(SQL_RECONCILE, params).fetchone()
         ms = int((time.monotonic() - t0) * 1000)
         conn.execute(SQL_LOG, {**params, "ms": ms})
@@ -273,6 +333,10 @@ def main(argv: list[str]) -> int:
     try:
         logger.info("refresh %s .. %s", start, end)
         failed = refresh_range(start, end, args.months_only)
+        if not args.months_only:
+            built = backfill_options()
+            if built:
+                logger.info("choices of %s more day(s) of the history built", built)
         logger.info("done, %s failure(s)", failed)
         return 1 if failed else 0
     finally:

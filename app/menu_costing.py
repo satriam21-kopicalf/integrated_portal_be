@@ -58,6 +58,7 @@ def items(search: str = "", category: str = "", on: Optional[date] = None) -> di
              ORDER BY c.name NULLS LAST, i.name""",
         {"day": day, "since": day - timedelta(days=90), "q": search.strip(), "like": f"%{search.strip()}%", "cat": category})
     avg = purchase_avg(day - timedelta(days=90), day)
+    hpp = esb_hpp(day)
     cats = [r["name"] for r in db.fetch(
         """SELECT DISTINCT c.name FROM kc_master.item i JOIN kc_master.item_category c ON c.id = i.category_id
             WHERE i.is_active AND i.item_type = 'STOCK' ORDER BY 1""")]
@@ -65,7 +66,27 @@ def items(search: str = "", category: str = "", on: Optional[date] = None) -> di
         "code": r["code"], "name": r["name"], "unit": r["base_uom"], "category": r["category"],
         "price": _f(r["price"]) if r["price"] is not None else None,
         "validFrom": r["valid_from"].isoformat() if r["valid_from"] else None, "note": r["note"],
-        "purchaseAvg": avg.get((r["code"], str(r["base_uom"] or "").upper()))} for r in rows]}
+        "purchaseAvg": avg.get((r["code"], str(r["base_uom"] or "").upper())),
+        "esbHpp": hpp.get(r["code"], (None, 0))[0], "esbHppLocations": hpp.get(r["code"], (None, 0))[1]} for r in rows]}
+
+
+def esb_hpp(day: date) -> dict[str, tuple[float, int]]:
+    """{item code: (median ESB HPP of one base unit, outlets)}: the unit cost (end HPP ÷ end qty, base unit) of the latest
+    valuation period of every location within 60 days, the median over the locations so that one outlet with an odd
+    moving average (stock near zero) does not lead (2026-11-05)."""
+    try:
+        rows = db.fetch(
+            f"""WITH v AS (SELECT DISTINCT ON (location_id, product_id) product_id, end_hpp / end_qty AS unit
+                             FROM {SCHEMA}.inventory_valuation
+                            WHERE end_qty > 0 AND end_hpp > 0 AND period_end BETWEEN %(a)s AND %(b)s
+                            ORDER BY location_id, product_id, period_end DESC)
+                SELECT i.code, percentile_cont(0.5) WITHIN GROUP (ORDER BY v.unit) AS med, count(*) AS n
+                  FROM v JOIN kc_master.item_esb_map m ON m.esb_id = v.product_id AND m.company_code = %(co)s
+                  JOIN kc_master.item i ON i.id = m.item_id GROUP BY i.code""",
+            {"a": day - timedelta(days=60), "b": day, "co": MAIN_COMPANY})
+    except Exception:  # noqa: BLE001 - the valuation unreachable: the pricelist works without the reference
+        return {}
+    return {r["code"]: (round(_f(r["med"]), 4), int(r["n"])) for r in rows}
 
 
 def purchase_avg(d_from: date, d_to: date) -> dict[tuple[str, str], float]:

@@ -367,9 +367,21 @@ def _sold(d_from: date, d_to: date, branches: Optional[list[str]], cards: dict, 
     system: dict[str, dict] = {}
     plan: dict[str, dict] = {}
     per_menu, unmapped = [], []
+    from app import menu_options
+    try:
+        pending = menu_options.ensure_days(d_from, d_to)
+        choice_rows, rule = menu_options.sold(d_from, d_to, branches), menu_options.rules()
+    except Exception:  # noqa: BLE001 - no choices data yet: the cards alone
+        pending, choice_rows, rule = [], [], {}
+    # a choice (Less Sugar, Gelas Kaca …) is no menu without a card: its rule changes the card of its menu (2026-11-05)
+    choice_ids = {c["option"] for c in choice_rows}
+    choice_sales = 0.0
     for s in sold:
         qty = _f(s["qty"])
         code = mapped.get(s["menu_id"])
+        if not code and s["menu_id"] in choice_ids:
+            choice_sales += _f(s["sales"])
+            continue
         if not code:
             unmapped.append({"id": s["menu_id"], "name": s["name"], "category": s["category"], "qty": qty, "sales": _f(s["sales"])})
             continue
@@ -378,12 +390,6 @@ def _sold(d_from: date, d_to: date, branches: Optional[list[str]], cards: dict, 
         per_menu.append({"id": s["menu_id"], "name": s["name"], "recipe": code, "recipeName": cards[code]["name"],
                          "qty": qty, "sales": _f(s["sales"])})
     # the choices sold with the menus (Less / No Sugar, Extra Shot …): their rules change the card of the parent menu
-    from app import menu_options
-    try:
-        pending = menu_options.ensure_days(d_from, d_to)
-        choice_rows, rule = menu_options.sold(d_from, d_to, branches), menu_options.rules()
-    except Exception:  # noqa: BLE001 - no choices data yet: the cards alone
-        pending, choice_rows, rule = [], [], {}
     option_of, option_rows, unruled = menu_options.adjustments(choice_rows, cards, mapped, wip, rule, explode)
     for deltas in option_of.values():
         for k, q in deltas.items():
@@ -407,7 +413,8 @@ def _sold(d_from: date, d_to: date, branches: Optional[list[str]], cards: dict, 
         extra_rows.append({**e, "count": counts[e["basis"]], "used": round(used, 3)})
     return {"system": system, "plan": plan, "menus": per_menu, "unmapped": unmapped, "extras": extra_rows, "counts": counts,
             "options": option_of, "unruled": unruled, "optionsPending": len(pending),
-            "allSales": sum(m["sales"] for m in per_menu) + sum(m["sales"] for m in unmapped)}
+            "allSales": sum(m["sales"] for m in per_menu) + sum(m["sales"] for m in unmapped) + choice_sales,
+            "choiceSales": choice_sales}
 
 
 def _delta_cost(key: str, qty: float, price: dict[str, float]) -> Optional[float]:
@@ -495,6 +502,7 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
             "total": {"sales": sales, "cogs": cogs + extra_cost, "menuCogs": cogs, "extraCogs": round(extra_cost, 2),
                       "ratio": round((cogs + extra_cost) / sales, 6) if sales else None,
                       "menusMapped": len(per_menu), "menusUnmapped": len(got["unmapped"]),
+                      "allSales": round(got["allSales"], 2), "choiceSales": round(got["choiceSales"], 2),
                       "unpriced": sum(1 for m in per_menu if m["hpp"] is None),
                       "systemValue": sum(u["systemValue"] or 0 for u in usage),
                       "actualValue": actual_cogs or 0,

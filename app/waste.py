@@ -171,6 +171,68 @@ def _view(r: dict) -> dict:
             "createdAt": r["created_at"].isoformat()}
 
 
+# ---------------------------------------------------------------- value (2026-11-05)
+
+def with_values(rows: list[dict]) -> list[dict]:
+    """The views of entries with their value in Rp: the quantity in the base unit of the item (kc_master.item_uom: KG →
+    GR, a pack → its factor) × the price of the Pricelist valid on the business day, else the ESB HPP (median unit cost
+    of the outlets); a premix = Σ grams of every stock ingredient × its price. priceSource: pricelist | esb | mixed |
+    none (no price: value null), partial (a premix with ingredients without a price: value of the priced ones)."""
+    from app import menu_costing as mc  # the Pricelist lives with the Sales Calculator
+
+    views = [_view(r) for r in rows]
+    if not rows:
+        return views
+    codes = sorted({c for r in rows for c in ([x.get("code") for x in (r.get("exploded") or [])] if r["scope"] == "premix"
+                                                else [r["item_code"]]) if c})
+    units = mc.item_units(codes)
+    days = sorted({r["business_date"] for r in rows})
+    lists = {d: mc.prices_on(d, codes) for d in days}
+    hpp = mc.esb_hpp(days[-1])
+
+    def price(code: str, day: date) -> tuple[Optional[float], Optional[str]]:
+        if code in lists[day]:
+            return lists[day][code], "pricelist"
+        if code in hpp:
+            return hpp[code][0], "esb"
+        return None, None
+
+    def base(code: str, qty: float, unit: Optional[str]) -> Optional[float]:
+        b, packs = units.get(code, ("", {}))
+        v = mc.to_unit(qty, unit, b) if b else qty
+        if v is None and (unit or "").upper() in packs:
+            v = qty * packs[(unit or "").upper()]
+        return v
+
+    for r, v in zip(rows, views):
+        parts = ([(x.get("code"), float(x.get("grams") or 0), "GR") for x in (r.get("exploded") or []) if x.get("isStock", True)]
+                 if r["scope"] == "premix" else [(r["item_code"], float(r["qty"]), r["unit"])])
+        total, sources, missing = 0.0, set(), 0
+        for code, qty, unit in parts:
+            p, src = price(code, r["business_date"]) if code else (None, None)
+            q = base(code, qty, unit) if code else None
+            if p is None or q is None:
+                missing += 1
+                continue
+            total += q * p
+            sources.add(src)
+        if not sources:
+            v.update(value=None, unitPrice=None, priceSource="none")
+            continue
+        src = "partial" if missing else (sources.pop() if len(sources) == 1 else "mixed")
+        v.update(value=round(total, 2), unitPrice=round(total / float(r["qty"]), 4) if float(r["qty"]) else None,
+                 priceSource=src)
+    return views
+
+
+def _sum_values(views: list[dict], key: str) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for v in views:
+        if v["status"] != "rejected" and v.get("value") is not None:
+            out[v[key]] = out.get(v[key], 0.0) + v["value"]
+    return out
+
+
 # ---------------------------------------------------------------- input
 
 def form(user: dict, branch: Optional[str], day: Optional[date]) -> dict:
@@ -386,9 +448,16 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], scope
     by_category = db.fetch(
         f"""SELECT e.category AS name, count(*)::int AS entries FROM {T} e WHERE {cond} AND e.status <> 'rejected'
             GROUP BY e.category ORDER BY 2 DESC, 1""", params)
+    views = with_values(rows)
+    item_value, branch_value = _sum_values(views, "itemCode"), _sum_values(views, "branchCode")
     for b in by_branch:
         b["last_at"] = b["last_at"].isoformat() if b["last_at"] else None
-    return {"data": [_view(r) for r in rows], "summary": summary, "byItem": by_item, "byBranch": by_branch,
+        b["value"] = round(branch_value.get(b["code"], 0.0), 2)
+    for i in by_item:
+        i["value"] = round(item_value.get(i["code"], 0.0), 2)
+    summary = {**summary, "value": round(sum(branch_value.values()), 2),
+               "unpriced": sum(1 for v in views if v["status"] != "rejected" and v.get("value") is None)}
+    return {"data": views, "summary": summary, "byItem": by_item, "byBranch": by_branch,
             "byCategory": by_category, "truncated": len(rows) >= limit}
 
 
@@ -573,7 +642,7 @@ def investigation(inv_id: str) -> Optional[dict]:
     if not r:
         return None
     entries = db.fetch(f"SELECT {COLUMNS} FROM {T} e WHERE e.investigation_id::text = %s ORDER BY e.created_at", (inv_id,))
-    return _inv_view(r, [_view(e) for e in entries])
+    return _inv_view(r, with_values(entries))
 
 
 def investigations(status: str, branches: Optional[tuple]) -> list[dict]:

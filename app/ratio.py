@@ -9,6 +9,8 @@ SEP-W5) from the ESB data the portal already syncs, per outlet and period.
     COGS value         BB + Espresso + Dimsum
     SO awal / akhir    stock value of the ESB stock opname document of the day before the period / the last day
                        (sum qty x price; the closest document within -2..+1 days), or the corrected value
+    GR corrections     Good Receipts corrected by Cost Control (date / qty, migration 072) at their PO price, added
+                       to the purchases of their supplier (grCorrection = the change)
     Usage              COGS value + SO awal - SO akhir
     Ratios             BB ratio = (BB + Dimsum) / net, Espresso ratio = Espresso / net, % espresso of COGS,
                        COGS ratio gross & net, usage ratio gross & net, delta = COGS ratio net - usage ratio net
@@ -22,7 +24,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Optional
 
-from app import database as db
+from app import database as db, goods_receipt
 from app.database import SCHEMA
 
 PORTAL = "integration_portal"
@@ -106,6 +108,14 @@ def ratio(start: date, end: date, codes: Optional[list[str]] = None) -> dict:
         key = SUPPLIERS.get(r["counterparty_name"], "other")
         b = buy.setdefault(r["branch_code"], {})
         b[key] = b.get(key, 0.0) + _f(r["total"])
+    # the Good Receipts Cost Control corrected (receipt date, quantity; migration 072), valued at their PO price
+    fixed_gr: dict[str, float] = {}
+    for code, by_supplier in goods_receipt.adjustments(start, end, codes)["value"].items():
+        b = buy.setdefault(code, {})
+        for supplier, dv in by_supplier.items():
+            key = SUPPLIERS.get(supplier, "other")
+            b[key] = b.get(key, 0.0) + dv
+            fixed_gr[code] = fixed_gr.get(code, 0.0) + dv
     journal = {r["branch_code"]: _f(r["value"]) for r in db.fetch(
         f"""SELECT b.branch_code, sum(abs(l.qty * l.price)) AS value
             FROM {SCHEMA}.erp_documents d
@@ -136,8 +146,10 @@ def ratio(start: date, end: date, codes: Optional[list[str]] = None) -> dict:
         b = buy.get(code, {})
         outlets.append(_row(code, names.get(code, code), gross, _f(s["nett"]), int(s["bills"] or 0), _f(s["non_sales"]),
                             b, journal.get(code, 0.0), so(code, day_a, so_a), so(code, day_b, so_b), mdrs.get(code)))
+    for o in outlets:
+        o["grCorrection"] = round(fixed_gr.get(o["branchCode"], 0.0), 2)
     outlets.sort(key=lambda o: o["branchName"])
-    total = _total(outlets)
+    total = {**_total(outlets), "grCorrection": round(sum(o["grCorrection"] for o in outlets), 2)}
     return {"period": {"from": start.isoformat(), "to": end.isoformat(), "soStart": day_a.isoformat(), "soEnd": day_b.isoformat(),
                        "month": month.isoformat(), "mdrEditable": bool(start.replace(day=1) == end.replace(day=1))},
             "outlets": outlets, "total": total}

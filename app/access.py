@@ -52,6 +52,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("cc.waste-review", "Waste Review", "Cost Control · Waste"),
     ("cc.ratio", "Outlet Ratio", "Cost Control · Analytics"),
     ("cc.cogs", "COGS & Usage", "Cost Control · Analytics"),
+    ("cc.goods-receipt", "Good Receipt", "Cost Control · Analytics"),
     ("mon.overview", "Overview", "Monitoring OPS"),
     ("mon.pic-check-in", "PIC Check In", "Monitoring OPS"),
     ("mon.surveyor-check-in", "Cost Control Check In", "Cost Control · Check In"),
@@ -236,6 +237,7 @@ SO_RULES: list[tuple[Optional[str], str, tuple[str, ...]]] = [
     ("POST", "counts/review", ("cc.reviews",)),
     ("POST", "counts/entries", ("cc.entry",)),
     ("POST", "counts/imports", ("cc.entry",)),
+    ("GET", "count-reports", ("cc.reports", "cc.reviews", "stock-opname")),  # SO history of Operations (2026-11-05)
     (None, "count-reports", ("cc.reports", "cc.reviews")),
     ("GET", "count-settings/types", ("stock-opname", *CC_PAGES)),  # names of the count types on every SO screen
     ("POST", "count-settings/types/preview", ("cc.types",)),

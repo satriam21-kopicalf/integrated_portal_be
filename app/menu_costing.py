@@ -623,6 +623,13 @@ def _purchases(d_from: date, d_to: date, branches: list[str]) -> dict[str, dict[
                    AND d.status_name <> ALL(%s) AND b.branch_code = ANY(%s) AND l.product_code IS NOT NULL
                  GROUP BY 1, 2, 3""", (d_from, d_to, list(SKIP_STATUSES), branches)):
         out.setdefault(r["branch_code"], {})[(r["product_code"], r["uom"])] = _f(r["qty"])
+    # the Good Receipts Cost Control corrected (receipt date, quantity; migration 072) change what was bought
+    from app import goods_receipt
+
+    for branch, items in goods_receipt.adjustments(d_from, d_to, branches)["qty"].items():
+        mine = out.setdefault(branch, {})
+        for key, dq in items.items():
+            mine[key] = mine.get(key, 0.0) + dq
     return out
 
 

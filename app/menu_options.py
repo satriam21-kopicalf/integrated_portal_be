@@ -21,7 +21,8 @@ from app.database import SCHEMA
 from app.scope import MAIN_COMPANY
 
 P = "integration_portal"
-SUGAR = re.compile(r"gula|sugar|syrup|sirup", re.I)
+# the sugar of a card: its gula / sugar items (2026-11-05: not the flavour syrups, Less Sugar keeps the butterscotch)
+SUGAR = re.compile(r"gula|sugar", re.I)
 TARGETS = ("sugar", "item")
 MODES = ("pct", "qty")
 UNIT_FACTOR = {("KG", "GR"): 1000, ("KG", "G"): 1000, ("L", "ML"): 1000, ("LTR", "ML"): 1000, ("LITER", "ML"): 1000}

@@ -7,6 +7,7 @@ CARD = {"code": "ESP", "name": "Es Kopi Calf Premium", "lines": [
     {"type": "item", "code": "RM-ESP", "name": "ESPRESSO PREMIUM BLEND", "qty": 18, "unit": "GR"},
     {"type": "item", "code": "RM-AREN", "name": "GULA AREN 1300GR", "qty": 25, "unit": "GR"},
     {"type": "item", "code": "PC-CUP", "name": "CUP ES", "qty": 1, "unit": "PCS"},
+    {"type": "item", "code": "RM-VAN", "name": "SYRUP DRIPP VANILLA 760ML", "qty": 9, "unit": "GR"},   # a flavour, not sugar
 ]}
 RULES = {"normal sugar": {"name": "Normal Sugar", "effect": "none", "lines": []},
          "less sugar": {"name": "Less Sugar", "effect": "adjust", "lines": [{"target": "sugar", "mode": "pct", "value": -50}]},

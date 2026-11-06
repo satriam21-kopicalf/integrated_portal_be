@@ -60,6 +60,7 @@ def _sold(monkeypatch, mapped, choices):
     monkeypatch.setattr(mc.db, "fetch", lambda sql, params=None: sold)
     monkeypatch.setattr(mc.db, "fetchrow", lambda sql, params=None: {"bills": 0, "days": 0})
     monkeypatch.setattr(mc, "extras", lambda: [])
+    monkeypatch.setattr(mc, "non_sales", lambda a, b, br: [{"reason": "CUPPING", "menu_id": "CALF:1", "name": "Es Kopi", "qty": 2, "bills": 1}])
     monkeypatch.setattr(menu_options, "ensure_days", lambda a, b: [])
     monkeypatch.setattr(menu_options, "sold", lambda a, b, br: choices)
     monkeypatch.setattr(menu_options, "rules", lambda: {})
@@ -74,7 +75,8 @@ def test_a_bundle_with_a_card_takes_over_its_packages(monkeypatch):
     got = _sold(monkeypatch, {"CALF:1": "KOPI", "CALF:271": "B3"}, choices)
     by = {m["id"]: m for m in got["menus"]}
     assert by["CALF:1"]["qty"] == 20 and by["CALF:271"]["qty"] == 10
-    assert got["system"]["RM-MILK"]["qty"] == 20 * 100 + 10 * 300  # no double count
+    assert got["system"]["RM-MILK"]["qty"] == 20 * 100 + 10 * 300 + 2 * 100  # no double count; 2 cuppings made
+    assert got["nonSales"] == [{"reason": "CUPPING", "bills": 1, "portions": 2.0, "unmapped": 0.0, "menus": {"KOPI": 2.0}}]
     assert got["unmapped"] == [{"id": "CALF:300", "name": "Bundling Kopi + Choco", "category": "BEVERAGE", "qty": 5,
                                 "sales": 300000, "viaPackages": True}]
     assert got["unruled"] == []  # the menus inside a bundle are no choices to rule

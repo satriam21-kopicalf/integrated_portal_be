@@ -19,6 +19,10 @@ Bundling    a card may hold other cards as lines (type menu: "3 x Es Kopi Calf P
             them (resolve) so a bundle uses the materials of its menus. A bundle with a card takes over the menus ESB
             records inside it as packages (their quantity sold with that bundle is left out of the menus, no double
             count); a bundle without a card whose contents are recorded as packages is counted through them.
+Non-sales   the menus of the ESB bills without a bill number (other cost: CUPPING, WASTE, COMPLIMENT, end product QC
+            …, by the payment method that names them) are made too: exploded through the cards into the system usage
+            (2026-11-06), apart from the sales; the waste entered in the portal (raw materials, premix) is no menu bill,
+            so the two never overlap.
 Selling     the list price of every menu from the POS menu master (its active price templates: DI = dine-in, OL =
 price       online), beside the HPP of the card as % HPP.
 """
@@ -450,6 +454,23 @@ def delete_extra(extra_id: int) -> bool:
         return conn.execute(f"DELETE FROM {P}.cc_extra_item WHERE id = %s", (extra_id,)).rowcount > 0
 
 
+def non_sales(d_from: date, d_to: date, branches: Optional[list[str]]) -> list[dict]:
+    """[{reason, menu_id, name, qty, bills}] the menus of the other-cost bills of ESB (finished, no bill number) by their
+    payment method (CUPPING, WASTE, COMPLIMENT …), straight from the transactions (the rollups keep the sales only)."""
+    from app.aggregates import PAY_METHOD
+    from app.esb_report import TYPE_CONDITIONS, active_line_sql
+    from app.database import TABLE_TRANSACTIONS
+    return db.fetch(
+        f"""SELECT {PAY_METHOD} AS reason, coalesce(h.company_code, %(main)s) || ':' || (m->>'menuID') AS menu_id,
+                   max(m->>'menuName') AS name, sum(coalesce(nullif(m->>'qty', '')::numeric, 0)) AS qty,
+                   count(DISTINCT h.sales_num)::int AS bills
+              FROM {TABLE_TRANSACTIONS} h, jsonb_array_elements(coalesce(h.raw_data->'salesMenus', '[]'::jsonb)) m
+             WHERE h.sales_date >= %(a)s::date AND h.sales_date < %(b)s::date + 1 AND {TYPE_CONDITIONS['other_cost']}
+               AND {active_line_sql('m')} AND coalesce(m->>'menuID', '') <> ''
+               AND (%(br)s::text[] IS NULL OR h.branch_code = ANY(%(br)s))
+             GROUP BY 1, 2""", {"a": d_from, "b": d_to, "br": branches, "main": MAIN_COMPANY})
+
+
 def _sold(d_from: date, d_to: date, branches: Optional[list[str]], cards: dict, mapped: dict, wip: dict, horizon: int,
           buffer_pct: float) -> dict:
     """The menus sold by the branches exploded through the cards (system usage, the plan) with the additional items."""
@@ -507,6 +528,24 @@ def _sold(d_from: date, d_to: date, branches: Optional[list[str]], cards: dict, 
             for target, amount in ((system, q), (plan, q / days * horizon * (1 + buffer_pct / 100))):
                 row = target.setdefault(k, {**option_rows[k], "qty": 0.0})
                 row["qty"] = row.get("qty", 0.0) + amount
+    # the menus made without a sale (ESB other-cost bills: cupping, waste, compliment, QC …): their materials are used too
+    reasons: dict[str, dict] = {}
+    try:
+        given = non_sales(d_from, d_to, branches)
+    except Exception:  # noqa: BLE001 - the transactions unreachable: the sales alone
+        given = []
+    for g in given:
+        r = reasons.setdefault(g["reason"], {"reason": g["reason"], "bills": 0, "portions": 0.0, "unmapped": 0.0, "menus": {}})
+        qty = _f(g["qty"])
+        r["bills"] += g["bills"]
+        r["portions"] += qty
+        code = mapped.get(g["menu_id"])
+        if not code:
+            r["unmapped"] += qty
+            continue
+        explode(cards[code], qty, wip, system)
+        explode(cards[code], qty / days * horizon * (1 + buffer_pct / 100), wip, plan)
+        r["menus"][code] = r["menus"].get(code, 0.0) + qty
     # items outside the cards: per bill, per portion sold (menus with a card) or per day of an outlet with sales
     base = db.fetchrow(
         f"""SELECT coalesce(sum(bills) FILTER (WHERE tx_type = 'sales'), 0) AS bills,
@@ -522,7 +561,7 @@ def _sold(d_from: date, d_to: date, branches: Optional[list[str]], cards: dict, 
             row = target.setdefault(key, {"code": e["code"], "name": e["name"], "unit": e["unit"], "price": e["price"], "extra": True})
             row["qty"] = row.get("qty", 0.0) + amount
         extra_rows.append({**e, "count": counts[e["basis"]], "used": round(used, 3)})
-    return {"system": system, "plan": plan, "menus": per_menu, "unmapped": unmapped, "extras": extra_rows, "counts": counts,
+    return {"nonSales": list(reasons.values()), "system": system, "plan": plan, "menus": per_menu, "unmapped": unmapped, "extras": extra_rows, "counts": counts,
             "options": option_of, "unruled": unruled, "optionsPending": len(pending),
             "allSales": sum(m["sales"] for m in per_menu) + sum(m["sales"] for m in unmapped) + choice_sales,
             "choiceSales": choice_sales}
@@ -547,15 +586,23 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
     price = prices_on(d_to, codes or None)
     # HPP of a portion of every card used
     hpp: dict[str, Optional[float]] = {}
+    def cost(v: dict) -> Optional[float]:
+        if v.get("code"):
+            return price.get(v["code"])
+        return v.get("price") if v.get("price") is not None else (0.0 if not v.get("isStock", True) else None)
     for code in {m["recipe"] for m in per_menu}:
         one: dict[str, dict] = {}
         explode(cards[code], 1, wip, one)
-        def cost(v: dict) -> Optional[float]:
-            if v.get("code"):
-                return price.get(v["code"])
-            return v.get("price") if v.get("price") is not None else (0.0 if not v.get("isStock", True) else None)
         missing = [v for v in one.values() if (v.get("code") or "price" in v) and cost(v) is None]
         hpp[code] = None if missing else sum(v["qty"] * (cost(v) or 0.0) for v in one.values())
+    for code in {c for r in got["nonSales"] for c in r["menus"]} - set(hpp):  # cards made only without a sale
+        one = {}
+        explode(cards[code], 1, wip, one)
+        hpp[code] = None if any((v.get("code") or "price" in v) and cost(v) is None for v in one.values())             else sum(v["qty"] * (cost(v) or 0.0) for v in one.values())
+    non_sales = [{"reason": r["reason"], "bills": r["bills"], "portions": round(r["portions"], 3), "unmapped": round(r["unmapped"], 3),
+                  "cost": round(sum(q * (hpp.get(c) or 0.0) for c, q in r["menus"].items()), 2),
+                  "unpriced": sum(1 for c in r["menus"] if hpp.get(c) is None)}
+                 for r in sorted(got["nonSales"], key=lambda x: -x["portions"])]
     for m in per_menu:
         unit = hpp.get(m["recipe"])
         # what the choices sold with the menu change (Less Sugar saves sugar, Extra Shot adds espresso …)
@@ -623,20 +670,22 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
                     "qty": need, "onHand": round(stock, 3) if stock is not None else None, "toOrder": order,
                     "value": round(need * p, 2) if p is not None else None, "orderValue": round(order * p, 2) if p is not None else None})
     extra_cost = sum((e["used"] * (unit_price({"code": e["code"], "price": e["price"]}) or 0.0)) for e in extra_rows)
+    non_sales_cost = sum(r["cost"] for r in non_sales)  # made and given away: a cost without a sale
     sales = sum(m["sales"] for m in per_menu)
     cogs = sum(m["cogs"] or 0 for m in per_menu)
     actual_cogs = sum(u["actualValue"] or 0 for u in usage) if covered else None
     return {"period": {"from": d_from.isoformat(), "to": d_to.isoformat(), "days": days, "horizon": horizon, "buffer": buffer_pct},
-            "menus": per_menu, "unmapped": got["unmapped"], "usage": usage,
+            "menus": per_menu, "unmapped": got["unmapped"], "usage": usage, "nonSales": non_sales,
             "options": {"unruled": got["unruled"], "pendingDays": got["optionsPending"]}, "mrp": mrp, "extras": extra_rows, "counts": got["counts"],
             "coverage": coverage,
             "stock": {"branches": actual["branches"], "covered": covered, "onHand": {k: have[k] for k in ("branches", "from", "to")}},
-            "total": {"sales": sales, "cogs": cogs + extra_cost, "menuCogs": cogs, "extraCogs": round(extra_cost, 2),
-                      "ratio": round((cogs + extra_cost) / sales, 6) if sales else None,
+            "total": {"sales": sales, "cogs": cogs + extra_cost + non_sales_cost, "menuCogs": cogs, "extraCogs": round(extra_cost, 2),
+                      "ratio": round((cogs + extra_cost + non_sales_cost) / sales, 6) if sales else None,
                       "menusMapped": len(per_menu), "menusUnmapped": sum(1 for u in got["unmapped"] if not u["viaPackages"]),
                       "menusViaPackages": sum(1 for u in got["unmapped"] if u["viaPackages"]),
                       "allSales": round(got["allSales"], 2), "choiceSales": round(got["choiceSales"], 2),
                       "unpriced": sum(1 for m in per_menu if m["hpp"] is None),
+                      "nonSalesCost": round(non_sales_cost, 2),
                       "systemValue": sum(u["systemValue"] or 0 for u in usage),
                       "actualValue": actual_cogs or 0,
                       "actualCogs": round(actual_cogs, 2) if actual_cogs is not None else None,

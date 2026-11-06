@@ -270,7 +270,7 @@ def sales_rows(f: Filters, start: date, end: date, group: tuple[str, ...] = (), 
         params["payment_method"] = payment_method
     measures = "sum(bills)::int AS bills, sum(subtotal) AS subtotal"
     if table == DAILY:
-        measures += ", sum(nett_sales) AS nett"
+        measures += ", sum(nett_sales) AS nett, sum(tax_total) AS tax, sum(taxed_bills)::int AS taxed_bills"
         table = f.daily_source(start, end, DAILY, CMP_DAILY)
     cols = "".join(f"{g}, " for g in group)
     group_by = f" GROUP BY {', '.join(str(i) for i in range(1, len(group) + 1))}" if group else ""
@@ -309,7 +309,9 @@ def totals(rows: list[dict]) -> dict:
     bills = sum(int(r["bills"] or 0) for r in rows)
     subtotal = sum(_f(r["subtotal"]) for r in rows)
     nett = sum(_f(r.get("nett")) for r in rows)
-    return {"bills": bills, "subtotal": subtotal, "nettSales": nett, "avgTicket": ratio(subtotal, bills) or 0.0}
+    tax = sum(_f(r.get("tax")) for r in rows)
+    return {"bills": bills, "subtotal": subtotal, "nettSales": nett, "avgTicket": ratio(subtotal, bills) or 0.0, "tax": tax,
+            "taxedBills": sum(int(r.get("taxed_bills") or 0) for r in rows)}
 
 
 def branch_names() -> dict[str, str]:
@@ -360,11 +362,15 @@ def build_kpis(f: Filters) -> dict:
     while day <= f.end:
         t = totals([by_day[day]] if day in by_day else [])
         daily.append({"date": day.isoformat(), "subtotal": t["subtotal"], "nettSales": t["nettSales"],
-                      "bills": t["bills"], "avgTicket": r2(t["avgTicket"])})
+                      "bills": t["bills"], "avgTicket": r2(t["avgTicket"]), "tax": r2(t["tax"])})
         day += timedelta(days=1)
     kpis = {}
-    for key, field in (("sales", "subtotal"), ("nettSales", "nettSales"), ("bills", "bills"), ("avgTicket", "avgTicket")):
+    for key, field in (("sales", "subtotal"), ("nettSales", "nettSales"), ("bills", "bills"), ("avgTicket", "avgTicket"),
+                       ("tax", "tax")):
         kpis[key] = {"value": r2(c[field]), "previous": r2(p[field]), "deltaPct": delta_pct(c[field], p[field])}
+    # Tax / PB1 (migration 074): its rate on the gross sales and the share of the bills taxed
+    kpis["tax"].update({"rate": r2(ratio(c["tax"] * 100, c["subtotal"])), "taxedBills": c["taxedBills"],
+                        "taxedPct": r2(ratio(c["taxedBills"] * 100, c["bills"]))})
     return {"kpis": kpis, "daily": daily, "freshness": freshness()}
 
 
@@ -447,6 +453,40 @@ def build_channels(f: Filters, granularity: str) -> dict:
         v["subtotal"] += _f(r["subtotal"])
         v["bills"] += int(r["bills"])
     return {"granularity": granularity, "channels": channels, "series": list(series.values())}
+
+
+def build_tax(f: Filters, granularity: str) -> dict:
+    """Tax / PB1 (migration 074): the total with its rate on the gross sales, per channel, per branch (the branches
+    without a tax in the period listed apart) and over time, against the comparison period."""
+    cur = sales_rows(f, f.start, f.end, ("sales_date", "channel", "branch_code"))
+    c, p = totals(cur), totals(prev_rows(f))
+    names = branch_names()
+
+    def group(key: str) -> list[dict]:
+        out: dict[str, list] = {}
+        for r in cur:
+            out.setdefault(r[key], []).append(r)
+        rows = []
+        for k, rs in out.items():
+            t = totals(rs)
+            rows.append({"key": k, "name": names.get(k, k) if key == "branch_code" else k, "tax": r2(t["tax"]), "subtotal": r2(t["subtotal"]),
+                         "bills": t["bills"], "taxedBills": t["taxedBills"], "rate": r2(ratio(t["tax"] * 100, t["subtotal"])),
+                         "taxedPct": r2(ratio(t["taxedBills"] * 100, t["bills"])), "share": r2(ratio(t["tax"] * 100, c["tax"]))})
+        return sorted(rows, key=lambda x: (-(x["tax"] or 0), -(x["subtotal"] or 0)))
+    series = {b["date"]: {"date": b["date"].isoformat(), "days": b["days"], "tax": 0.0, "subtotal": 0.0} for b in buckets(f, granularity)}
+    for r in cur:
+        s = series[bucket_of(r["sales_date"], granularity)]
+        s["tax"] += _f(r.get("tax"))
+        s["subtotal"] += _f(r["subtotal"])
+    branches = group("branch_code")
+    return {"granularity": granularity,
+            "total": {"tax": r2(c["tax"]), "subtotal": r2(c["subtotal"]), "rate": r2(ratio(c["tax"] * 100, c["subtotal"])),
+                      "bills": c["bills"], "taxedBills": c["taxedBills"], "taxedPct": r2(ratio(c["taxedBills"] * 100, c["bills"])),
+                      "previous": r2(p["tax"]), "deltaPct": delta_pct(c["tax"], p["tax"]),
+                      "branches": sum(1 for b in branches if b["tax"]), "untaxedBranches": sum(1 for b in branches if not b["tax"])},
+            "channels": group("channel"), "branches": branches,
+            "series": [{**s, "tax": r2(s["tax"]), "subtotal": r2(s["subtotal"]), "rate": r2(ratio(s["tax"] * 100, s["subtotal"]))}
+                       for s in series.values()]}
 
 
 def build_branches(f: Filters, granularity: str) -> dict:
@@ -1371,6 +1411,15 @@ def get_deductions(dateFrom: Optional[str] = None, dateTo: Optional[str] = None,
                    branch: Optional[str] = None, channel: Optional[str] = None):
     """Void/Cancelled, Other Cost (CUPPING, WASTE, ...) and open bills per day, branch and method."""
     return endpoint("deductions", "", build_deductions, dateFrom, dateTo, branch, channel)
+
+
+@router.get("/tax")
+def get_tax(dateFrom: Optional[str] = None, dateTo: Optional[str] = None, branch: Optional[str] = None,
+            channel: Optional[str] = None, granularity: Optional[str] = None):
+    """Tax / PB1 per channel, branch and over time (migration 074)."""
+    def build(f: Filters) -> dict:
+        return build_tax(f, resolve_granularity(granularity, f.days))
+    return endpoint("tax", granularity or "", build, dateFrom, dateTo, branch, channel)
 
 
 @router.get("/monthly")

@@ -40,6 +40,8 @@ def _num(expr: str) -> str:
 
 
 CHANNEL = _txt("h.raw_data->>'visitPurposeName'")
+# Tax / PB1 of a bill (migration 074): ESB's VAT plus its other tax, both on the subtotal (dine-in and takeaway)
+TAX_SQL = "(" + _num("h.raw_data->>'vatTotal'") + " + " + _num("h.raw_data->>'otherTaxTotal'") + ")"
 PAY_TYPE = _txt("h.raw_data->'salesPayments'->0->>'paymentMethodTypeName'")
 PAY_METHOD = _txt("h.raw_data->'salesPayments'->0->>'paymentMethodName'")
 DAY_FILTER = "h.sales_date >= %(day)s::date AND h.sales_date < %(day)s::date + 1"
@@ -56,6 +58,7 @@ WITH bill AS (
            {_num("h.raw_data->>'menuDiscountTotal'")} AS menu_discount,
            {_num("h.raw_data->>'promotionDiscount'")} AS promotion_discount,
            {_num("h.raw_data->>'voucherDiscountTotal'")} AS voucher_discount,
+           {TAX_SQL} AS tax,
            m.lines, m.qty, m.has_bev, m.has_food
     FROM {TABLE_TRANSACTIONS} h
     CROSS JOIN LATERAL (
@@ -74,7 +77,8 @@ SELECT %(day)s::date, branch_code, channel, payment_type, payment_method, tx_typ
        sum(discount_total), sum(menu_discount), sum(promotion_discount), sum(voucher_discount),
        sum(lines), sum(qty),
        count(*) FILTER (WHERE has_bev), count(*) FILTER (WHERE has_food),
-       count(*) FILTER (WHERE has_bev AND has_food)
+       count(*) FILTER (WHERE has_bev AND has_food),
+       sum(tax), count(*) FILTER (WHERE tax > 0)
 FROM bill
 GROUP BY branch_code, channel, payment_type, payment_method, tx_type
 """

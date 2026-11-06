@@ -14,6 +14,9 @@ A PIC checks in at the outlet he visits:
     every Kopi Calf outlet is 50 m (2026-11-02, migration 066).
   * how often: a PIC checks in at an outlet at most the check-ins per day of its branch group (Monitoring → Branch
     groups, migration 066; empty = once a day).
+Cost Control Clock In / Clock Out (migration 073, 2026-11-06): the surveyor check in is the clock in of a visit; leaving
+the outlet the surveyor clocks out with a selfie and the position against the outlet kept at the clock in (outside the
+radius: a reason). One open visit at a time (within OPEN_HOURS): a new clock in waits for its clock out.
 """
 import base64
 import binascii
@@ -37,6 +40,7 @@ ACCURACY_CREDIT_M = 25  # the GPS accuracy counts at most 25 m on top of the 50 
 GLOBAL_ROLES = ("superadmin", "cost_control")
 # pic: PIC Check In · surveyor: Surveyor Check In (migration 039, every Kopi Calf branch whatever the account's scope)
 KINDS = ("pic", "surveyor")
+OPEN_HOURS = 24  # a visit without a clock out stays open (blocks the next clock in) this long
 WIB_TZ = ZoneInfo("Asia/Jakarta")
 _DATA_URL = re.compile(r"^data:(image/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=\s]+)$")
 
@@ -233,6 +237,9 @@ def create(user: dict, branch_code: str, photo: str, lat: float, lng: float, acc
     branch = next((b for b in branch_options(user, every=kind == "surveyor") if b["code"] == branch_code), None)
     if branch is None:
         raise CheckInError("Cabang tidak tersedia untuk akun Anda")
+    if kind == "surveyor" and (o := open_visit(str(user["id"]))):
+        raise CheckInError(f"Clock out dulu dari {o['branch_name']} (clock in {o['visited_at'].astimezone(WIB_TZ):%H:%M} WIB) "
+                           "sebelum clock in di outlet lain")
     if done_today(str(user["id"]), kind).get(branch["code"]):
         limit = daily_limits([branch["code"]]).get(branch["code"], 1) if kind == "pic" else 1
         raise CheckInError(f"Anda sudah check in di {branch['name']} hari ini" + (f" ({limit}x, batas grup outlet)" if limit > 1 else "")
@@ -269,6 +276,61 @@ def create(user: dict, branch_code: str, photo: str, lat: float, lng: float, acc
             "riskLevel": risk["level"], "riskSignals": [s["code"] for s in risk["signals"]]}
 
 
+def open_visit(user_id: str) -> Optional[dict]:
+    """The surveyor's latest clock in without a clock out of the last OPEN_HOURS hours."""
+    return db.fetchrow(f"""SELECT id::text, branch_code, branch_name, visited_at FROM {T}
+                           WHERE user_id::text = %s AND kind = 'surveyor' AND out_at IS NULL
+                             AND visited_at > now() - make_interval(hours => %s)
+                           ORDER BY visited_at DESC LIMIT 1""", (user_id, OPEN_HOURS))
+
+
+def clock_out(user: dict, checkin_id: str, photo: str, lat: float, lng: float, accuracy: Optional[float],
+              located_at: Optional[datetime], device_time: Optional[datetime], note: Optional[str], device: Optional[str],
+              ip: Optional[str], sent_at: Optional[datetime] = None, samples: Optional[list] = None,
+              touch: Optional[bool] = None, webdriver: Optional[bool] = None) -> dict:
+    """The clock out of the surveyor's own open visit: selfie with a face, the position against the outlet of the clock in."""
+    row = db.fetchrow(f"""SELECT id::text, branch_code, branch_name, visited_at, out_at, outlet_latitude, outlet_longitude, radius_m
+                          FROM {T} WHERE id::text = %s AND user_id::text = %s AND kind = 'surveyor'""", (checkin_id, str(user["id"])))
+    if row is None:
+        raise CheckInError("Clock in tidak ditemukan")
+    if row["out_at"] is not None:
+        raise CheckInError(f"Sudah clock out dari {row['branch_name']}")
+    if (datetime.now(timezone.utc) - row["visited_at"]).total_seconds() > OPEN_HOURS * 3600:
+        raise CheckInError(f"Clock in {row['branch_name']} sudah lebih dari {OPEN_HOURS} jam dan tidak bisa di-clock out lagi")
+    photo_type, data = parse_photo(photo)
+    faces = count_faces(data)
+    if faces is None:
+        raise CheckInError("Foto tidak dapat dibaca, ambil ulang")
+    if faces == 0:
+        raise CheckInError("Wajah tidak terdeteksi. Ambil ulang foto dengan wajah Anda terlihat jelas")
+    outlet = {"latitude": _num(row["outlet_latitude"]), "longitude": _num(row["outlet_longitude"]), "radius_m": row["radius_m"]}
+    j = judge(lat, lng, accuracy, outlet)
+    note = (note or "").strip()[:500] or None
+    if j["outside_radius"] and not note:
+        raise CheckInError(f"Anda berada {j['distance_m']} m dari outlet, di luar radius {row['radius_m']} m. "
+                           "Tulis alasannya di catatan untuk tetap clock out")
+    risk = assess(str(user["id"]), lat, lng, accuracy, outlet, datetime.now(WIB_TZ), located_at, sent_at, samples, device,
+                  touch, webdriver)
+    out = db.fetchrow(
+        f"""UPDATE {T} SET out_at = now(), out_device_time = %(dt)s, out_latitude = %(lat)s, out_longitude = %(lng)s,
+                out_accuracy_m = %(acc)s, out_located_at = %(la)s, out_distance_m = %(d)s, out_outside_radius = %(o)s,
+                out_low_accuracy = %(low)s, out_face_count = %(faces)s, out_photo = %(photo)s, out_photo_type = %(pt)s,
+                out_note = %(note)s, out_device = %(dev)s, out_ip = %(ip)s, out_risk_level = %(rl)s, out_risk_signals = %(rs)s::jsonb
+            WHERE id::text = %(id)s AND out_at IS NULL RETURNING out_at""",
+        {"id": checkin_id, "dt": device_time, "lat": lat, "lng": lng, "acc": accuracy, "la": located_at, "d": j["distance_m"],
+         "o": j["outside_radius"], "low": j["low_accuracy"], "faces": faces, "photo": data, "pt": photo_type, "note": note,
+         "dev": (device or "")[:300] or None, "ip": ip, "rl": risk["level"], "rs": json.dumps(risk["signals"], ensure_ascii=False)})
+    if out is None:
+        raise CheckInError(f"Sudah clock out dari {row['branch_name']}")
+    return {"id": checkin_id, "branchCode": row["branch_code"], "branchName": row["branch_name"], "outAt": out["out_at"].isoformat(),
+            "durationMin": round((out["out_at"] - row["visited_at"]).total_seconds() / 60), "faces": faces, **_camel(j),
+            "riskLevel": risk["level"], "riskSignals": [s["code"] for s in risk["signals"]]}
+
+
+def _num(v: Any) -> Optional[float]:
+    return float(v) if v is not None else None
+
+
 def _camel(j: dict) -> dict:
     return {"distanceM": j["distance_m"], "outsideRadius": j["outside_radius"], "lowAccuracy": j["low_accuracy"]}
 
@@ -278,7 +340,8 @@ def _camel(j: dict) -> dict:
 COLUMNS = """c.id::text, c.user_id::text, c.username, c.full_name, c.role, c.branch_code, c.branch_name, c.visited_at,
     c.device_time, c.latitude, c.longitude, c.accuracy_m, c.located_at, c.outlet_latitude, c.outlet_longitude, c.radius_m,
     c.distance_m, c.outside_radius, c.low_accuracy, c.face_count, c.note, c.risk_level, c.risk_signals, c.review_status,
-    c.review_note, c.reviewed_by, c.reviewed_at"""
+    c.review_note, c.reviewed_by, c.reviewed_at, c.kind, c.out_at, c.out_latitude, c.out_longitude, c.out_accuracy_m,
+    c.out_distance_m, c.out_outside_radius, c.out_low_accuracy, c.out_face_count, c.out_note, c.out_risk_level, c.out_risk_signals"""
 
 
 def _view(r: dict, risk: bool = True) -> dict:
@@ -295,7 +358,20 @@ def _view(r: dict, risk: bool = True) -> dict:
         "outletLatitude": num(r["outlet_latitude"]), "outletLongitude": num(r["outlet_longitude"]), "radiusM": r["radius_m"],
         "distanceM": r["distance_m"], "outsideRadius": r["outside_radius"], "lowAccuracy": r["low_accuracy"],
         "outletLocated": r["outlet_latitude"] is not None, "faces": r["face_count"], "note": r["note"],
+        **({"clockOut": _clock_out(r, risk)} if r.get("kind") == "surveyor" else {}),
     }
+
+
+def _clock_out(r: dict, risk: bool) -> Optional[dict]:
+    """The clock out of a Cost Control visit (None while open) with the minutes at the outlet."""
+    if not r.get("out_at"):
+        return None
+    num = lambda v: float(v) if v is not None else None  # noqa: E731
+    return {"at": r["out_at"].isoformat(), "durationMin": round((r["out_at"] - r["visited_at"]).total_seconds() / 60),
+            "latitude": num(r["out_latitude"]), "longitude": num(r["out_longitude"]), "accuracyM": num(r["out_accuracy_m"]),
+            "distanceM": r["out_distance_m"], "outsideRadius": bool(r["out_outside_radius"]), "lowAccuracy": bool(r["out_low_accuracy"]),
+            "faces": r["out_face_count"], "note": r["out_note"],
+            **({"riskLevel": r.get("out_risk_level") or "none", "riskSignals": r.get("out_risk_signals") or []} if risk else {})}
 
 
 def recent_of(user_id: str, limit: int = 10, kind: str = "pic") -> list[dict]:
@@ -360,6 +436,8 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], user_
         where.append("c.risk_level IN ('medium', 'high')")
     elif location == "alert":
         where.append("(c.outside_radius OR c.risk_level IN ('medium', 'high'))")
+    elif location == "open":  # Cost Control visits without a clock out
+        where.append("c.out_at IS NULL")
     elif location == "unreviewed":
         where.append("(c.outside_radius OR c.risk_level IN ('medium', 'high')) AND c.review_status IS NULL")
     cond = " AND ".join(where)
@@ -372,7 +450,10 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], user_
                    count(*) FILTER (WHERE c.risk_level IN ('medium', 'high'))::int AS suspect,
                    count(*) FILTER (WHERE c.risk_level = 'high')::int AS suspect_high,
                    count(*) FILTER (WHERE (c.outside_radius OR c.risk_level IN ('medium', 'high'))
-                                    AND c.review_status IS NULL)::int AS unreviewed
+                                    AND c.review_status IS NULL)::int AS unreviewed,
+                   count(*) FILTER (WHERE c.kind = 'surveyor' AND c.out_at IS NULL)::int AS open,
+                   count(*) FILTER (WHERE c.out_outside_radius)::int AS out_outside,
+                   round(avg(extract(epoch FROM c.out_at - c.visited_at) / 60))::int AS avg_minutes
             FROM {T} c WHERE {cond}""", params)
     pics = db.fetch(
         f"""SELECT c.user_id::text AS id, COALESCE(max(c.full_name), max(c.username)) AS name, count(*)::int AS n
@@ -380,8 +461,11 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], user_
     return {"data": [_view(r) for r in rows], "summary": s, "pics": pics, "truncated": len(rows) >= limit}
 
 
-def photo_of(checkin_id: str) -> Optional[dict]:
-    return db.fetchrow(f"SELECT user_id::text, branch_code, kind, photo, photo_type FROM {T} WHERE id::text = %s", (checkin_id,))
+def photo_of(checkin_id: str, out: bool = False) -> Optional[dict]:
+    """The selfie of the check in (out: of the clock out, None while there is none)."""
+    cols = "out_photo AS photo, out_photo_type AS photo_type" if out else "photo, photo_type"
+    row = db.fetchrow(f"SELECT user_id::text, branch_code, kind, {cols} FROM {T} WHERE id::text = %s", (checkin_id,))
+    return row if row and row["photo"] is not None else None
 
 
 def review(checkin_id: str, status: str, note: Optional[str], user: dict, branches: Optional[tuple],

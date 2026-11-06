@@ -129,3 +129,47 @@ def test_outside_radius_needs_a_note_and_risk_is_hidden_from_the_pic(anon, store
     assert r.status_code == 201 and r.json()["outsideRadius"] is True
     assert "riskLevel" not in r.json() and saved["rl"] == "high" and "webdriver" in saved["rs"]
     assert anon.post("/api/monitoring/pic-check-in/x/review", json={"status": "valid"}).status_code == 403  # no monitoring page
+
+
+def _out_row(**kw):
+    return {"id": "c1", "branch_code": "CCI01", "branch_name": "Kopi Calf Kemang", "out_at": None,
+            "visited_at": datetime.now(timezone.utc), "outlet_latitude": -6.2607, "outlet_longitude": 106.8137, "radius_m": 50, **kw}
+
+
+def test_clock_out_of_the_own_open_visit(monkeypatch):
+    """Cost Control Clock Out (migration 073): a face, the position against the outlet of the clock in, once."""
+    from datetime import timedelta
+    rows = {"select": _out_row()}
+    written = {}
+
+    def fetchrow(sql, params=None):
+        if sql.lstrip().startswith("UPDATE"):
+            written.update(params)
+            return {"out_at": rows["select"]["visited_at"] + timedelta(minutes=95)}
+        return rows["select"]
+    monkeypatch.setattr(pic_checkin.db, "fetchrow", fetchrow)
+    monkeypatch.setattr(pic_checkin, "count_faces", lambda data: 1)
+    monkeypatch.setattr(pic_checkin, "previous_positions", lambda user_id, limit=300: [])
+    user = {"id": "u1", "username": "cc", "role": "cost_control"}
+    out = pic_checkin.clock_out(user, "c1", _jpeg(), -6.2608, 106.8138, 10, None, None, None, None, None)
+    assert out["durationMin"] == 95 and not out["outsideRadius"] and written["o"] is False
+    with pytest.raises(pic_checkin.CheckInError, match="luar radius"):  # ~300 m away without a reason
+        pic_checkin.clock_out(user, "c1", _jpeg(), -6.2580, 106.8137, 10, None, None, None, None, None)
+    rows["select"] = _out_row(out_at=datetime.now(timezone.utc))
+    with pytest.raises(pic_checkin.CheckInError, match="Sudah clock out"):
+        pic_checkin.clock_out(user, "c1", _jpeg(), -6.2608, 106.8138, 10, None, None, None, None, None)
+    rows["select"] = _out_row(visited_at=datetime.now(timezone.utc) - timedelta(hours=30))
+    with pytest.raises(pic_checkin.CheckInError, match="24 jam"):
+        pic_checkin.clock_out(user, "c1", _jpeg(), -6.2608, 106.8138, 10, None, None, None, None, None)
+    rows["select"] = None
+    with pytest.raises(pic_checkin.CheckInError, match="tidak ditemukan"):
+        pic_checkin.clock_out(user, "c1", _jpeg(), -6.2608, 106.8138, 10, None, None, None, None, None)
+
+
+def test_a_new_clock_in_waits_for_the_clock_out(monkeypatch):
+    monkeypatch.setattr(pic_checkin, "branch_options", lambda user, every=False: [KEMANG])
+    monkeypatch.setattr(pic_checkin, "open_visit", lambda user_id: {"id": "c0", "branch_name": "Kopi Calf Tebet",
+                                                                    "visited_at": datetime(2026, 11, 6, 2, 0, tzinfo=timezone.utc)})
+    with pytest.raises(pic_checkin.CheckInError, match=r"Clock out dulu dari Kopi Calf Tebet \(clock in 09:00 WIB\)"):
+        pic_checkin.create({"id": "u1", "username": "cc", "role": "cost_control"}, "CCI01", _jpeg(), -6.2608, 106.8138, 10,
+                           None, None, None, None, None, kind="surveyor")

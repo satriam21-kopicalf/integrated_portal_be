@@ -151,7 +151,7 @@ def test_portal_refuses_operations_accounts(page_access, monkeypatch):
 def test_roles_of_the_pics_and_the_outlets():
     pic = set(access.DEFAULT_ROLE_PAGES["user"])
     assert pic == {"overview", "sales", "stock-opname", "waste", "guide", "form.pic-check-in", "form.product", "form.outlet",
-                   "form.damaged-equipment", "form.pengajuan"}
+                   "form.damaged-equipment", "form.pengajuan", "form.stock-transfer"}
     assert pic <= access.OPERATIONS_PAGES
     assert access.so_role({"id": "x", "role": "outlet"}) == "user"  # the outlet accounts count as crew in kopicalf
     from app import accounts

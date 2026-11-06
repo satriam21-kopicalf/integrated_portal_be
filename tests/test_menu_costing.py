@@ -55,17 +55,23 @@ def test_actual_usage_from_the_stock_opname_and_purchases(monkeypatch):
         if "stock_opname" in sql:
             return [{"doc_num": d, "product_code": "RM-MILK", "uom": "GR", "qty": q} for d, q in (("SO-1", 5000), ("SO-2", 2000), ("SO-7", 9))
                     if d in params[0]]
-        assert params[3] == ["A", "C"]  # only the branches with both counts
-        return [{"branch_code": "A", "product_code": "RM-MILK", "uom": "GR", "qty": 10000},
-                {"branch_code": "A", "product_code": "RM-MILK", "uom": "PACK", "qty": 3},       # A has no pack factor: left out
-                {"branch_code": "A", "product_code": "RM-MILK", "uom": "BTL", "qty": 2},        # 2 × 946 GR (item master)
-                {"branch_code": "C", "product_code": "RM-MILK", "uom": "PACK", "qty": 2}]       # C: the count list says 1000 GR
+        raise AssertionError(sql)
     monkeypatch.setattr(mc.db, "fetch", fetch)
+    from app import stock_moves
+
+    def moves(a, b, branches):
+        assert branches == ["A", "C"]  # only the branches with both counts
+        return {"A": {"received": {("RM-MILK", "GR"): 10000.0, ("RM-MILK", "PACK"): 3.0,  # A has no pack factor: left out
+                                   ("RM-MILK", "BTL"): 2.0},                            # 2 × 946 GR (item master)
+                      "delivered": {("RM-MILK", "GR"): -400.0}},                         # sent to the warehouse
+                "C": {"received": {("RM-MILK", "PACK"): 2.0}}}                           # C: the count list says 1000 GR
+    monkeypatch.setattr(stock_moves, "moves", moves)
     out = mc.actual_usage(date(2026, 11, 1), date(2026, 11, 7), None, {"RM-MILK": "GR"})
     assert out["covered"] == ["A", "C"]
     milk = out["items"]["RM-MILK"]
-    assert milk["start"] == 5000 + 1500 and milk["bought"] == 10000 + 1892 + 2000 and milk["end"] == 2000 + 500
-    assert milk["actual"] == (5000 + 10000 + 1892 - 2000) + (1500 + 2000 - 500) and milk["skipped"] == {"PACK": 3}
+    assert milk["start"] == 5000 + 1500 and milk["bought"] == 10000 + 1892 + 2000 - 400 and milk["end"] == 2000 + 500
+    assert milk["actual"] == (5000 + 10000 + 1892 - 400 - 2000) + (1500 + 2000 - 500) and milk["skipped"] == {"PACK": 3}
+    assert milk["moves"] == {"received": 10000 + 1892 + 2000, "delivered": -400}
     c = next(b for b in out["branches"] if b["code"] == "C")
     assert c["start"]["source"] == "portal" and c["end"]["refs"] == ["SC-2"]
 

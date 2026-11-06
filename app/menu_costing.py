@@ -584,6 +584,7 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
                       "soStart": round(a["start"], 3) if a else None, "purchased": round(a["bought"], 3) if a else None,
                       "soEnd": round(a["end"], 3) if a else None, "actual": round(a["actual"], 3) if a else None,
                       "purchasedOther": [{"uom": k, "qty": round(q, 3)} for k, q in sorted(a["skipped"].items())] if a else [],
+                      "moves": {k: round(q, 3) for k, q in a["moves"].items()} if a else {},
                       "variance": round(a["actual"] - v["qty"], 3) if a else None,
                       "price": p, "systemValue": round(v["qty"] * p, 2) if p is not None else None,
                       "actualValue": round(a["actual"] * p, 2) if a and p is not None else None})
@@ -723,28 +724,6 @@ def stock_at(portal_day: date, esb_day: date, branches: Optional[list[str]], bac
     return {**esb, **portal}
 
 
-def _purchases(d_from: date, d_to: date, branches: list[str]) -> dict[str, dict[tuple[str, str], float]]:
-    """{branch: {(product code, UOM): qty}} of the ESB purchase invoices of the period."""
-    out: dict[str, dict[tuple[str, str], float]] = {}
-    for r in db.fetch(
-            f"""SELECT b.branch_code, l.product_code, upper(coalesce(l.uom_name, '')) AS uom, sum(l.qty) AS qty
-                  FROM {SCHEMA}.erp_documents d
-                  JOIN {SCHEMA}.erp_document_lines l ON l.module = d.module AND l.doc_num = d.doc_num AND l.line_type = 'detail'
-                  JOIN {SCHEMA}.master_branches b ON b.branch_id::text = d.branch_id::text
-                 WHERE d.module = 'purchase_invoice' AND d.doc_date BETWEEN %s AND %s AND d.deleted_at IS NULL
-                   AND d.status_name <> ALL(%s) AND b.branch_code = ANY(%s) AND l.product_code IS NOT NULL
-                 GROUP BY 1, 2, 3""", (d_from, d_to, list(SKIP_STATUSES), branches)):
-        out.setdefault(r["branch_code"], {})[(r["product_code"], r["uom"])] = _f(r["qty"])
-    # the Good Receipts Cost Control corrected (receipt date, quantity; migration 072) change what was bought
-    from app import goods_receipt
-
-    for branch, items in goods_receipt.adjustments(d_from, d_to, branches)["qty"].items():
-        mine = out.setdefault(branch, {})
-        for key, dq in items.items():
-            mine[key] = mine.get(key, 0.0) + dq
-    return out
-
-
 def item_units(codes: list[str]) -> dict[str, tuple[str, dict[str, float]]]:
     """{item code: (base unit, {UOM: base units in one})} of kc_master (the packs of an item, e.g. PCS = 500 GR)."""
     out: dict[str, tuple[str, dict[str, float]]] = {}
@@ -780,14 +759,16 @@ def _bought(rows: dict[tuple[str, str], float], code: str, unit: str, esb: Optio
 
 
 def actual_usage(d_from: date, d_to: date, branches: Optional[list[str]], units: dict[str, str]) -> dict:
-    """SO awal + purchases − SO akhir per item (in the unit of the recipe cards, `units`) over the branches that have
+    """SO awal + the moves in and out (goods received, outlet purchases, production, deliveries, returns;
+    app/stock_moves.py) − SO akhir per item (in the unit of the recipe cards, `units`) over the branches that have
     both counts: SO awal = the stock at the start of d_from, SO akhir = the stock at the end of d_to (stock_at).
     {items: {code: {start, bought, end, actual, skipped: {UOM: qty}}}, branches: [{code, start, end}], covered: [codes]}."""
     try:
         start = stock_at(d_from, d_from - timedelta(days=1), branches)
         end = stock_at(d_to + timedelta(days=1), d_to, branches)
         covered = sorted(b for b in start if b in end)
-        bought = _purchases(d_from, d_to, covered) if covered else {}
+        from app import stock_moves
+        bought = stock_moves.moves(d_from, d_to, covered) if covered else {}
         try:
             packs = item_units(sorted(units))
         except Exception:  # noqa: BLE001 - no item master: purchases in the unit of the card only
@@ -805,10 +786,14 @@ def actual_usage(d_from: date, d_to: date, branches: Optional[list[str]], units:
             va, vz = to_unit(qa, ua, unit), to_unit(qz, uz, unit)
             if va is None or vz is None:
                 continue  # counted in a unit that cannot be compared with the card
-            row = items.setdefault(code, {"start": 0.0, "bought": 0.0, "end": 0.0, "skipped": {}})
-            got = _bought(bought.get(b, {}), code, unit, a["esb"].get(code) or z["esb"].get(code), packs.get(code), row["skipped"])
+            row = items.setdefault(code, {"start": 0.0, "bought": 0.0, "end": 0.0, "skipped": {}, "moves": {}})
+            esb = a["esb"].get(code) or z["esb"].get(code)
+            for kind, rows in bought.get(b, {}).items():  # every move in or out (app/stock_moves.py), signed
+                got = _bought(rows, code, unit, esb, packs.get(code), row["skipped"])
+                if got:
+                    row["moves"][kind] = row["moves"].get(kind, 0.0) + got
+                    row["bought"] += got
             row["start"] += va
-            row["bought"] += got
             row["end"] += vz
     for row in items.values():
         row["actual"] = row["start"] + row["bought"] - row["end"]

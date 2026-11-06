@@ -7,7 +7,7 @@ changed. Cost Control corrects, with a reason and at least one evidence file:
 A new correction of the same date / line replaces the previous one (kept as history); a correction can be cancelled.
 
 adjustments() gives what the corrections change in a period — quantities per branch × item × unit and their value —
-for the COGS & Usage of the Sales Calculator (menu_costing._purchases) and the Outlet Ratio (ratio.ratio). A line is
+for the COGS & Usage of the Sales Calculator (app/stock_moves.py) and the Outlet Ratio (ratio.ratio). A line is
 valued with the price of its purchase order (GR ref_num), else the Pricelist (× the pack factor), else not at all.
 """
 import base64
@@ -235,7 +235,7 @@ def adjustments(d_from: date, d_to: date, branches: Optional[list[str]] = None) 
                  WHERE (dc.id IS NOT NULL OR qc.id IS NOT NULL) AND d.status_name <> ALL(%(skip)s)
                    AND (d.doc_date BETWEEN %(a)s AND %(b)s OR coalesce(dc.new_date, d.doc_date) BETWEEN %(a)s AND %(b)s)
                    {_scope_sql(branches)}""",
-            {"a": d_from, "b": d_to, "br": branches or [], "skip": list(SKIP_STATUSES)})
+            {"a": d_from, "b": d_to, "br": branches or [], "skip": list(SKIP_STATUSES) + ["New", "Draft"]})  # as app/stock_moves.py
     except Exception:  # noqa: BLE001 - migration 072 not applied yet: no corrections
         return out
     fallback = _fallback_prices([r["product_code"] for r in rows if r["price"] is None and r["product_code"]], d_to)

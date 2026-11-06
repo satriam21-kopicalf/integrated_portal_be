@@ -588,6 +588,25 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
                       "variance": round(a["actual"] - v["qty"], 3) if a else None,
                       "price": p, "systemValue": round(v["qty"] * p, 2) if p is not None else None,
                       "actualValue": round(a["actual"] * p, 2) if a and p is not None else None})
+    # SO coverage (2026-11-06): the stock items the cards use that the counts of both ends hold; an item missing from the
+    # SO lists has no actual usage, so its system value stays out of the actual COGS
+    stock_rows = [u for u in usage if u["code"] and u["isStock"] and not u["extra"] and u["systemValue"]]
+    counted = [u for u in stock_rows if u["actual"] is not None]
+    coverage = {"items": len(stock_rows), "counted": len(counted),
+                "value": round(sum(u["systemValue"] for u in stock_rows), 2),
+                "countedValue": round(sum(u["systemValue"] for u in counted), 2),
+                "missing": [{"code": u["code"], "name": u["name"], "systemValue": u["systemValue"]}
+                            for u in sorted(stock_rows, key=lambda x: -x["systemValue"]) if u["actual"] is None][:30]} if covered else None
+    # waste recorded (not rejected) by the branches with both counts: the part of actual − system it explains (2026-11-06)
+    waste_value = None
+    if covered:
+        try:
+            from app import waste
+            w = waste.with_values(db.fetch(f"""SELECT * FROM {waste.T} WHERE business_date BETWEEN %s AND %s
+                                                 AND branch_code = ANY(%s) AND status <> 'rejected'""", (d_from, d_to, covered)))
+            waste_value = round(sum(v["value"] or 0 for v in w), 2)
+        except Exception:  # noqa: BLE001 - no waste data: the difference stays unexplained
+            waste_value = None
     # material required planning: the plan less the latest stock of the branches
     plan_units = {v["code"]: str(v["unit"] or "").upper() for v in plan.values() if v.get("code")}
     try:
@@ -610,6 +629,7 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
     return {"period": {"from": d_from.isoformat(), "to": d_to.isoformat(), "days": days, "horizon": horizon, "buffer": buffer_pct},
             "menus": per_menu, "unmapped": got["unmapped"], "usage": usage,
             "options": {"unruled": got["unruled"], "pendingDays": got["optionsPending"]}, "mrp": mrp, "extras": extra_rows, "counts": got["counts"],
+            "coverage": coverage,
             "stock": {"branches": actual["branches"], "covered": covered, "onHand": {k: have[k] for k in ("branches", "from", "to")}},
             "total": {"sales": sales, "cogs": cogs + extra_cost, "menuCogs": cogs, "extraCogs": round(extra_cost, 2),
                       "ratio": round((cogs + extra_cost) / sales, 6) if sales else None,
@@ -622,7 +642,10 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
                       "actualCogs": round(actual_cogs, 2) if actual_cogs is not None else None,
                       "actualSales": scope["allSales"] if covered else None,
                       "actualRatio": round(actual_cogs / scope["allSales"], 6) if covered and scope["allSales"] else None,
-                      "branchesCovered": len(covered)}}
+                      "branchesCovered": len(covered),
+                      "wasteValue": waste_value,
+                      "unexplained": round(actual_cogs - sum(u["systemValue"] or 0 for u in usage if u["actual"] is not None) - (waste_value or 0), 2)
+                      if covered and actual_cogs is not None else None}}
 
 
 # ---------------------------------------------------------------- stock: SO awal / SO akhir (2026-11-04)

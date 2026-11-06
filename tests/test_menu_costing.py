@@ -25,7 +25,7 @@ def test_lines_are_checked():
     with pytest.raises(mc.CostingError):
         mc._lines([{"type": "item", "code": "PK-CUP", "qty": 0}])
     with pytest.raises(mc.CostingError):
-        mc._lines([{"type": "menu", "code": "X", "qty": 1}])
+        mc._lines([{"type": "bogus", "code": "X", "qty": 1}])
 
 
 def test_free_items_in_a_card():

@@ -15,6 +15,12 @@ Report      for a period and branches, from the POS sales per menu (agg_menu_dai
             3. COGS Material: system usage × pricelist; per menu the HPP of a portion, the cost of the sold portions
                and the ratio to the menu's sales; and the actual COGS (actual usage × pricelist) of the branches with
                both counts against all their sales.
+Bundling    a card may hold other cards as lines (type menu: "3 x Es Kopi Calf Premium", 2026-11-06); the report flattens
+            them (resolve) so a bundle uses the materials of its menus. A bundle with a card takes over the menus ESB
+            records inside it as packages (their quantity sold with that bundle is left out of the menus, no double
+            count); a bundle without a card whose contents are recorded as packages is counted through them.
+Selling     the list price of every menu from the POS menu master (its active price templates: DI = dine-in, OL =
+price       online), beside the HPP of the card as % HPP.
 """
 import math
 from datetime import date, timedelta
@@ -167,10 +173,15 @@ def wips() -> dict[str, dict]:
     return out
 
 
-def recipes() -> list[dict]:
+def recipes(with_prices: bool = False) -> list[dict]:
     maps: dict[str, list[dict]] = {}
     for m in db.fetch(f"SELECT menu_id, menu_name, recipe_code FROM {P}.cc_menu_recipe_map ORDER BY menu_name"):
         maps.setdefault(m["recipe_code"], []).append({"id": m["menu_id"], "name": m["menu_name"]})
+    if with_prices:  # the list prices of the menus of every card (the cards page: % HPP)
+        prices = menu_prices([m["id"] for ms in maps.values() for m in ms])
+        for ms in maps.values():
+            for m in ms:
+                m["prices"] = prices.get(m["id"], [])
     return [{"code": r["code"], "name": r["name"], "category": r["category"], "lines": r["lines"] or [], "note": r["note"],
              "isActive": r["is_active"], "menus": maps.get(r["code"], []), "updatedBy": r["updated_by"],
              "updatedAt": r["updated_at"].isoformat()}
@@ -183,13 +194,13 @@ def _lines(lines: list[dict]) -> list[dict]:
         kind, code = ln.get("type"), str(ln.get("code") or "").strip()
         if not code:
             continue
-        if kind not in ("item", "wip", "other"):
-            raise CostingError("Baris resep harus bahan baku / packaging, WIP atau item lain")
+        if kind not in ("item", "wip", "other", "menu"):
+            raise CostingError("Baris resep harus bahan baku / packaging, WIP, item lain atau menu (bundling)")
         qty = _f(ln.get("qty"))
         if qty <= 0:
             raise CostingError(f"Qty {ln.get('name') or code} harus lebih dari 0")
         line = {"type": kind, "code": code, "name": str(ln.get("name") or code)[:160], "qty": qty,
-                "unit": "GR" if kind == "wip" else str(ln.get("unit") or "")[:20]}
+                "unit": "GR" if kind == "wip" else "PORSI" if kind == "menu" else str(ln.get("unit") or "")[:20]}
         if kind == "other":  # a free item: its own unit and price (not in kc_master)
             price = ln.get("price")
             line["price"] = _f(price) if price not in (None, "") else None
@@ -204,7 +215,23 @@ def save_recipe(key: Optional[str], data: dict, user: dict) -> dict:
     name = " ".join(str(data.get("name") or "").split())
     if not code or not name:
         raise CostingError("Kode dan nama resep wajib diisi")
-    row = (code, name, (data.get("category") or "").strip() or None, Jsonb(_lines(data.get("lines"))),
+    lines = _lines(data.get("lines"))
+    if any(ln["type"] == "menu" for ln in lines):  # a bundle: its cards exist and never hold the bundle itself
+        graph = {r["code"]: [ln["code"] for ln in r["lines"] or [] if ln.get("type") == "menu"]
+                 for r in db.fetch(f"SELECT code, lines FROM {P}.cc_menu_recipe") if r["code"] != key}
+        graph[code] = [ln["code"] for ln in lines if ln["type"] == "menu"]
+        for ln in lines:
+            if ln["type"] == "menu" and ln["code"] not in graph:
+                raise CostingError(f"Kartu {ln['code']} tidak ditemukan")
+        seen, todo = set(), list(graph[code])
+        while todo:
+            c = todo.pop()
+            if c == code:
+                raise CostingError("Bundling tidak boleh berisi kartunya sendiri")
+            if c not in seen:
+                seen.add(c)
+                todo.extend(graph.get(c, []))
+    row = (code, name, (data.get("category") or "").strip() or None, Jsonb(lines),
            (data.get("note") or "").strip() or None, bool(data.get("isActive", True)), user.get("full_name") or user["username"])
     with db.transaction() as conn:
         if key is None:
@@ -225,6 +252,77 @@ def save_recipe(key: Optional[str], data: dict, user: dict) -> dict:
                                  menu_name = EXCLUDED.menu_name, updated_by = EXCLUDED.updated_by, updated_at = now()""",
                              (str(m["id"]), str(m.get("name") or m["id"])[:200], code, row[-1]))
     return next(r for r in recipes() if r["code"] == code)
+
+
+def resolve(cards: dict[str, dict]) -> dict[str, dict]:
+    """The cards with their menu lines (bundling) replaced by the lines of those cards x the portions; a bundle is
+    marked. A card missing or a loop (refused when saved) is left out."""
+    def flat(code: str, seen: frozenset) -> list[dict]:
+        out = []
+        for ln in cards[code].get("lines") or []:
+            if ln.get("type") != "menu":
+                out.append(ln)
+            elif ln["code"] in cards and ln["code"] not in seen:
+                out.extend({**sub, "qty": sub["qty"] * ln["qty"]} for sub in flat(ln["code"], seen | {ln["code"]}))
+        return out
+    return {code: {**c, "lines": flat(code, frozenset({code})), "bundle": any(ln.get("type") == "menu" for ln in c.get("lines") or [])}
+            for code, c in cards.items()}
+
+
+def _channel(template: str) -> str:
+    t = template.strip().upper()
+    return "dine-in" if t.startswith("DI") else "online" if t.startswith(("OL", "ONLINE")) else "other"
+
+
+CHANNEL_ORDER = {"dine-in": 0, "online": 1, "other": 2}
+
+
+def menu_prices(ids: list[str]) -> dict[str, list[dict]]:
+    """{"<company>:<menu id>": [{channel, price, min, max}]} the list prices of the menus from the POS menu master: the
+    active price templates per channel (dine-in DI..., online OL..., other), the most used price of a channel with its
+    range; a price under Rp 100 (a placeholder template) is left out. No template: the price of the menu."""
+    if not ids:
+        return {}
+    try:
+        rows = db.fetch(
+            f"""SELECT company_code || ':' || menu_id AS id, price, raw_data->'menuTemplates' AS templates
+                  FROM {SCHEMA}.master_pos_menu WHERE company_code || ':' || menu_id = ANY(%s)""", (sorted(set(ids)),))
+    except Exception:  # noqa: BLE001 - the menu master unreachable: the cards without prices
+        return {}
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        per: dict[str, list[float]] = {}
+        for t in r["templates"] or []:
+            price = _f(t.get("price")) if str(t.get("flagActive")) == "1" else 0.0
+            if price >= 100:
+                per.setdefault(_channel(str(t.get("menuTemplateName") or "")), []).append(price)
+        if not per and r["price"] is not None and _f(r["price"]) >= 100:
+            per["other"] = [_f(r["price"])]
+        out[r["id"]] = [{"channel": ch, "price": max(set(ps), key=lambda x: (ps.count(x), x)), "min": min(ps), "max": max(ps)}
+                        for ch, ps in sorted(per.items(), key=lambda kv: CHANNEL_ORDER[kv[0]])]
+    return out
+
+
+def package_contents(menu_id: str) -> dict:
+    """What ESB records inside a menu ("<company>:<menu id>"): its package groups with their quantity and the menus to
+    choose from, each with the card it uses; a group of one menu is a fixed content of the bundle."""
+    company, _, mid = menu_id.partition(":")
+    row = db.fetchrow(f"SELECT menu_name, raw_data FROM {SCHEMA}.master_pos_menu WHERE company_code = %s AND menu_id = %s",
+                      (company, mid))
+    if not row:
+        raise CostingError("Menu tidak ada di master menu ESB")
+    groups = ((row["raw_data"] or {}).get("menuPackages") or {}).get("menuGroup") or []
+    ids = [f"{company}:{m.get('menuID')}" for g in groups for m in g.get("menus") or []]
+    cards = {r["menu_id"]: r["recipe_code"] for r in db.fetch(
+        f"SELECT menu_id, recipe_code FROM {P}.cc_menu_recipe_map WHERE menu_id = ANY(%s)", (ids,))} if ids else {}
+    out = []
+    for g in groups:
+        menus_ = [{"id": f"{company}:{m.get('menuID')}", "name": m.get("menuName") or str(m.get("menuID")),
+                   "card": cards.get(f"{company}:{m.get('menuID')}")}
+                  for m in g.get("menus") or [] if str(m.get("flagActive", 1)) == "1"]
+        if menus_:
+            out.append({"name": g.get("menuGroupName") or "", "min": _f(g.get("minQty")), "max": _f(g.get("maxQty")), "menus": menus_})
+    return {"id": menu_id, "name": row["menu_name"], "groups": out}
 
 
 def delete_recipe(code: str) -> bool:
@@ -373,17 +471,29 @@ def _sold(d_from: date, d_to: date, branches: Optional[list[str]], cards: dict, 
         choice_rows, rule = menu_options.sold(d_from, d_to, branches), menu_options.rules()
     except Exception:  # noqa: BLE001 - no choices data yet: the cards alone
         pending, choice_rows, rule = [], [], {}
+    # a bundle with a card holds its menus: what ESB records inside it as packages is no menu sold on its own (2026-11-06)
+    bundles = {m for m, code in mapped.items() if cards[code].get("bundle")}
+    inside: dict[str, float] = {}
+    for c in choice_rows:
+        if c["parent"] in bundles:
+            inside[c["option"]] = inside.get(c["option"], 0.0) + c["qty"]
+    choice_rows = [c for c in choice_rows if c["parent"] not in bundles]
+    counted_inside = {c["parent"] for c in choice_rows if c["option"] in mapped}
     # a choice (Less Sugar, Gelas Kaca …) is no menu without a card: its rule changes the card of its menu (2026-11-05)
     choice_ids = {c["option"] for c in choice_rows}
     choice_sales = 0.0
     for s in sold:
-        qty = _f(s["qty"])
+        qty = _f(s["qty"]) - inside.get(s["menu_id"], 0.0)
+        if s["menu_id"] in inside and qty <= 1e-9:  # sold only inside bundles with a card
+            choice_sales += _f(s["sales"])
+            continue
         code = mapped.get(s["menu_id"])
         if not code and s["menu_id"] in choice_ids:
             choice_sales += _f(s["sales"])
             continue
-        if not code:
-            unmapped.append({"id": s["menu_id"], "name": s["name"], "category": s["category"], "qty": qty, "sales": _f(s["sales"])})
+        if not code:  # a bundle whose contents ESB records as packages with a card is counted through them
+            unmapped.append({"id": s["menu_id"], "name": s["name"], "category": s["category"], "qty": qty, "sales": _f(s["sales"]),
+                             "viaPackages": s["menu_id"] in counted_inside})
             continue
         explode(cards[code], qty, wip, system)
         explode(cards[code], qty / days * horizon * (1 + buffer_pct / 100), wip, plan)
@@ -427,7 +537,7 @@ def _delta_cost(key: str, qty: float, price: dict[str, float]) -> Optional[float
 
 def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int = 7, buffer_pct: float = 10) -> dict:
     days = (d_to - d_from).days + 1
-    cards = {r["code"]: r for r in recipes() if r["isActive"]}
+    cards = {k: c for k, c in resolve({r["code"]: r for r in recipes()}).items() if c["isActive"]}  # a bundle may hold an inactive card
     mapped = {m["id"]: code for code, c in cards.items() for m in c["menus"]}
     wip = wips()
     got = _sold(d_from, d_to, branches, cards, mapped, wip, horizon, buffer_pct)
@@ -501,7 +611,8 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
             "stock": {"branches": actual["branches"], "covered": covered, "onHand": {k: have[k] for k in ("branches", "from", "to")}},
             "total": {"sales": sales, "cogs": cogs + extra_cost, "menuCogs": cogs, "extraCogs": round(extra_cost, 2),
                       "ratio": round((cogs + extra_cost) / sales, 6) if sales else None,
-                      "menusMapped": len(per_menu), "menusUnmapped": len(got["unmapped"]),
+                      "menusMapped": len(per_menu), "menusUnmapped": sum(1 for u in got["unmapped"] if not u["viaPackages"]),
+                      "menusViaPackages": sum(1 for u in got["unmapped"] if u["viaPackages"]),
                       "allSales": round(got["allSales"], 2), "choiceSales": round(got["choiceSales"], 2),
                       "unpriced": sum(1 for m in per_menu if m["hpp"] is None),
                       "systemValue": sum(u["systemValue"] or 0 for u in usage),

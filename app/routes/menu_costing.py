@@ -3,10 +3,11 @@
     GET    /api/cost-control/pricelist?search=&category=&date=   items (bahan baku) with the price valid on the date
     GET    /api/cost-control/pricelist/{code}/history           the prices of an item
     PUT    /api/cost-control/pricelist                          {"rows": [{code, price | null, validFrom, note}]}
-    GET    /api/cost-control/sales-calc/recipes                 the menu cards with their menus
+    GET    /api/cost-control/sales-calc/recipes                 the menu cards with their menus and their list prices
     POST   /api/cost-control/sales-calc/recipes                 create   PUT /.../recipes/{code} update (menus too)
     DELETE /api/cost-control/sales-calc/recipes/{code}
     GET    /api/cost-control/sales-calc/menus?days=             ESB POS menus sold lately and their card
+    GET    /api/cost-control/sales-calc/menus/{id}/package      what ESB records inside a menu (bundling contents)
     GET    /api/cost-control/sales-calc/wips                    WIP / premix recipes (production calculator)
     GET/POST /api/cost-control/sales-calc/extras, PUT/DELETE /.../extras/{id}   items outside the cards (cable ties,
                                                                 plastic …) per bill / portion / outlet-day (migration 057)
@@ -73,7 +74,7 @@ def set_prices(body: PricesIn, request: Request, user: dict = Depends(require_pa
 
 @router.get("/sales-calc/recipes")
 def recipes(_: dict = Depends(require_page(CALC))) -> dict:
-    return {"data": mc.recipes()}
+    return {"data": mc.recipes(with_prices=True)}
 
 
 def _save(key: Optional[str], body: dict, request: Request, user: dict) -> dict:
@@ -109,6 +110,14 @@ def delete_recipe(code: str, request: Request, user: dict = Depends(require_page
 @router.get("/sales-calc/menus")
 def menus(days: int = Query(90, ge=7, le=365), _: dict = Depends(require_page(CALC))) -> dict:
     return {"data": mc.menus(days)}
+
+
+@router.get("/sales-calc/menus/{menu_id}/package")
+def package(menu_id: str, _: dict = Depends(require_page(CALC))) -> dict:
+    try:
+        return mc.package_contents(menu_id)
+    except mc.CostingError as exc:
+        _refuse(exc)
 
 
 @router.get("/sales-calc/wips")

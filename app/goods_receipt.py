@@ -5,6 +5,8 @@ changed. Cost Control corrects, with a reason and at least one evidence file:
   * the receipt date of a GR (the goods arrived another day than ESB says: the purchase belongs to that day), and
   * the quantity of a line (in the unit of the line).
 A new correction of the same date / line replaces the previous one (kept as history); a correction can be cancelled.
+The corrections of a GR count once Cost Control marks it Finished (migration 077); correcting or cancelling after that
+puts it back to draft until it is finished again.
 
 adjustments() gives what the corrections change in a period — quantities per branch × item × unit and their value —
 for the COGS & Usage of the Sales Calculator (app/stock_moves.py) and the Outlet Ratio (ratio.ratio). A line is
@@ -20,7 +22,7 @@ from app import database as db
 from app.database import SCHEMA
 
 P = "integration_portal"
-T, T_EV = f"{P}.cc_gr_correction", f"{P}.cc_gr_evidence"
+T, T_EV, T_FIN = f"{P}.cc_gr_correction", f"{P}.cc_gr_evidence", f"{P}.cc_gr_finish"
 ACTIVE = "replaced_at IS NULL AND cancelled_at IS NULL"
 SKIP_STATUSES = ("Rejected", "Cancelled", "Void")
 MAX_FILE = 5 * 1024 * 1024
@@ -44,6 +46,7 @@ def _scope_sql(branches: Optional[list[str]]) -> str:
 DOCS = f"""FROM {SCHEMA}.erp_documents d
            LEFT JOIN {SCHEMA}.master_branches b ON b.branch_id::text = d.branch_id::text
            LEFT JOIN {T} dc ON dc.doc_num = d.doc_num AND dc.kind = 'date' AND dc.{ACTIVE.replace(' AND ', ' AND dc.')}
+           LEFT JOIN {T_FIN} fin ON fin.doc_num = d.doc_num
           WHERE d.module = 'goods_receipt' AND d.deleted_at IS NULL"""
 
 
@@ -54,7 +57,7 @@ def documents(d_from: date, d_to: date, branches: Optional[list[str]], search: s
     rows = db.fetch(
         f"""SELECT d.doc_num, d.doc_date, coalesce(dc.new_date, d.doc_date) AS date, d.ref_num, b.branch_code,
                    coalesce(b.branch_name, d.branch_name) AS branch_name, d.location_name, d.counterparty_name AS supplier,
-                   d.status_name, d.line_count, dc.id IS NOT NULL AS date_corrected,
+                   d.status_name, d.line_count, dc.id IS NOT NULL AS date_corrected, fin.finished_at, fin.finished_by, fin.note AS finish_note,
                    (SELECT count(*) FROM {T} q WHERE q.doc_num = d.doc_num AND q.kind = 'qty' AND q.{ACTIVE.replace(' AND ', ' AND q.')})::int
                        AS qty_corrected
             {DOCS} AND coalesce(dc.new_date, d.doc_date) BETWEEN %(a)s AND %(b)s{_scope_sql(branches)}
@@ -71,7 +74,8 @@ def _doc_view(r: dict) -> dict:
             "date": r["date"].isoformat() if r["date"] else None, "poNum": r["ref_num"], "branchCode": r["branch_code"],
             "branchName": r["branch_name"], "location": r["location_name"], "supplier": r["supplier"],
             "status": r["status_name"], "lines": r["line_count"], "dateCorrected": bool(r["date_corrected"]),
-            "qtyCorrected": int(r["qty_corrected"] or 0)}
+            "qtyCorrected": int(r["qty_corrected"] or 0),
+            "finished": {"at": r["finished_at"].isoformat(), "by": r["finished_by"], "note": r.get("finish_note")} if r.get("finished_at") else None}
 
 
 def _head(doc_num: str, branches: Optional[list[str]]) -> Optional[dict]:
@@ -79,6 +83,7 @@ def _head(doc_num: str, branches: Optional[list[str]]) -> Optional[dict]:
         f"""SELECT d.doc_num, d.doc_date, coalesce(dc.new_date, d.doc_date) AS date, d.ref_num, b.branch_code,
                    coalesce(b.branch_name, d.branch_name) AS branch_name, d.location_name, d.counterparty_name AS supplier,
                    d.status_name, d.line_count, dc.id IS NOT NULL AS date_corrected, 0 AS qty_corrected,
+                   fin.finished_at, fin.finished_by, fin.note AS finish_note,
                    d.additional_info, d.created_by, d.esb_created_at
             {DOCS} AND d.doc_num = %(n)s{_scope_sql(branches)}""", {"n": doc_num, "br": branches or []})
 
@@ -182,6 +187,7 @@ def correct(doc_num: str, body: dict, user: dict, branches: Optional[list[str]])
     with db.transaction() as conn:
         first: Optional[int] = None
         for kind, line_no, code, uom, old_d, new_d, old_q, new_q, back in changes:
+            _unfinish(conn, doc_num)  # a new correction: the GR is a draft again until finished
             conn.execute(f"""UPDATE {T} SET replaced_at = now() WHERE doc_num = %s AND kind = %s
                              AND coalesce(line_no, 0) = %s AND {ACTIVE}""", (doc_num, kind, line_no or 0))
             row = conn.execute(
@@ -203,6 +209,8 @@ def cancel(doc_num: str, correction_id: int, user: dict, branches: Optional[list
                           RETURNING id""", (user.get("full_name") or user["username"], correction_id, doc_num))
     if row is None:
         raise GrError("Koreksi ini sudah tidak aktif")
+    with db.transaction() as conn:  # a cancelled correction: the GR is a draft again until finished
+        _unfinish(conn, doc_num)
     return detail(doc_num, branches) or {}
 
 
@@ -214,10 +222,39 @@ def evidence(doc_num: str, file_id: int, branches: Optional[list[str]]) -> Optio
 
 # ---------------------------------------------------------------- what the corrections change in a period
 
+def _unfinish(conn, doc_num: str) -> None:
+    conn.execute(f"DELETE FROM {T_FIN} WHERE doc_num = %s", (doc_num,))
+
+
+def finish(doc_num: str, note: Optional[str], user: dict, branches: Optional[list[str]]) -> dict:
+    """Cost Control marks the corrections of a GR done: from now on they count in the stock and the COGS."""
+    if _head(doc_num, branches) is None:
+        raise GrError("GR tidak ditemukan")
+    if not db.fetchrow(f"SELECT 1 FROM {T} WHERE doc_num = %s AND {ACTIVE}", (doc_num,)):
+        raise GrError("GR ini belum punya koreksi aktif")
+    with db.transaction() as conn:
+        conn.execute(f"""INSERT INTO {T_FIN} (doc_num, note, finished_by) VALUES (%s, %s, %s)
+                         ON CONFLICT (doc_num) DO UPDATE SET note = EXCLUDED.note, finished_by = EXCLUDED.finished_by, finished_at = now()""",
+                     (doc_num, (note or "").strip()[:300] or None, user.get("full_name") or user["username"]))
+    from app import running_stock
+    running_stock.clear()  # the finished corrections move the stock now
+    return detail(doc_num, branches)
+
+
+def reopen(doc_num: str, user: dict, branches: Optional[list[str]]) -> dict:
+    if _head(doc_num, branches) is None:
+        raise GrError("GR tidak ditemukan")
+    with db.transaction() as conn:
+        _unfinish(conn, doc_num)
+    from app import running_stock
+    running_stock.clear()
+    return detail(doc_num, branches)
+
+
 def adjustments(d_from: date, d_to: date, branches: Optional[list[str]] = None) -> dict:
     """{"qty": {branch: {(product code, UOM): Δqty}}, "value": {branch: {supplier: Δvalue}}, "unpriced": lines}: the
     corrected GRs against ESB's for the period — a line counts in the period of its (corrected) receipt date with its
-    (corrected) quantity, instead of ESB's date and quantity."""
+    (corrected) quantity, instead of ESB's date and quantity. Only the GRs marked Finished (migration 077)."""
     out: dict = {"qty": {}, "value": {}, "unpriced": 0}
     try:
         rows = db.fetch(
@@ -232,7 +269,7 @@ def adjustments(d_from: date, d_to: date, branches: Optional[list[str]] = None) 
                                       WHERE p.module = 'purchase_order' AND p.doc_num = d.ref_num AND p.line_type = 'detail'
                                         AND p.product_code = l.product_code AND p.price > 0
                                       ORDER BY (upper(coalesce(p.uom_name, '')) = upper(coalesce(l.uom_name, ''))) DESC LIMIT 1) po ON true
-                 WHERE (dc.id IS NOT NULL OR qc.id IS NOT NULL) AND d.status_name <> ALL(%(skip)s)
+                 WHERE (dc.id IS NOT NULL OR qc.id IS NOT NULL) AND fin.doc_num IS NOT NULL AND d.status_name <> ALL(%(skip)s)
                    AND (d.doc_date BETWEEN %(a)s AND %(b)s OR coalesce(dc.new_date, d.doc_date) BETWEEN %(a)s AND %(b)s)
                    {_scope_sql(branches)}""",
             {"a": d_from, "b": d_to, "br": branches or [], "skip": list(SKIP_STATUSES) + ["New", "Draft"]})  # as app/stock_moves.py

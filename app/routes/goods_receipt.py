@@ -93,6 +93,33 @@ def cancel(doc_num: str, correction_id: int, request: Request, user: dict = Depe
     return out
 
 
+class FinishIn(BaseModel):
+    note: Optional[str] = Field(None, max_length=300)
+
+
+@router.post("/{doc_num}/finish")
+def finish(doc_num: str, body: FinishIn, request: Request, user: dict = Depends(require_page(PAGE))) -> dict:
+    """The corrections of the GR are done: they count in the Stock List and the COGS from now on (migration 077)."""
+    try:
+        out = gr.finish(doc_num, body.note, user, _scope())
+    except gr.GrError as exc:
+        raise HTTPException(422, detail=str(exc)) from None
+    activity.record("cc.goods-receipt", user=user, request=request, page="/cost-control/goods-receipt",
+                    summary=f"GR {doc_num} ditandai Finished", details={"doc": doc_num, "note": body.note})
+    return out
+
+
+@router.post("/{doc_num}/reopen")
+def reopen(doc_num: str, request: Request, user: dict = Depends(require_page(PAGE))) -> dict:
+    try:
+        out = gr.reopen(doc_num, user, _scope())
+    except gr.GrError as exc:
+        raise HTTPException(422, detail=str(exc)) from None
+    activity.record("cc.goods-receipt", user=user, request=request, page="/cost-control/goods-receipt",
+                    summary=f"GR {doc_num} dibuka lagi (draft)", details={"doc": doc_num})
+    return out
+
+
 @router.get("/{doc_num}/evidence/{file_id}")
 def evidence(doc_num: str, file_id: int, _: dict = Depends(require_page(PAGE))) -> Response:
     f = gr.evidence(doc_num, file_id, _scope())

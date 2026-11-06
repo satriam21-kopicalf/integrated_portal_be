@@ -107,27 +107,48 @@ def stock(branches: Optional[list[str]], exclude: Optional[str] = None) -> dict[
     return out
 
 
+TRANSFER_KINDS = ("transferIn", "transferOut")
+
+
 def stock_list(branches: Optional[list[str]]) -> dict:
-    """Monitoring Stock → Stock List: one row per branch × item with its value, and per branch its latest count."""
+    """Monitoring Stock → Stock List: one row per branch × item with its value, and per branch its latest count; with the
+    running stock (app/running_stock.py: the estimate now, from the SO and every move, waste and usage since)."""
+    from app import running_stock
     s = stock(branches)
-    codes = sorted({c for v in s.values() for c in v["items"]})
+    try:
+        run = running_stock.running(branches)
+    except Exception:  # noqa: BLE001 - the estimate is extra: the Stock List of the counts still shows
+        run = {}
+    codes = sorted({c for v in s.values() for c in v["items"]} | {c for v in run.values() for c in v["items"]})
     info, price = items_info(codes), prices(codes)
     names = _names(list(s))
     rows, heads = [], []
     for b, v in sorted(s.items(), key=lambda kv: names.get(kv[0], kv[0])):
-        value = 0.0
-        for code, it in v["items"].items():
+        value = est_value = 0.0
+        r = run.get(b, {"items": {}, "so": {}})
+        for code in sorted(set(v["items"]) | set(r["items"])):
+            it = v["items"].get(code) or {"so": 0.0, "in": 0.0, "out": 0.0, "pending": 0.0, "available": 0.0, "unit": r["items"][code]["unit"]}
+            e = r["items"].get(code)
             p = price.get(code)
             now = it["so"] + it["in"] - it["out"]
             val = round(now * p, 2) if p is not None else None
             value += val or 0.0
+            est = e["estimate"] if e else now
+            ev = round(est * p, 2) if p is not None else None
+            est_value += ev or 0.0
+            mv = (e or {}).get("moves", {})
             rows.append({"branch": b, "branchName": names.get(b, b), "code": code, "name": (info.get(code) or {}).get("name") or code,
                          "category": (info.get(code) or {}).get("category") or "", "unit": it["unit"], "so": round(it["so"], 3),
                          "in": round(it["in"], 3), "out": round(it["out"], 3), "pending": round(it["pending"], 3),
-                         "stock": round(now, 3), "available": round(it["available"], 3), "price": p, "value": val})
+                         "stock": round(now, 3), "available": round(it["available"], 3), "price": p, "value": val,
+                         # the running stock since the count: goods received and the other moves, waste approved, usage by the cards
+                         "received": round(mv.get("received", 0.0), 3),
+                         "otherMoves": round(sum(q for k, q in mv.items() if k not in TRANSFER_KINDS and k != "received"), 3),
+                         "waste": round((e or {}).get("waste", 0.0), 3), "used": round((e or {}).get("used", 0.0), 3),
+                         "estimate": round(est, 3), "estimateValue": ev})
         heads.append({"branch": b, "branchName": names.get(b, b), "soDate": v["so"]["date"], "refs": v["so"]["refs"],
-                      "items": len(v["items"]), "value": round(value, 2)})
-    return {"branches": heads, "rows": rows}
+                      "final": r["so"].get("final"), "items": len(v["items"]), "value": round(value, 2), "estimateValue": round(est_value, 2)})
+    return {"branches": heads, "rows": rows, "estimatedAt": date.today().isoformat()}
 
 
 # ---------------------------------------------------------------- transfers
@@ -295,6 +316,8 @@ def receive(user: dict, transfer_id: str, photo: Optional[str], note: Optional[s
         conn.execute(f"""UPDATE {T} SET status = 'received', receive_photo = %s, receive_photo_type = %s, receive_note = %s,
                              received_by = %s, received_at = now(), value = %s WHERE id::text = %s AND status = 'approved'""",
                      (data, pt, (note or "").strip()[:500] or None, _who(user), round(total, 2), transfer_id))
+    from app import running_stock
+    running_stock.clear()
     return detail(transfer_id)
 
 

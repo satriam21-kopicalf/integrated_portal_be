@@ -9,6 +9,7 @@
     GET    /api/cost-control/sales-calc/menus?days=             ESB POS menus sold lately and their card
     GET    /api/cost-control/sales-calc/menus/{id}/package      what ESB records inside a menu (bundling contents)
     POST   /api/cost-control/sales-calc/auto-cards            {"dry"}: a card for every menu without one (ESB BOM, bundles)
+    GET    /api/cost-control/cogs/outlets?dateFrom&dateTo&branch   page cc.cogs: COGS & Usage per outlet (app/outlet_cogs.py)
     GET    /api/cost-control/sales-calc/wips                    WIP / premix recipes (production calculator)
     GET/POST /api/cost-control/sales-calc/extras, PUT/DELETE /.../extras/{id}   items outside the cards (cable ties,
                                                                 plastic …) per bill / portion / outlet-day (migration 057)
@@ -184,6 +185,20 @@ def report(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Quer
     scoped = scoped_branch(branch)
     branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
     return mc.report(start, end, branches, horizon, buffer)
+
+
+@router.get("/cogs/outlets")
+def cogs_outlets(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
+                 _: dict = Depends(require_page("cc.cogs"))) -> dict:
+    """COGS & Usage per outlet between two stock opnames (app/outlet_cogs.py)."""
+    from app import outlet_cogs
+    end = dateTo or today()
+    start = dateFrom or end - timedelta(days=6)
+    if start > end or (end - start).days > 92:
+        raise HTTPException(422, detail="Periode 1 hari sampai 3 bulan")
+    scoped = scoped_branch(branch)
+    branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
+    return outlet_cogs.outlets(start, end, branches)
 
 
 # ---------------------------------------------------------------- variants & modifiers, ESB BOM (migration 071)

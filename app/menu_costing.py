@@ -471,6 +471,20 @@ def non_sales(d_from: date, d_to: date, branches: Optional[list[str]]) -> list[d
              GROUP BY 1, 2""", {"a": d_from, "b": d_to, "br": branches, "main": MAIN_COMPANY})
 
 
+def non_sales_by_branch(d_from: date, d_to: date, branches: list[str]) -> list[dict]:
+    """[{branch_code, sales_date, menu_id, qty}] the menus of the other-cost bills per branch and day (running stock)."""
+    from app.esb_report import TYPE_CONDITIONS, active_line_sql
+    from app.database import TABLE_TRANSACTIONS
+    return db.fetch(
+        f"""SELECT h.branch_code, (h.sales_date AT TIME ZONE 'UTC')::date AS sales_date,  -- the business day, as the rollups
+                   coalesce(h.company_code, %(main)s) || ':' || (m->>'menuID') AS menu_id,
+                   sum(coalesce(nullif(m->>'qty', '')::numeric, 0)) AS qty
+              FROM {TABLE_TRANSACTIONS} h, jsonb_array_elements(coalesce(h.raw_data->'salesMenus', '[]'::jsonb)) m
+             WHERE h.sales_date >= %(a)s::date AND h.sales_date < %(b)s::date + 1 AND {TYPE_CONDITIONS['other_cost']}
+               AND {active_line_sql('m')} AND coalesce(m->>'menuID', '') <> '' AND h.branch_code = ANY(%(br)s)
+             GROUP BY 1, 2, 3""", {"a": d_from, "b": d_to, "br": branches, "main": MAIN_COMPANY})
+
+
 def _sold(d_from: date, d_to: date, branches: Optional[list[str]], cards: dict, mapped: dict, wip: dict, horizon: int,
           buffer_pct: float) -> dict:
     """The menus sold by the branches exploded through the cards (system usage, the plan) with the additional items."""
@@ -684,7 +698,7 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
             "menus": per_menu, "unmapped": got["unmapped"], "usage": usage, "nonSales": non_sales,
             "options": {"unruled": got["unruled"], "pendingDays": got["optionsPending"]}, "mrp": mrp, "extras": extra_rows, "counts": got["counts"],
             "coverage": coverage, "anomalies": anomalies,
-            "stock": {"branches": actual["branches"], "covered": covered, "onHand": {k: have[k] for k in ("branches", "from", "to")}},
+            "stock": {"branches": actual["branches"], "covered": covered, "onHand": {**{k: have[k] for k in ("branches", "from", "to")}, "running": bool(have.get("running"))}},
             "total": {"sales": sales, "cogs": cogs + extra_cost + non_sales_cost, "menuCogs": cogs, "extraCogs": round(extra_cost, 2),
                       "ratio": round((cogs + extra_cost + non_sales_cost) / sales, 6) if sales else None,
                       "menusMapped": len(per_menu), "menusUnmapped": sum(1 for u in got["unmapped"] if not u["viaPackages"]),
@@ -926,9 +940,25 @@ def count_anomalies(rows: list[dict], usage: dict[str, dict], limit: int = 150) 
 
 
 def on_hand(branches: Optional[list[str]], units: dict[str, str]) -> dict:
-    """The latest stock of the branches (portal count of the last 8 days, else the ESB document around yesterday), per
-    item in the unit of the cards: what the Material Required Planning has already."""
+    """The stock of the branches now, per item in the unit of the cards: what the Material Required Planning has already.
+    The running stock (app/running_stock.py: the latest SO + every move − waste − usage since, 2026-11-07); a branch
+    without a portal count: its ESB document around yesterday."""
     today = date.today()
+    try:
+        from app import running_stock
+        run = running_stock.running(branches)
+    except Exception:  # noqa: BLE001 - no running stock: the counts alone
+        run = {}
+    if run:
+        items: dict[str, float] = {}
+        for v in run.values():
+            for code, unit in units.items():
+                it = v["items"].get(code)
+                q = to_unit(it["estimate"], it["unit"], unit) if it else None
+                if q is not None:
+                    items[code] = items.get(code, 0.0) + max(q, 0.0)  # an estimate below zero has nothing to give
+        dates = sorted({v["so"]["date"] for v in run.values()})
+        return {"items": items, "branches": len(run), "from": dates[0], "to": dates[-1], "running": True}
     snap = stock_at(today, today - timedelta(days=1), branches, back=8)
     items: dict[str, float] = {}
     for v in snap.values():

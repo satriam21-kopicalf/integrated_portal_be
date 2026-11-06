@@ -462,7 +462,10 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], scope
 
 
 def review(ids: list[str], status: str, note: Optional[str], user: dict, branches: Optional[tuple]) -> list[dict]:
-    """Approve / reject entries in the reviewer's branches; returns the rows changed."""
+    """Approve / reject entries in the reviewer's branches; returns the rows changed (the running stock takes the
+    approved waste at once)."""
+    from app import running_stock
+    running_stock.clear()
     return db.fetch(
         f"""UPDATE {T} SET status = %(s)s, review_note = %(n)s, reviewed_by = %(by)s, reviewed_at = now()
             WHERE id::text = ANY(%(ids)s) AND (%(all)s OR branch_code = ANY(%(br)s))

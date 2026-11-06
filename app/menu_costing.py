@@ -640,6 +640,7 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
                       "variance": round(a["actual"] - v["qty"], 3) if a else None,
                       "price": p, "systemValue": round(v["qty"] * p, 2) if p is not None else None,
                       "actualValue": round(a["actual"] * p, 2) if a and p is not None else None})
+    anomalies = count_anomalies(actual.get("perBranch", []), {u["code"]: u for u in usage if u["code"]}) if covered else []
     # SO coverage (2026-11-06): the stock items the cards use that the counts of both ends hold; an item missing from the
     # SO lists has no actual usage, so its system value stays out of the actual COGS
     stock_rows = [u for u in usage if u["code"] and u["isStock"] and not u["extra"] and u["systemValue"]]
@@ -682,7 +683,7 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
     return {"period": {"from": d_from.isoformat(), "to": d_to.isoformat(), "days": days, "horizon": horizon, "buffer": buffer_pct},
             "menus": per_menu, "unmapped": got["unmapped"], "usage": usage, "nonSales": non_sales,
             "options": {"unruled": got["unruled"], "pendingDays": got["optionsPending"]}, "mrp": mrp, "extras": extra_rows, "counts": got["counts"],
-            "coverage": coverage,
+            "coverage": coverage, "anomalies": anomalies,
             "stock": {"branches": actual["branches"], "covered": covered, "onHand": {k: have[k] for k in ("branches", "from", "to")}},
             "total": {"sales": sales, "cogs": cogs + extra_cost + non_sales_cost, "menuCogs": cogs, "extraCogs": round(extra_cost, 2),
                       "ratio": round((cogs + extra_cost + non_sales_cost) / sales, 6) if sales else None,
@@ -854,6 +855,7 @@ def actual_usage(d_from: date, d_to: date, branches: Optional[list[str]], units:
     except Exception:  # noqa: BLE001 - no stock data: the report shows the system usage only
         return {"items": {}, "branches": [], "covered": []}
     items: dict[str, dict] = {}
+    per_branch: list[dict] = []  # one row per branch × item, for the anomalies of the counts
     for b in covered:
         a, z = start[b], end[b]
         for code, unit in units.items():
@@ -866,21 +868,61 @@ def actual_usage(d_from: date, d_to: date, branches: Optional[list[str]], units:
                 continue  # counted in a unit that cannot be compared with the card
             row = items.setdefault(code, {"start": 0.0, "bought": 0.0, "end": 0.0, "skipped": {}, "moves": {}})
             esb = a["esb"].get(code) or z["esb"].get(code)
+            here: dict[str, float] = {}
             for kind, rows in bought.get(b, {}).items():  # every move in or out (app/stock_moves.py), signed
                 got = _bought(rows, code, unit, esb, packs.get(code), row["skipped"])
                 if got:
+                    here[kind] = got
                     row["moves"][kind] = row["moves"].get(kind, 0.0) + got
                     row["bought"] += got
             row["start"] += va
             row["end"] += vz
+            moved = sum(here.values())
+            per_branch.append({"branch": b, "code": code, "unit": unit, "start": va, "moves": moved,
+                               "in": sum(q for q in here.values() if q > 0), "end": vz, "actual": va + moved - vz,
+                               "refs": {"start": a["refs"], "end": z["refs"], "startSource": a["source"], "endSource": z["source"]}})
     for row in items.values():
         row["actual"] = row["start"] + row["bought"] - row["end"]
 
     def side(v: dict) -> dict:
         return {"source": v["source"], "date": v["date"], "refs": v["refs"]}
     every = sorted(set(start) | set(end))
-    return {"items": items, "covered": covered,
+    return {"items": items, "covered": covered, "perBranch": per_branch,
             "branches": [{"code": b, "start": side(start[b]) if b in start else None, "end": side(end[b]) if b in end else None} for b in every]}
+
+
+ANOMALY_JUMP = 5        # a count this many times the other end and what came in
+ANOMALY_MIN_RP = 50_000  # below this value impact an odd row is left out
+
+
+def count_anomalies(rows: list[dict], usage: dict[str, dict], limit: int = 150) -> list[dict]:
+    """The branch × item rows whose counts look wrong (2026-11-06), the largest value first, for Cost Control to check
+    and correct the stock opname: negative usage (more at the end than at the start plus what came in), a count many
+    times the other end (a unit or a digit typed wrong), a usage many times what the branch could hold."""
+    from app.pic_checkin import _names
+    out = []
+    for r in rows:
+        price = (usage.get(r["code"]) or {}).get("price")
+        if not price:
+            continue
+        start, end, came, actual = r["start"], r["end"], r["in"], r["actual"]
+        reasons = []
+        if actual < -0.01 * max(start, end, 1):
+            reasons.append("negative")  # the end count is more than the start plus what came in
+        if start > ANOMALY_JUMP * (end + came) and start - end - came > 0:
+            reasons.append("startHigh")  # SO awal far above SO akhir and what came in
+        if end > ANOMALY_JUMP * (start + came) and end - start > 0:
+            reasons.append("endHigh")
+        if not reasons:
+            continue
+        impact = abs(actual) * price if "negative" in reasons else abs(start - end) * price
+        if impact < ANOMALY_MIN_RP:
+            continue
+        out.append({**r, "name": usage[r["code"]]["name"], "price": price, "reasons": reasons, "impact": round(impact, 2)})
+    out.sort(key=lambda x: -x["impact"])
+    names = _names(sorted({x["branch"] for x in out[:limit]}))
+    return [{**x, "branchName": names.get(x["branch"], x["branch"]), **{k: round(x[k], 3) for k in ("start", "moves", "in", "end", "actual")}}
+            for x in out[:limit]]
 
 
 def on_hand(branches: Optional[list[str]], units: dict[str, str]) -> dict:

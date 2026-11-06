@@ -79,3 +79,21 @@ def test_actual_usage_from_the_stock_opname_and_purchases(monkeypatch):
 def test_units_compare_only_when_they_convert():
     assert mc.to_unit(1.5, "KG", "GR") == 1500 and mc.to_unit(500, "GR", "kg") == 0.5 and mc.to_unit(2, "PCS", "PCS") == 2
     assert mc.to_unit(2, "PACK", "GR") is None
+
+
+def test_count_anomalies():
+    usage = {"RM-JUICE": {"name": "Juice Apple", "price": 36.0}, "RM-MILK": {"name": "Fresh Milk", "price": 20.0}}
+    rows = [
+        {"branch": "A", "code": "RM-JUICE", "unit": "GR", "start": 6_000_000, "moves": 0.0, "in": 0.0, "end": 9_000, "actual": 5_991_000},
+        {"branch": "A", "code": "RM-MILK", "unit": "GR", "start": 10_000, "moves": 20_000, "in": 20_000, "end": 90_000, "actual": -60_000},
+        {"branch": "B", "code": "RM-MILK", "unit": "GR", "start": 10_000, "moves": 20_000, "in": 20_000, "end": 12_000, "actual": 18_000},
+    ]
+    import app.pic_checkin as pc
+    old = pc._names
+    pc._names = lambda codes: {"A": "Outlet A"}
+    try:
+        out = mc.count_anomalies(rows, usage)
+    finally:
+        pc._names = old
+    assert [(x["code"], x["reasons"]) for x in out] == [("RM-JUICE", ["startHigh"]), ("RM-MILK", ["negative"])]  # B is plausible
+    assert out[0]["branchName"] == "Outlet A" and out[0]["impact"] == round((6_000_000 - 9_000) * 36.0, 2)

@@ -13,7 +13,7 @@ Monitoring Stock (pages cc.stock-list, cc.stock-transfer)
     GET  /api/monitoring/stock/list?branch=          Stock List: every branch × item of the latest SO, with the transfers
     GET  /api/monitoring/stock/transfers             ?dateFrom&dateTo&branch&status -> the transfers and their figures
     GET  /api/monitoring/stock/transfers/lines?ids=  the lines of transfers (Excel per material)
-    POST /api/monitoring/stock/transfers/{id}/decide {approve, note} (approvers only)
+    POST /api/monitoring/stock/transfers/{id}/decide {approve, note, qty: {code: qty}} (approvers only; qty adjusts)
     POST /api/monitoring/stock/transfers/{id}/label  {label: esb | portal | null, note}: to be entered in ESB or not
     GET  /api/monitoring/stock/settings              the approvers and the Cost Control accounts
     PUT  /api/monitoring/stock/settings              {"approvers": [user id]}
@@ -58,6 +58,7 @@ class AnswerIn(BaseModel):
 class DecideIn(BaseModel):
     approve: bool
     note: Optional[str] = Field(None, max_length=500)
+    qty: Optional[dict[str, float]] = None  # {item code: quantity} adjusted by Cost Control when approving (migration 076)
 
 
 class ReceiveIn(BaseModel):
@@ -187,7 +188,7 @@ def transfer_lines(ids: str = Query(..., max_length=40_000), _: dict = Depends(r
 
 @router.post("/api/monitoring/stock/transfers/{transfer_id}/decide")
 def decide(transfer_id: str, body: DecideIn, request: Request, user: dict = Depends(require_page(TRANSFER))) -> dict:
-    t = _run(st.decide, user, transfer_id, body.approve, body.note)
+    t = _run(st.decide, user, transfer_id, body.approve, body.note, body.qty)
     _log(request, user, "decide", t, "di-approve Cost Control" if body.approve else "ditolak Cost Control")
     return t
 

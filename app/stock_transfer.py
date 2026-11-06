@@ -8,7 +8,9 @@ Transfer     the requester (outlet A, a PIC of A or the outlet account) asks out
              quantities (no partial transfer), each one at most what B has available; a material B has none of (≤ 0)
              cannot be asked. A photo and a signature come with the request.
                submitted  → B accepts or declines with a note (the stock does not move)
-               accepted   → Cost Control (the approvers set in Monitoring Stock → Settings) approves or rejects
+               accepted   → Cost Control (the approvers set in Monitoring Stock → Settings) approves or rejects; when
+                            approving it may adjust the quantities to the need of the outlets (migration 076, a note
+                            required, the requested quantity kept), within what the source has
                approved   → A receives the goods with a clear photo of them: only then the stock moves (B out, A in),
                             valued with the Pricelist of that day (app/stock_moves.py transferIn / transferOut)
              A request is cancelled by A while B has not answered. Recorded in the portal only: Cost Control labels
@@ -192,8 +194,8 @@ def create(user: dict, body: dict) -> dict:
             (_number(conn), to_b, every.get(to_b) or to_b, from_b, every[from_b], (body.get("note") or "").strip()[:500] or None,
              user["id"], _who(user), photo, pt, sign, st)).fetchone()
         for i, (code, name, unit, qty, avail) in enumerate(clean, 1):
-            conn.execute(f"""INSERT INTO {T_LINE} (transfer_id, line_no, item_code, item_name, unit, qty, available)
-                             VALUES (%s, %s, %s, %s, %s, %s, %s)""", (row["id"], i, code, name, unit, qty, avail))
+            conn.execute(f"""INSERT INTO {T_LINE} (transfer_id, line_no, item_code, item_name, unit, qty, requested_qty, available)
+                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""", (row["id"], i, code, name, unit, qty, qty, avail))
     return detail(row["id"])
 
 
@@ -229,8 +231,9 @@ def _check_available(transfer_id: str, from_b: str) -> None:
             raise TransferError(f"Stok {ln['item_name']} tidak cukup lagi ({avail:g} {ln['unit']} tersedia)")
 
 
-def decide(user: dict, transfer_id: str, approve: bool, note: Optional[str]) -> dict:
-    """Cost Control approves or rejects a transfer the source accepted."""
+def decide(user: dict, transfer_id: str, approve: bool, note: Optional[str], qty: Optional[dict[str, float]] = None) -> dict:
+    """Cost Control approves or rejects a transfer the source accepted; `qty` {item code: quantity}: the quantities
+    adjusted when approving (each > 0 and at most what the source has; a note required when one changes)."""
     if not is_approver(user):
         raise TransferError("Akun Anda bukan approver Transfer Stock (Monitoring Stock → Pengaturan)")
     t = _load(transfer_id)
@@ -239,8 +242,31 @@ def decide(user: dict, transfer_id: str, approve: bool, note: Optional[str]) -> 
     note = (note or "").strip()[:500] or None
     if not approve and not note:
         raise TransferError("Tulis alasan penolakan")
+    changes: list[tuple[float, str]] = []
+    if approve and qty:
+        lines = {r["item_code"]: r for r in db.fetch(f"SELECT item_code, item_name, qty FROM {T_LINE} WHERE transfer_id::text = %s", (transfer_id,))}
+        for code, q in qty.items():
+            if code not in lines:
+                raise TransferError("Material tidak ada di transfer ini")
+            q = _f(q)
+            if q <= 0:
+                raise TransferError(f"Qty {lines[code]['item_name']} harus lebih dari 0")
+            if abs(q - _f(lines[code]["qty"])) > 1e-9:
+                changes.append((q, code))
+        if changes and not note:
+            raise TransferError("Tulis alasan penyesuaian qty")
     if approve:
-        _check_available(transfer_id, t["from_branch"])
+        with db.transaction() as conn:  # the adjusted quantities first, then the stock check counts them
+            for q, code in changes:
+                conn.execute(f"UPDATE {T_LINE} SET qty = %s WHERE transfer_id::text = %s AND item_code = %s", (q, transfer_id, code))
+        try:
+            _check_available(transfer_id, t["from_branch"])
+        except TransferError:
+            if changes:  # back to what it was: nothing approved
+                with db.transaction() as conn:
+                    for _, code in changes:
+                        conn.execute(f"UPDATE {T_LINE} SET qty = requested_qty WHERE transfer_id::text = %s AND item_code = %s", (transfer_id, code))
+            raise
     _exec(f"""UPDATE {T} SET status = %s, cc_note = %s, cc_by = %s, cc_at = now() WHERE id::text = %s AND status = 'accepted'""",
                ("approved" if approve else "rejected", note, _who(user), transfer_id))
     return detail(transfer_id)
@@ -323,6 +349,7 @@ def detail(transfer_id: str) -> dict:
     lines = db.fetch(f"SELECT * FROM {T_LINE} WHERE transfer_id::text = %s ORDER BY line_no", (transfer_id,))
     est = prices([ln["item_code"] for ln in lines]) if r["status"] != "received" else {}
     v["items"] = [{"code": ln["item_code"], "name": ln["item_name"], "unit": ln["unit"], "qty": _f(ln["qty"]),
+                   "requested": _f(ln["requested_qty"]) if ln.get("requested_qty") is not None else _f(ln["qty"]),
                    "available": _f(ln["available"]) if ln["available"] is not None else None,
                    "price": _f(ln["price"]) if ln["price"] is not None else est.get(ln["item_code"]),
                    "value": _f(ln["value"]) if ln["value"] is not None else (round(_f(ln["qty"]) * est[ln["item_code"]], 2) if ln["item_code"] in est else None)}
@@ -356,6 +383,7 @@ def lines_of(ids: list[str]) -> list[dict]:
     if not ids:
         return []
     return [{"id": r["id"], "code": r["item_code"], "name": r["item_name"], "unit": r["unit"], "qty": _f(r["qty"]),
+             "requested": _f(r["requested_qty"]) if r.get("requested_qty") is not None else _f(r["qty"]),
              "price": _f(r["price"]) if r["price"] is not None else None, "value": _f(r["value"]) if r["value"] is not None else None}
             for r in db.fetch(f"SELECT transfer_id::text AS id, * FROM {T_LINE} WHERE transfer_id::text = ANY(%s) ORDER BY 1, line_no", (ids,))]
 

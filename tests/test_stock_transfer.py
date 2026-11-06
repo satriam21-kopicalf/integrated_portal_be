@@ -51,3 +51,16 @@ def test_only_my_outlet_asks_and_never_itself(source, monkeypatch):
         st.create({"id": "u1", "username": "pic"}, {"toBranch": B, "fromBranch": A, "lines": [{"code": "RM-MILK", "qty": 1}]})
     with pytest.raises(st.TransferError, match="selain outlet Anda"):
         st.create({"id": "u1", "username": "pic"}, {"toBranch": A, "fromBranch": A, "lines": [{"code": "RM-MILK", "qty": 1}]})
+
+
+def test_cost_control_adjusts_the_quantities_with_a_note(monkeypatch):
+    monkeypatch.setattr(st, "is_approver", lambda user: True)
+    monkeypatch.setattr(st, "_load", lambda tid: {"id": tid, "number": "TS-1", "status": "accepted", "to_branch": A, "from_branch": B, "requested_by": "u"})
+    monkeypatch.setattr(st.db, "fetch", lambda q, p=None: [{"item_code": "RM-MILK", "item_name": "Fresh Milk", "qty": 500}])
+    user = {"id": "cc", "username": "cc"}
+    with pytest.raises(st.TransferError, match="alasan penyesuaian"):
+        st.decide(user, "t1", True, None, {"RM-MILK": 300})
+    with pytest.raises(st.TransferError, match="lebih dari 0"):
+        st.decide(user, "t1", True, "kurangi", {"RM-MILK": 0})
+    with pytest.raises(st.TransferError, match="tidak ada di transfer"):
+        st.decide(user, "t1", True, "kurangi", {"RM-SUGAR": 1})

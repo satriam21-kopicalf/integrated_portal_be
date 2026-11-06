@@ -8,6 +8,7 @@
     DELETE /api/cost-control/sales-calc/recipes/{code}
     GET    /api/cost-control/sales-calc/menus?days=             ESB POS menus sold lately and their card
     GET    /api/cost-control/sales-calc/menus/{id}/package      what ESB records inside a menu (bundling contents)
+    POST   /api/cost-control/sales-calc/auto-cards            {"dry"}: a card for every menu without one (ESB BOM, bundles)
     GET    /api/cost-control/sales-calc/wips                    WIP / premix recipes (production calculator)
     GET/POST /api/cost-control/sales-calc/extras, PUT/DELETE /.../extras/{id}   items outside the cards (cable ties,
                                                                 plastic …) per bill / portion / outlet-day (migration 057)
@@ -118,6 +119,19 @@ def package(menu_id: str, _: dict = Depends(require_page(CALC))) -> dict:
         return mc.package_contents(menu_id)
     except mc.CostingError as exc:
         _refuse(exc)
+
+
+@router.post("/sales-calc/auto-cards")
+def auto_cards(body: dict, request: Request, user: dict = Depends(require_page(CALC))) -> dict:
+    """A card for every menu sold lately without one: the ESB BOM of the menu, a bundle from its package contents."""
+    dry = bool(body.get("dry", True))
+    out = mo.auto_cards(user, dry=dry)
+    if not dry:
+        activity.record("cc.menu-recipe", user=user, request=request, page="/cost-control/sales-calculator",
+                        summary=f"Kartu resep otomatis: {len(out['created'])} dari BOM, {len(out['bundles'])} bundling, "
+                                f"{len(out['assigned'])} menu dipasang, {len(out['skipped'])} dilewati",
+                        details={k: out[k] for k in ("created", "bundles", "assigned")})
+    return out
 
 
 @router.get("/sales-calc/wips")

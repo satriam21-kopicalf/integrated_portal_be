@@ -305,3 +305,106 @@ def import_bom(bom_id: str, data: dict, user: dict) -> dict:
     if data.get("menus") is not None:
         body["menus"] = data["menus"]
     return menu_costing.save_recipe(code if exists else None, body, user)
+
+
+# ---------------------------------------------------------------- recipe cards made for every menu (2026-11-06)
+
+def _fixed_contents(groups: list[dict]) -> Optional[list[tuple[str, str, float]]]:
+    """[(menu id, name, portions)] of a bundle whose package groups are fixed: a group of one menu (its min quantity)
+    or of n menus taken n (one of each); None when a group is a choice (pick 2 of 5 …)."""
+    out = []
+    for g in groups:
+        menus = [m for m in g.get("menus") or [] if str(m.get("flagActive", 1)) == "1"] or (g.get("menus") or [])
+        n, need = len(menus), _f(g.get("minQty"))
+        if n == 1 and need > 0:
+            out.append((str(menus[0].get("menuID")), menus[0].get("menuName") or "", need))
+        elif n > 1 and need == n:
+            out.extend((str(m.get("menuID")), m.get("menuName") or "", 1.0) for m in menus)
+        else:
+            return None
+    return out or None
+
+
+def auto_cards(user: dict, dry: bool = False, days: int = 90) -> dict:
+    """A recipe card for every menu sold lately without one: from the ESB BOM linked to the menu in the POS menu master
+    (menus sharing a BOM share its card), and for a bundle without a BOM a card holding the cards of its fixed package
+    contents. Cards already made are kept; dry: only what would be done."""
+    from app import menu_costing
+    menus = [m for m in menu_costing.menus(days) if not m["recipe"] and "menu" in m["kinds"]]
+    cards = {r["code"]: r for r in menu_costing.recipes()}
+    mapped = {m["id"]: code for code, c in cards.items() for m in c["menus"]}
+    ids = [m["id"] for m in menus]
+    master = {r["id"]: r for r in db.fetch(
+        f"""SELECT company_code || ':' || menu_id AS id, company_code, menu_name, raw_data->>'bomID' AS bom,
+                   raw_data->'menuPackages'->'menuGroup' AS groups
+              FROM {SCHEMA}.master_pos_menu WHERE company_code || ':' || menu_id = ANY(%s)""", (ids,))} if ids else {}
+    bom_codes = {str(r["bom_id"]): r["bom_code"] for r in db.fetch(
+        f"SELECT bom_id, bom_code FROM {SCHEMA}.master_bom WHERE bom_id::text = ANY(%s)",
+        ([str(r["bom"]) for r in master.values() if r["bom"] and r["bom"] != "0"],))} if master else {}
+    by_bom: dict[str, list[dict]] = {}
+    bundles, skipped = [], []
+    for m in menus:
+        r = master.get(m["id"])
+        if not r:
+            skipped.append({"id": m["id"], "name": m["name"], "reason": "tidak ada di master menu ESB"})
+        elif r["bom"] and r["bom"] != "0" and r["bom"] in bom_codes:
+            by_bom.setdefault(r["bom"], []).append(m)
+        elif r["groups"]:
+            bundles.append((m, r))
+        else:
+            skipped.append({"id": m["id"], "name": m["name"], "reason": "tanpa BOM dan tanpa isi package di ESB"})
+    # the menus inside the bundles get their card too, sold on their own lately or not
+    inside = {f"{r['company_code']}:{mid}": n for _, r in bundles for mid, n, _ in (_fixed_contents(r["groups"] or []) or [])}
+    extra = [i for i in inside if i not in mapped and not any(i == x["id"] for ms in by_bom.values() for x in ms)]
+    if extra:
+        for r in db.fetch(f"""SELECT company_code || ':' || menu_id AS id, menu_name, raw_data->>'bomID' AS bom,
+                                     (SELECT bom_code FROM {SCHEMA}.master_bom b WHERE b.bom_id::text = raw_data->>'bomID') AS bom_code
+                                FROM {SCHEMA}.master_pos_menu WHERE company_code || ':' || menu_id = ANY(%s)""", (extra,)):
+            if r["bom"] and r["bom"] != "0" and r["bom_code"] is not None:
+                bom_codes[r["bom"]] = r["bom_code"]
+                by_bom.setdefault(r["bom"], []).append({"id": r["id"], "name": r["menu_name"]})
+    created, assigned = [], []
+    for bom_id, ms in by_bom.items():
+        code = f"BOM-{bom_codes[bom_id] or bom_id}".upper()[:40]
+        menus_of = [{"id": x["id"], "name": x["name"]} for x in ms]
+        if code in cards:
+            assigned.extend(x["name"] for x in ms)
+            if not dry:
+                c = cards[code]
+                menu_costing.save_recipe(code, {**c, "menus": c["menus"] + menus_of}, user)
+        else:
+            try:
+                if not dry:
+                    cards[code] = import_bom(bom_id, {"code": code, "menus": menus_of}, user)
+                else:
+                    cards[code] = {"code": code, "name": ms[0]["name"], "menus": menus_of, "lines": []}
+                created.append({"code": code, "name": cards[code]["name"], "menus": [x["name"] for x in ms]})
+            except (OptionError, menu_costing.CostingError) as exc:
+                skipped.extend({"id": x["id"], "name": x["name"], "reason": str(exc)} for x in ms)
+                continue
+        for x in ms:
+            mapped[x["id"]] = code
+    made_bundles = []
+    for m, r in bundles:
+        company = r["company_code"]
+        contents = _fixed_contents(r["groups"] or [])
+        if contents is None:
+            skipped.append({"id": m["id"], "name": m["name"], "reason": "isi package berupa pilihan, isi kartunya manual"})
+            continue
+        missing = [n for mid, n, _ in contents if f"{company}:{mid}" not in mapped]
+        if missing:
+            skipped.append({"id": m["id"], "name": m["name"], "reason": "menu isi belum punya kartu: " + ", ".join(sorted(set(missing)))})
+            continue
+        lines: dict[str, dict] = {}
+        for mid, n, q in contents:
+            code = mapped[f"{company}:{mid}"]
+            ln = lines.setdefault(code, {"type": "menu", "code": code, "name": cards[code]["name"] if code in cards else n, "qty": 0.0})
+            ln["qty"] += q
+        code = f"BUNDLE-{m['id'].split(':')[-1]}" + ("" if company == MAIN_COMPANY else f"-{company}")
+        if not dry:
+            menu_costing.save_recipe(code if code in cards else None, {
+                "code": code, "name": m["name"], "category": "Bundling", "lines": list(lines.values()),
+                "note": "Dari isi package menu ESB", "isActive": True, "menus": [{"id": m["id"], "name": m["name"]}]}, user)
+        made_bundles.append({"code": code, "name": m["name"], "contents": [f"{ln['qty']:g} × {ln['name']}" for ln in lines.values()]})
+    return {"dry": dry, "created": created, "assigned": assigned, "bundles": made_bundles, "skipped": skipped,
+            "menus": len(menus)}

@@ -293,7 +293,8 @@ def menu_prices(ids: list[str]) -> dict[str, list[dict]]:
     for r in rows:
         per: dict[str, list[float]] = {}
         for t in r["templates"] or []:
-            price = _f(t.get("price")) if str(t.get("flagActive")) == "1" else 0.0
+            test = "TEST" in str(t.get("menuTemplateName") or "").upper()  # ONLINE-TESTING …: no selling price
+            price = _f(t.get("price")) if str(t.get("flagActive")) == "1" and not test else 0.0
             if price >= 100:
                 per.setdefault(_channel(str(t.get("menuTemplateName") or "")), []).append(price)
         if not per and r["price"] is not None and _f(r["price"]) >= 100:

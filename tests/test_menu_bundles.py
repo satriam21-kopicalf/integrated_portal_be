@@ -78,3 +78,12 @@ def test_a_bundle_with_a_card_takes_over_its_packages(monkeypatch):
     assert got["unmapped"] == [{"id": "CALF:300", "name": "Bundling Kopi + Choco", "category": "BEVERAGE", "qty": 5,
                                 "sales": 300000, "viaPackages": True}]
     assert got["unruled"] == []  # the menus inside a bundle are no choices to rule
+
+
+def test_fixed_bundle_contents():
+    one = {"menus": [{"menuID": 1, "menuName": "Es Kopi", "flagActive": 1}], "minQty": "3.0000"}
+    pair = {"menus": [{"menuID": 5, "menuName": "Choco", "flagActive": 1}, {"menuID": 1, "menuName": "Es Kopi", "flagActive": 1}], "minQty": "2.0000"}
+    pick = {"menus": [{"menuID": 5}, {"menuID": 1}, {"menuID": 7}], "minQty": "2.0000"}
+    assert menu_options._fixed_contents([one]) == [("1", "Es Kopi", 3.0)]
+    assert menu_options._fixed_contents([pair]) == [("5", "Choco", 1.0), ("1", "Es Kopi", 1.0)]
+    assert menu_options._fixed_contents([one, pick]) is None

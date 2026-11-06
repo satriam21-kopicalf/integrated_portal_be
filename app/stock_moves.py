@@ -10,6 +10,8 @@ in or out of a branch between two stock opnames (integration_esb.erp_documents +
     consumed   … its material lines go out.
     delivered  goods_delivery: goods the outlet sends out (to Calf Warehouse).
     returned   purchase_return, goods_receipt_return: back to the supplier.
+    transferIn / transferOut  the Transfer Stock between outlets received in the period (TITO, migration 075, recorded
+               in the portal only; app/stock_transfer.py), in the base unit of the item.
 
 Drafts (New), rejected, cancelled and void documents are left out; item_journal (the adjustments of the stock opname)
 too, the counts already hold them.
@@ -30,7 +32,7 @@ MOVES = {
     "returned": ("purchase_return", "detail", -1),
     "returnedGr": ("goods_receipt_return", "detail", -1),
 }
-KINDS = ("received", "outletBuy", "produced", "consumed", "delivered", "returned")
+KINDS = ("received", "outletBuy", "produced", "consumed", "delivered", "returned", "transferIn", "transferOut")
 SKIP = ("New", "Draft", "Rejected", "Cancelled", "Canceled", "Void")
 
 
@@ -56,6 +58,12 @@ def moves(d_from: date, d_to: date, branches: list[str]) -> dict[str, dict[str, 
         bucket = out.setdefault(r["branch_code"], {}).setdefault(kind, {})
         key = (r["product_code"], r["uom"])
         bucket[key] = bucket.get(key, 0.0) + sign * float(r["qty"])
+    # the transfers between outlets (portal, TITO)
+    from app import stock_transfer
+    for r in stock_transfer.moves(d_from, d_to, branches):
+        bucket = out.setdefault(r["branch"], {}).setdefault(r["kind"], {})
+        key = (r["item_code"], str(r["unit"] or "").upper())
+        bucket[key] = bucket.get(key, 0.0) + float(r["qty"])
     # the Good Receipts Cost Control corrected (receipt date, quantity; migration 072)
     from app import goods_receipt
 

@@ -35,6 +35,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("form.damaged-equipment", "Damaged Equipment (form)", "Form"),
     ("form.pengajuan", "Pengajuan (form)", "Form"),
     ("form.wwwr", "WW-WR (form, SWAT)", "Form"),
+    ("form.stock-transfer", "Transfer Stock (form, TITO)", "Form"),
     ("cc.monitor", "Monitor", "Cost Control · Stock opname"),
     ("cc.reviews", "Review", "Cost Control · Stock opname"),
     ("cc.entry", "Enter / import SO", "Cost Control · Stock opname"),
@@ -53,6 +54,8 @@ PAGES: list[tuple[str, str, str]] = [
     ("cc.ratio", "Outlet Ratio", "Cost Control · Analytics"),
     ("cc.cogs", "COGS & Usage", "Cost Control · Analytics"),
     ("cc.goods-receipt", "Good Receipt", "Cost Control · Analytics"),
+    ("cc.stock-list", "Stock List", "Monitoring Stock"),
+    ("cc.stock-transfer", "Transfer Stock", "Monitoring Stock"),
     ("mon.overview", "Overview", "Monitoring OPS"),
     ("mon.pic-check-in", "PIC Check In", "Monitoring OPS"),
     ("mon.surveyor-check-in", "Cost Control Check In", "Cost Control · Check In"),
@@ -89,7 +92,7 @@ PLATFORMS = ("portal", "operations", "cotr")
 DRIVER_MENU = (("driver.transaksi", "Transaksi"), ("driver.reload", "Reload"), ("driver.pengajuan", "Pengajuan"))
 OPERATIONS_PAGES = ("overview", "sales", "rating.grabfood", "rating.google-maps", "rating.shopeefood", "rating.gofood",
                     "form.pic-check-in", "form.surveyor-check-in", "form.product", "form.outlet",
-                    "form.damaged-equipment", "stock-opname", "waste", "form.pengajuan", "form.wwwr")
+                    "form.damaged-equipment", "stock-opname", "waste", "form.pengajuan", "form.wwwr", "form.stock-transfer")
 MENU_KEYS = PAGE_KEYS + tuple(k for k, _ in DRIVER_MENU)
 
 
@@ -148,7 +151,7 @@ FORM_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("form.") and k not in PE
 # is added to the role by its migration); role "outlet" = the shared outlet / HUB CK / HUB WH accounts (2026-10-28)
 DEFAULT_ROLE_PAGES = {
     "user": ["overview", "sales", "stock-opname", "waste", "guide", *FORM_PAGES],
-    "outlet": ["stock-opname", "waste", "form.pengajuan"],
+    "outlet": ["stock-opname", "waste", "form.pengajuan", "form.stock-transfer"],
     "cost_control": ["overview", "sales", "stock-opname", "waste", "guide", *CC_PAGES],
 }
 

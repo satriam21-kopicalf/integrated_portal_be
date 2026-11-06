@@ -7,7 +7,7 @@ from tests.test_stock_opname import gateway, payload  # noqa: F401 (fixtures)
 def test_me_lists_pages_of_the_role(anon, store):
     me = login(anon, "kasir", "Kasir1234").json()["user"]
     assert me["pages"] == ["overview", "sales", "stock-opname", "waste", "guide", "form.pic-check-in", "form.product", "form.outlet",
-                           "form.damaged-equipment", "form.pengajuan"]
+                           "form.damaged-equipment", "form.pengajuan", "form.stock-transfer"]
     login(anon, "superadmin", "Admin1234")
     assert anon.get("/api/auth/me").json()["user"]["pages"] == list(access.PAGE_KEYS)
 
@@ -29,7 +29,7 @@ def test_user_exceptions_open_and_close_pages(anon, store, page_access, gateway)
 
     login(anon, "kasir", "Kasir1234")
     assert anon.get("/api/auth/me").json()["user"]["pages"] == ["overview", "stock-opname", "waste", "guide", "form.pic-check-in", "form.product",
-                                                                "form.outlet", "form.damaged-equipment", "form.pengajuan", "cc.monitor", "cc.ratio"]
+                                                                "form.outlet", "form.damaged-equipment", "form.pengajuan", "form.stock-transfer", "cc.monitor", "cc.ratio"]
     assert anon.get("/api/transactions?dateFrom=2026-09-29&dateTo=2026-09-30").status_code == 403
     assert anon.get("/api/so/counts/monitor").status_code == 200
     assert payload(gateway[-1]["headers"])["role"] == "cost_control"  # Cost Control pages: Cost Control in kopicalf

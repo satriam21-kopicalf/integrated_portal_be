@@ -584,6 +584,11 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
     system, plan, per_menu, extra_rows = got["system"], got["plan"], got["menus"], got["extras"]
     codes = [k for k in system if not k.startswith(("wip:", "n:", "o:"))]
     price = prices_on(d_to, codes or None)
+    # an item without a Pricelist price valid by then takes the ESB HPP (as the waste value, 2026-11-06): a price set
+    # later in the Pricelist must not drop the menus using it out of the COGS
+    hpp_esb = esb_hpp(d_to) if any(c not in price for c in codes) else {}
+    fallback = sorted(c for c in codes if c not in price and c in hpp_esb)
+    price.update({c: hpp_esb[c][0] for c in fallback})
     # HPP of a portion of every card used
     hpp: dict[str, Optional[float]] = {}
     def cost(v: dict) -> Optional[float]:
@@ -686,6 +691,7 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
                       "allSales": round(got["allSales"], 2), "choiceSales": round(got["choiceSales"], 2),
                       "unpriced": sum(1 for m in per_menu if m["hpp"] is None),
                       "nonSalesCost": round(non_sales_cost, 2),
+                      "priceFallback": len(fallback), "priceMissing": sum(1 for c in codes if c not in price),
                       "systemValue": sum(u["systemValue"] or 0 for u in usage),
                       "actualValue": actual_cogs or 0,
                       "actualCogs": round(actual_cogs, 2) if actual_cogs is not None else None,

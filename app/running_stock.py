@@ -79,11 +79,13 @@ def system_usage(starts: dict[str, date], d_to: date) -> dict[str, dict[str, dic
     from app import menu_options
     if not starts:
         return {}
+    from app import test_branches
     branches, d_from = list(starts), min(starts.values())
+    source = {b: test_branches.sources().get(b, b) for b in branches}  # a test branch sells what its source sells
     cards = {k: c for k, c in mc.resolve({r["code"]: r for r in mc.recipes()}).items() if c["isActive"]}
     mapped = {m["id"]: code for code, c in cards.items() for m in c["menus"]}
     wip = mc.wips()
-    br = {"a": d_from, "b": d_to, "br": branches, "main": MAIN_COMPANY}
+    br = {"a": d_from, "b": d_to, "br": sorted(set(source.values())), "main": MAIN_COMPANY}
     company = f"coalesce(br.company, %(main)s)"
     sold = db.fetch(
         f"""WITH br AS ({mc.BRANCH_COMPANY})
@@ -102,7 +104,7 @@ def system_usage(starts: dict[str, date], d_to: date) -> dict[str, dict[str, dic
     except Exception:  # noqa: BLE001 - no choices data: the cards alone
         choices, rule = [], {}
     try:
-        given = mc.non_sales_by_branch(d_from, d_to, branches)
+        given = mc.non_sales_by_branch(d_from, d_to, sorted(set(source.values())))
     except Exception:  # noqa: BLE001 - the transactions unreachable: the sales alone
         given = []
     base = db.fetch(f"""SELECT branch_code, sales_date, coalesce(sum(bills) FILTER (WHERE tx_type = 'sales'), 0) AS bills,
@@ -113,11 +115,14 @@ def system_usage(starts: dict[str, date], d_to: date) -> dict[str, dict[str, dic
     bundles = {m for m, code in mapped.items() if cards[code].get("bundle")}
 
     by = {b: {"sold": [], "choices": [], "given": [], "base": []} for b in branches}
+    takers: dict[str, list[str]] = {}
+    for b, s in source.items():
+        takers.setdefault(s, []).append(b)
     for key, rows in (("sold", sold), ("choices", choices), ("given", given), ("base", base)):
         for r in rows:
-            b = r["branch_code"]
-            if b in by and r["sales_date"] >= starts[b]:
-                by[b][key].append(r)
+            for b in takers.get(r["branch_code"], []):
+                if r["sales_date"] >= starts[b]:
+                    by[b][key].append(r)
     out: dict[str, dict[str, dict]] = {}
     for b, d in by.items():
         system: dict[str, dict] = {}

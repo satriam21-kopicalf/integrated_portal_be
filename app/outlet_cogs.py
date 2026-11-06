@@ -45,10 +45,13 @@ def outlets(d_from: date, d_to: date, branches: Optional[list[str]]) -> dict:
     refs = {b: (start[b]["refs"], end[b]["refs"], start[b]["source"], end[b]["source"]) for b in covered}
     numbers = sorted({r for a, z, _, _ in refs.values() for r in a + z})
     status = {r["number"]: r["status"] for r in db.fetch("SELECT number, status FROM kc_inventory.stock_count WHERE number = ANY(%s)", (numbers,))}
-    sales = {r["branch_code"]: r for r in db.fetch(
+    from app import test_branches
+    src = {b: test_branches.sources().get(b, b) for b in covered}  # a test branch sells what its source sells
+    by_src = {r["branch_code"]: r for r in db.fetch(
         f"""SELECT branch_code, sum(subtotal) AS gross, sum(nett_sales) AS nett, sum(bills)::int AS bills
               FROM {P}.agg_sales_daily WHERE tx_type = 'sales' AND sales_date BETWEEN %s AND %s AND branch_code = ANY(%s)
-             GROUP BY 1""", (d_from, d_to, covered))}
+             GROUP BY 1""", (d_from, d_to, sorted(set(src.values()))))}
+    sales = {b: by_src[s] for b, s in src.items() if s in by_src}
     wrows = db.fetch(f"""SELECT * FROM {waste.T} WHERE status = 'approved' AND business_date BETWEEN %s AND %s AND branch_code = ANY(%s)""",
                      (d_from, d_to, covered))
     wval: dict[str, float] = {}

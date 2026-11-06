@@ -41,6 +41,9 @@ def moves(d_from: date, d_to: date, branches: list[str]) -> dict[str, dict[str, 
     out: dict[str, dict[str, dict[tuple[str, str], float]]] = {}
     if not branches:
         return out
+    from app import test_branches
+    readers = test_branches.readers(branches)  # a test branch gets the ESB documents of its source branch
+    asked, branches = branches, sorted(readers)
     pairs = sorted({(m, t) for m, t, _ in MOVES.values()})
     rows = db.fetch(
         f"""SELECT b.branch_code, d.module, l.line_type, l.product_code, upper(coalesce(l.uom_name, '')) AS uom, sum(l.qty) AS qty
@@ -55,20 +58,22 @@ def moves(d_from: date, d_to: date, branches: list[str]) -> dict[str, dict[str, 
     kind_of = {(m, t): (k if k != "returnedGr" else "returned", s) for k, (m, t, s) in MOVES.items()}
     for r in rows:
         kind, sign = kind_of[(r["module"], r["line_type"])]
-        bucket = out.setdefault(r["branch_code"], {}).setdefault(kind, {})
-        key = (r["product_code"], r["uom"])
-        bucket[key] = bucket.get(key, 0.0) + sign * float(r["qty"])
+        for b in readers.get(r["branch_code"], []):
+            bucket = out.setdefault(b, {}).setdefault(kind, {})
+            key = (r["product_code"], r["uom"])
+            bucket[key] = bucket.get(key, 0.0) + sign * float(r["qty"])
     # the transfers between outlets (portal, TITO)
     from app import stock_transfer
-    for r in stock_transfer.moves(d_from, d_to, branches):
+    for r in stock_transfer.moves(d_from, d_to, asked):
         bucket = out.setdefault(r["branch"], {}).setdefault(r["kind"], {})
         key = (r["item_code"], str(r["unit"] or "").upper())
         bucket[key] = bucket.get(key, 0.0) + float(r["qty"])
     # the Good Receipts Cost Control corrected (receipt date, quantity; migration 072)
     from app import goods_receipt
 
-    for branch, items in goods_receipt.adjustments(d_from, d_to, branches)["qty"].items():
-        bucket = out.setdefault(branch, {}).setdefault("received", {})
-        for key, dq in items.items():
-            bucket[key] = bucket.get(key, 0.0) + dq
+    for src, items in goods_receipt.adjustments(d_from, d_to, branches)["qty"].items():
+        for branch in readers.get(src, []):
+            bucket = out.setdefault(branch, {}).setdefault("received", {})
+            for key, dq in items.items():
+                bucket[key] = bucket.get(key, 0.0) + dq
     return out

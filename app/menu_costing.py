@@ -35,6 +35,7 @@ from psycopg.types.json import Jsonb
 
 from app import database as db
 from app.database import SCHEMA
+from app import test_branches
 from app.scope import COMPANY_NAMES, MAIN_COMPANY
 
 P = "integration_portal"
@@ -488,6 +489,7 @@ def non_sales_by_branch(d_from: date, d_to: date, branches: list[str]) -> list[d
 def _sold(d_from: date, d_to: date, branches: Optional[list[str]], cards: dict, mapped: dict, wip: dict, horizon: int,
           buffer_pct: float) -> dict:
     """The menus sold by the branches exploded through the cards (system usage, the plan) with the additional items."""
+    branches = test_branches.real(branches)  # a test branch sells what its source branch sells
     days = (d_to - d_from).days + 1
     sold = db.fetch(
         f"""WITH br AS ({BRANCH_COMPANY})
@@ -749,19 +751,23 @@ def portal_counts(day: date, branches: Optional[list[str]], back: int = 1, ahead
     if hi < lo:
         return {}
     rows = db.fetch(
-        f"""SELECT b.branch_code, c.business_date, c.number, it.code, upper(coalesce(l.base_uom, '')) AS unit,
+        f"""SELECT coalesce(b.branch_code, fa.code) AS branch_code, c.business_date, c.number, it.code, upper(coalesce(l.base_uom, '')) AS unit,
                    upper(coalesce(l.esb_uom, '')) AS esb_uom, coalesce(l.esb_factor, 1) AS esb_factor,
                    sum(coalesce(l.qty_base, 0) + coalesce(l.qty_wip, 0)) AS qty
               FROM kc_inventory.stock_count c
-              JOIN kc_master.facility_esb_map m ON m.facility_id = c.facility_id
-              JOIN {SCHEMA}.master_branches b ON b.company_code = m.company_code AND b.branch_id::text = m.esb_id
+              JOIN kc_master.facility fa ON fa.id = c.facility_id
+              LEFT JOIN kc_master.facility_esb_map m ON m.facility_id = c.facility_id
+              LEFT JOIN {SCHEMA}.master_branches b ON b.company_code = m.company_code AND b.branch_id::text = m.esb_id
               JOIN kc_inventory.stock_count_line l ON l.count_id = c.id AND l.is_current
                    AND (l.qty_base IS NOT NULL OR coalesce(l.qty_wip, 0) > 0)
               JOIN kc_master.item it ON it.id = l.item_id
              WHERE c.status = ANY(%(live)s) AND c.business_date BETWEEN %(lo)s AND %(hi)s
-               AND (%(br)s::text[] IS NULL OR b.branch_code = ANY(%(br)s))
+               AND (b.branch_code IS NOT NULL OR fa.code = ANY(%(test)s))
+               AND (%(br)s::text[] IS NULL OR coalesce(b.branch_code, fa.code) = ANY(%(br)s))
              GROUP BY 1, 2, 3, 4, 5, 6, 7""",
-        {"live": list(LIVE_COUNTS), "lo": lo, "hi": hi, "br": branches})
+        {"live": list(LIVE_COUNTS), "lo": lo, "hi": hi, "br": branches, "test": list(test_branches.sources())})
+    if branches is None:  # every branch: the test branches stay out of the real figures (app/test_branches.py)
+        rows = [r for r in rows if not test_branches.is_test(r["branch_code"])]
     best: dict[str, date] = {}
     for r in rows:
         d = r["business_date"]

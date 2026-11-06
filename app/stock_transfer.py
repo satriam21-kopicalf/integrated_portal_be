@@ -177,7 +177,7 @@ def create(user: dict, body: dict) -> dict:
         raise TransferError("Outlet peminta bukan outlet akun Anda")
     if from_b == to_b:
         raise TransferError("Pilih outlet tujuan selain outlet Anda sendiri")
-    every = {b["code"]: b["name"] for b in branch_options({}, every=True)}
+    every = {b["code"]: b["name"] for b in _sources_for(user)}
     if from_b not in every:
         raise TransferError("Outlet tujuan tidak ditemukan")
     lines = [ln for ln in body.get("lines") or [] if ln.get("code")]
@@ -411,10 +411,20 @@ def lines_of(ids: list[str]) -> list[dict]:
             for r in db.fetch(f"SELECT transfer_id::text AS id, * FROM {T_LINE} WHERE transfer_id::text = ANY(%s) ORDER BY 1, line_no", (ids,))]
 
 
+def _sources_for(user: dict) -> list[dict]:
+    """The outlets a user may ask: the real outlets, or for a test branch the other test branches only (2026-11-07)."""
+    from app import test_branches
+    mine = [b["code"] for b in branch_options(user)]
+    if any(test_branches.is_test(c) for c in mine):
+        names = _names(list(test_branches.sources()))
+        return [{"code": c, "name": names.get(c, c)} for c in sorted(test_branches.sources())]
+    return [{"code": b["code"], "name": b["name"]} for b in branch_options({}, every=True)]
+
+
 def form(user: dict) -> dict:
     mine = branch_options(user)
     codes = [b["code"] for b in mine]
-    every = [{"code": b["code"], "name": b["name"]} for b in branch_options({}, every=True)]
+    every = _sources_for(user)
     d_to = date.today()
     d_from = d_to - timedelta(days=60)
     outgoing = listing(d_from, d_to, codes, side="to", limit=100)["data"]

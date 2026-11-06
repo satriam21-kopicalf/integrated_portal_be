@@ -610,12 +610,13 @@ def _inv_view(r: dict, entries: Optional[list[dict]] = None) -> dict:
 
 
 def open_investigation(ids: list[str], user: dict, branches: Optional[tuple]) -> dict:
-    """An investigation of entries of one branch (not decided yet), pre-filled from them; the entries wait in status
-    investigating."""
-    rows = db.fetch(f"SELECT {COLUMNS} FROM {T} e WHERE e.id::text = ANY(%s) AND e.status IN ('submitted', 'investigating')",
+    """An investigation of entries of one branch, pre-filled from them: entries not decided yet wait in status
+    investigating; approved entries stay approved (2026-11-07: Cost Control approves first so the COGS is counted at
+    once, QA investigates afterwards). Rejected entries are not investigated."""
+    rows = db.fetch(f"SELECT {COLUMNS} FROM {T} e WHERE e.id::text = ANY(%s) AND e.status IN ('submitted', 'investigating', 'approved')",
                     (ids,))
     if not rows or len(rows) != len(set(ids)):
-        raise WasteError("Pilih entri waste yang belum diputuskan")
+        raise WasteError("Pilih entri waste yang belum diputuskan atau sudah di-approve")
     if branches is not None and any(r["branch_code"] not in branches for r in rows):
         raise WasteError("Entri di luar cabang Anda")
     if len({r["branch_code"] for r in rows}) > 1:
@@ -641,8 +642,9 @@ def open_investigation(ids: list[str], user: dict, branches: Optional[tuple]) ->
         inv = conn.execute(f"""INSERT INTO {T_INV} (branch_code, branch_name, report, created_by, updated_by)
                                VALUES (%s, %s, %s::jsonb, %s, %s) RETURNING id::text""",
                            (first["branch_code"], first["branch_name"], json.dumps(report), by, by)).fetchone()
+        conn.execute(f"""UPDATE {T} SET investigation_id = %s::uuid WHERE id::text = ANY(%s) AND status = 'approved'""", (inv["id"], ids))
         conn.execute(f"""UPDATE {T} SET status = 'investigating', investigation_id = %s::uuid, review_note = NULL,
-                         reviewed_by = %s, reviewed_at = now() WHERE id::text = ANY(%s)""", (inv["id"], by, ids))
+                         reviewed_by = %s, reviewed_at = now() WHERE id::text = ANY(%s) AND status <> 'approved'""", (inv["id"], by, ids))
     return investigation(inv["id"])
 
 

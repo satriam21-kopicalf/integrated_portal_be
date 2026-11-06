@@ -487,6 +487,15 @@ def daily(date_from: date, date_to: date, branches: Optional[list[str]]) -> dict
     if branches is not None:
         every = [b for b in every if b["code"] in set(branches)]
     p = {"a": date_from, "b": date_to, "br": [b["code"] for b in every]}
+    # only the branches open in the period (2026-11-06): sales from 14 days before it, or a waste report in it; a
+    # closed outlet is no branch that forgot its waste
+    open_ = {r["branch_code"] for r in db.fetch(
+        f"""SELECT DISTINCT branch_code FROM integration_portal.agg_sales_daily WHERE sales_date BETWEEN %(a)s::date - 14 AND %(b)s
+               AND branch_code = ANY(%(br)s)
+            UNION SELECT DISTINCT branch_code FROM {T} WHERE business_date BETWEEN %(a)s AND %(b)s AND branch_code = ANY(%(br)s)
+            UNION SELECT DISTINCT branch_code FROM {T_DAY} WHERE business_date BETWEEN %(a)s AND %(b)s AND branch_code = ANY(%(br)s)""", p)}
+    every = [b for b in every if b["code"] in open_]
+    p["br"] = [b["code"] for b in every]
     days: dict[tuple, dict] = {}
 
     def at(code, d):

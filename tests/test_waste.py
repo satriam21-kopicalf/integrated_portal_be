@@ -154,7 +154,12 @@ def test_daily_lists_branches_not_reported(monkeypatch):
     monkeypatch.setattr(waste, "today", lambda: date(2026, 10, 31))
     d = date(2026, 10, 31)
 
+    closed = {**KEMANG, "code": "TGO99", "name": "Kopi Calf To Go Tutup"}
+    monkeypatch.setattr(waste, "branch_options", lambda user, every=False: [KEMANG, other, closed])
+
     def fetch(q, p=None):
+        if "agg_sales_daily" in q:  # the branches open in the period: the closed outlet sold nothing
+            return [{"branch_code": "CCI01"}, {"branch_code": "CCI02"}]
         if "waste_day" in q:
             return [{"branch_code": "CCI02", "business_date": date(2026, 10, 30)}]
         if "usage_count" in q:

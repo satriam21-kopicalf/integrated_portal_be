@@ -25,6 +25,7 @@
     PUT    /api/waste/investigations/{id}   page cc.waste-review: {"report", "signatures", "status": open|closed}
     GET    /api/waste/entries/{id}/signature  the signature given before submitting (migration 055)
 
+GET /api/waste/stock?branch=   the stock now of the branch's materials (Stock List estimate), next to the items
 Role "user" / "outlet" see their own branches only (app/scope.py, app/pic_checkin.branch_options).
 """
 from datetime import date, datetime, timedelta
@@ -122,6 +123,20 @@ def _refuse(exc: Exception):
 def entries(branch: Optional[str] = None, day: Optional[date] = Query(None, alias="date"),
             user: dict = Depends(require_page("waste"))) -> dict:
     return waste.form(user, branch, day)
+
+
+@router.get("/stock")
+def stock(branch: str = Query(..., min_length=1, max_length=40), user: dict = Depends(require_page("waste"))) -> dict:
+    """The stock now of the branch's materials (the Stock List estimate: latest SO with the moves, waste and usage since),
+    shown next to the waste items (2026-11-07)."""
+    from app import running_stock
+    from app.pic_checkin import branch_options
+    if branch not in {b["code"] for b in branch_options(user)}:
+        raise HTTPException(status_code=403, detail="Bukan outlet akun Anda")
+    r = running_stock.running([branch]).get(branch)
+    if not r:
+        return {"so": None, "items": {}}
+    return {"so": r["so"]["date"], "items": {c: {"qty": round(it["estimate"], 3), "unit": it["unit"]} for c, it in r["items"].items()}}
 
 
 @router.post("/entries", status_code=201)

@@ -24,7 +24,10 @@ from app.pic_checkin import _names, branch_options, parse_photo
 
 P = "integration_portal"
 T, T_LINE, T_APPROVER = f"{P}.stock_transfer", f"{P}.stock_transfer_line", f"{P}.stock_transfer_approver"
-PENDING = ("submitted", "accepted", "approved")  # on their way out of the source: not available any more
+PENDING = ("submitted", "accepted")  # asked, not approved yet: reserved at the source, not available any more
+# 2026-11-07: the stock leaves the source when Cost Control approves (cc_at); it reaches the requester only when received
+# with the photo (received_at), so an approved transfer is out of the source and not yet in the requester
+SHIPPED = ("approved", "received")
 LATEST_SO_DAYS = 60
 MAX_LINES = 60
 
@@ -82,20 +85,22 @@ def stock(branches: Optional[list[str]], exclude: Optional[str] = None) -> dict[
         return out
     codes = list(out)
     rows = db.fetch(
-        f"""SELECT t.id::text, t.status, t.to_branch, t.from_branch, t.received_at, l.item_code, l.unit, l.qty
+        f"""SELECT t.id::text, t.status, t.to_branch, t.from_branch, t.received_at, t.cc_at, l.item_code, l.unit, l.qty
               FROM {T} t JOIN {T_LINE} l ON l.transfer_id = t.id
              WHERE (t.to_branch = ANY(%(b)s) OR t.from_branch = ANY(%(b)s))
-               AND (t.status = ANY(%(pending)s) OR (t.status = 'received' AND t.received_at > now() - make_interval(days => %(days)s)))""",
-        {"b": codes, "pending": list(PENDING), "days": LATEST_SO_DAYS + 1})
+               AND (t.status = ANY(%(pending)s) OR (t.status = ANY(%(shipped)s) AND coalesce(t.cc_at, t.received_at) > now() - make_interval(days => %(days)s)))""",
+        {"b": codes, "pending": list(PENDING), "shipped": list(SHIPPED), "days": LATEST_SO_DAYS + 1})
     for r in rows:
         if r["id"] == exclude:
             continue
         qty = _f(r["qty"])
-        if r["status"] == "received":
-            day = r["received_at"].date().isoformat()
-            for side, key in ((r["to_branch"], "in"), (r["from_branch"], "out")):
+        if r["status"] in SHIPPED:
+            sides = [(r["from_branch"], "out", r.get("cc_at") or r["received_at"])]  # out of the source from the approval
+            if r["status"] == "received":
+                sides.append((r["to_branch"], "in", r["received_at"]))  # in the requester once received
+            for side, key, at in sides:
                 s = out.get(side)
-                if s and day >= s["so"]["date"]:  # received after the count (a count of that day already holds it)
+                if s and at and at.date().isoformat() >= s["so"]["date"]:  # after the count (a count of that day already holds it)
                     it = s["items"].setdefault(r["item_code"], {"so": 0.0, "in": 0.0, "out": 0.0, "pending": 0.0, "unit": r["unit"]})
                     it[key] += qty
         elif r["from_branch"] in out:
@@ -479,11 +484,13 @@ def set_approvers(user: dict, ids: list[str]) -> list[dict]:
 
 
 def moves(d_from: date, d_to: date, branches: list[str]) -> list[dict]:
-    """The transfers received in the period (app/stock_moves.py): per branch, item and unit, in (+) or out (−)."""
+    """The transfers of the period (app/stock_moves.py): per branch, item and unit, in (+) or out (−). Out of the source on
+    the day Cost Control approved; in the requester on the day it was received (with the photo)."""
     return db.fetch(
         f"""SELECT x.branch, x.kind, l.item_code, l.unit, sum(x.sign * l.qty) AS qty
               FROM {T} t JOIN {T_LINE} l ON l.transfer_id = t.id
-              CROSS JOIN LATERAL (VALUES (t.to_branch, 'transferIn', 1), (t.from_branch, 'transferOut', -1)) x(branch, kind, sign)
-             WHERE t.status = 'received' AND (t.received_at AT TIME ZONE 'Asia/Jakarta')::date BETWEEN %s AND %s AND x.branch = ANY(%s)
-             GROUP BY 1, 2, 3, 4""", (d_from, d_to, branches))
+              CROSS JOIN LATERAL (VALUES (t.to_branch, 'transferIn', 1, t.received_at, t.status = 'received'),
+                                         (t.from_branch, 'transferOut', -1, coalesce(t.cc_at, t.received_at), t.status = ANY(%s))) x(branch, kind, sign, at, counts)
+             WHERE x.counts AND (x.at AT TIME ZONE 'Asia/Jakarta')::date BETWEEN %s AND %s AND x.branch = ANY(%s)
+             GROUP BY 1, 2, 3, 4""", (list(SHIPPED), d_from, d_to, branches))
 

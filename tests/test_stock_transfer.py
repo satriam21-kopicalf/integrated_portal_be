@@ -64,3 +64,12 @@ def test_cost_control_adjusts_the_quantities_with_a_note(monkeypatch):
         st.decide(user, "t1", True, "kurangi", {"RM-MILK": 0})
     with pytest.raises(st.TransferError, match="tidak ada di transfer"):
         st.decide(user, "t1", True, "kurangi", {"RM-SUGAR": 1})
+
+
+def test_an_approved_transfer_leaves_the_source_and_reaches_the_requester_only_when_received(source):
+    """2026-11-07: out of the source from the Cost Control approval, in the requester only once received."""
+    at = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    source.append({"id": "t3", "status": "approved", "to_branch": B, "from_branch": B, "received_at": None, "cc_at": at,
+                   "item_code": "RM-SUGAR", "unit": "GR", "qty": 50})
+    sugar = st.stock([B])[B]["items"]["RM-SUGAR"]
+    assert (sugar["out"], sugar["in"], sugar["pending"]) == (50.0, 0.0, 0.0)

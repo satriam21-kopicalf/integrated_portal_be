@@ -64,6 +64,7 @@ class DecideIn(BaseModel):
 class ReceiveIn(BaseModel):
     photo: Optional[str] = Field(None, max_length=5_000_000)
     note: Optional[str] = Field(None, max_length=500)
+    grNumber: Optional[str] = Field(None, max_length=60)
 
 
 class LabelIn(BaseModel):
@@ -116,7 +117,7 @@ def answer(transfer_id: str, body: AnswerIn, request: Request, user: dict = Depe
 
 @router.post("/api/stock-transfer/{transfer_id}/receive")
 def receive(transfer_id: str, body: ReceiveIn, request: Request, user: dict = Depends(require_page(FORM))) -> dict:
-    t = _run(st.receive, user, transfer_id, body.photo, body.note)
+    t = _run(st.receive, user, transfer_id, body.photo, body.note, body.grNumber)
     _log(request, user, "receive", t, f"diterima, nilai Rp{t['value'] or 0:,.0f}")
     return t
 

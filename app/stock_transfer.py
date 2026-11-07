@@ -20,6 +20,7 @@ from datetime import date, timedelta
 from typing import Any, Optional
 
 from app import database as db
+from app.database import SCHEMA
 from app.pic_checkin import _names, branch_options, parse_photo
 
 P = "integration_portal"
@@ -298,8 +299,9 @@ def decide(user: dict, transfer_id: str, approve: bool, note: Optional[str], qty
     return detail(transfer_id)
 
 
-def receive(user: dict, transfer_id: str, photo: Optional[str], note: Optional[str]) -> dict:
-    """The requester receives the goods: a clear photo first; the stock of both outlets moves now, valued today."""
+def receive(user: dict, transfer_id: str, photo: Optional[str], note: Optional[str], gr_number: Optional[str] = None) -> dict:
+    """The requester receives the goods: a clear photo and the ESB GR number first; the stock of the requester moves now,
+    valued today (the source already gave it at the approval)."""
     t = _load(transfer_id)
     if t["to_branch"] not in _mine(user):
         raise TransferError("Hanya outlet peminta yang bisa menerima barang ini")
@@ -307,6 +309,12 @@ def receive(user: dict, transfer_id: str, photo: Optional[str], note: Optional[s
         raise TransferError("Barang bisa diterima setelah transfer di-approve Cost Control")
     if not photo:
         raise TransferError("Lampirkan foto barang yang diterima terlebih dahulu")
+    gr = (gr_number or "").strip().upper()
+    if not gr:
+        raise TransferError("Isi nomor Good Receipt (GR) ESB dari penerimaan barang ini")
+    taken = db.fetchrow(f"SELECT number FROM {T} WHERE gr_number = %s AND id::text <> %s", (gr, transfer_id))
+    if taken:
+        raise TransferError(f"GR {gr} sudah dipakai untuk transfer {taken['number']}")
     pt, data = parse_photo(photo)
     lines = db.fetch(f"SELECT line_no, item_code, qty FROM {T_LINE} WHERE transfer_id::text = %s", (transfer_id,))
     price = prices([ln["item_code"] for ln in lines])
@@ -319,8 +327,8 @@ def receive(user: dict, transfer_id: str, photo: Optional[str], note: Optional[s
             conn.execute(f"UPDATE {T_LINE} SET price = %s, value = %s WHERE transfer_id::text = %s AND line_no = %s",
                          (p, v, transfer_id, ln["line_no"]))
         conn.execute(f"""UPDATE {T} SET status = 'received', receive_photo = %s, receive_photo_type = %s, receive_note = %s,
-                             received_by = %s, received_at = now(), value = %s WHERE id::text = %s AND status = 'approved'""",
-                     (data, pt, (note or "").strip()[:500] or None, _who(user), round(total, 2), transfer_id))
+                             received_by = %s, received_at = now(), value = %s, gr_number = %s WHERE id::text = %s AND status = 'approved'""",
+                     (data, pt, (note or "").strip()[:500] or None, _who(user), round(total, 2), gr, transfer_id))
     from app import running_stock
     running_stock.clear()
     return detail(transfer_id)
@@ -349,7 +357,7 @@ def label(user: dict, transfer_id: str, value: Optional[str], note: Optional[str
 COLS = """t.id::text, t.number, t.to_branch, t.to_name, t.from_branch, t.from_name, t.status, t.note, t.requested_by::text,
     t.requested_name, t.requested_at, t.source_note, t.source_by, t.source_at, t.cc_note, t.cc_by, t.cc_at, t.receive_note,
     t.received_by, t.received_at, t.value, t.esb_label, t.esb_label_note, t.esb_label_by, t.esb_label_at,
-    t.receive_photo IS NOT NULL AS received_photo,
+    t.receive_photo IS NOT NULL AS received_photo, t.gr_number,
     (SELECT count(*) FROM {line} l WHERE l.transfer_id = t.id)::int AS lines,
     (SELECT sum(l.qty) FROM {line} l WHERE l.transfer_id = t.id) AS qty"""
 
@@ -366,6 +374,7 @@ def _view(r: dict) -> dict:
             "costControl": {"note": r["cc_note"], "by": r["cc_by"], "at": _iso(r["cc_at"])} if r["cc_at"] else None,
             "received": {"note": r["receive_note"], "by": r["received_by"], "at": _iso(r["received_at"])} if r["received_at"] else None,
             "value": _f(r["value"]) if r["value"] is not None else None,
+            "grNumber": r.get("gr_number"),
             "esbLabel": {"value": r["esb_label"], "note": r["esb_label_note"], "by": r["esb_label_by"], "at": _iso(r["esb_label_at"])} if r["esb_label"] else None}
 
 
@@ -384,7 +393,42 @@ def detail(transfer_id: str) -> dict:
                   for ln in lines]
     if v["value"] is None:
         v["estimate"] = round(sum(i["value"] or 0 for i in v["items"]), 2)
+    if r.get("gr_number"):
+        v["gr"] = gr_check(r["gr_number"], r["to_branch"], v["items"])
     return v
+
+
+def gr_check(number: str, branch: str, items: list[dict]) -> dict:
+    """The ESB GR entered when receiving, against what ESB synced (every 30 minutes): waiting (not in the portal yet),
+    otherBranch (a GR of another outlet), matched (every material and quantity as the transfer) or mismatch."""
+    head = db.fetchrow(
+        f"""SELECT d.doc_num, d.doc_date, b.branch_code, d.status_name FROM {SCHEMA}.erp_documents d
+              LEFT JOIN {SCHEMA}.master_branches b ON b.branch_id::text = d.branch_id::text
+             WHERE d.module = 'goods_receipt' AND d.deleted_at IS NULL AND upper(d.doc_num) = %s""", (number,))
+    if not head:
+        return {"number": number, "status": "waiting"}
+    out = {"number": head["doc_num"], "date": head["doc_date"].isoformat() if head["doc_date"] else None, "esbStatus": head["status_name"]}
+    if head["branch_code"] != branch:
+        return {**out, "status": "otherBranch", "branch": head["branch_code"]}
+    got: dict[str, float] = {}
+    for ln in db.fetch(f"""SELECT product_code, sum(qty) AS qty FROM {SCHEMA}.erp_document_lines
+                            WHERE module = 'goods_receipt' AND doc_num = %s AND line_type = 'detail' GROUP BY 1""", (head["doc_num"],)):
+        got[ln["product_code"]] = _f(ln["qty"]) or 0.0
+    diffs = []
+    for i in items:
+        q = got.pop(i["code"], None)
+        if q is None or abs(q - (i["qty"] or 0)) > 1e-6:
+            diffs.append({"code": i["code"], "name": i["name"], "transfer": i["qty"], "gr": q})
+    diffs += [{"code": c, "name": c, "transfer": None, "gr": q} for c, q in got.items()]
+    return {**out, "status": "mismatch" if diffs else "matched", "diffs": diffs}
+
+
+def linked_grs() -> list[str]:
+    """The ESB GRs entered on received transfers: the transfer brings their goods in, so they are not counted again."""
+    try:
+        return [r["gr_number"] for r in db.fetch(f"SELECT gr_number FROM {T} WHERE status = 'received' AND gr_number IS NOT NULL")]
+    except Exception:  # noqa: BLE001 - migration 079 not applied yet
+        return []
 
 
 def listing(date_from: date, date_to: date, branches: Optional[list[str]] = None, status: str = "", side: str = "",

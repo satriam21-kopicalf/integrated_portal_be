@@ -45,6 +45,8 @@ def moves(d_from: date, d_to: date, branches: list[str]) -> dict[str, dict[str, 
     readers = test_branches.readers(branches)  # a test branch gets the ESB documents of its source branch
     asked, branches = branches, sorted(readers)
     pairs = sorted({(m, t) for m, t, _ in MOVES.values()})
+    from app import stock_transfer as _st
+    linked = _st.linked_grs()
     rows = db.fetch(
         f"""SELECT b.branch_code, d.module, l.line_type, l.product_code, upper(coalesce(l.uom_name, '')) AS uom, sum(l.qty) AS qty
               FROM {SCHEMA}.erp_documents d
@@ -53,8 +55,9 @@ def moves(d_from: date, d_to: date, branches: list[str]) -> dict[str, dict[str, 
              WHERE (d.module, l.line_type) IN (SELECT * FROM unnest(%s::text[], %s::text[]))
                AND d.doc_date BETWEEN %s AND %s AND d.deleted_at IS NULL AND coalesce(d.status_name, '') <> ALL(%s)
                AND b.branch_code = ANY(%s) AND l.product_code IS NOT NULL AND coalesce(l.qty, 0) <> 0
+               AND NOT (d.module = 'goods_receipt' AND upper(d.doc_num) = ANY(%s))  -- the GR of a Transfer Stock: the transfer brings it in
              GROUP BY 1, 2, 3, 4, 5""",
-        ([m for m, _ in pairs], [t for _, t in pairs], d_from, d_to, list(SKIP), branches))
+        ([m for m, _ in pairs], [t for _, t in pairs], d_from, d_to, list(SKIP), branches, linked))
     kind_of = {(m, t): (k if k != "returnedGr" else "returned", s) for k, (m, t, s) in MOVES.items()}
     for r in rows:
         kind, sign = kind_of[(r["module"], r["line_type"])]

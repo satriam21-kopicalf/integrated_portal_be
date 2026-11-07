@@ -73,3 +73,16 @@ def test_an_approved_transfer_leaves_the_source_and_reaches_the_requester_only_w
                    "item_code": "RM-SUGAR", "unit": "GR", "qty": 50})
     sugar = st.stock([B])[B]["items"]["RM-SUGAR"]
     assert (sugar["out"], sugar["in"], sugar["pending"]) == (50.0, 0.0, 0.0)
+
+
+def test_the_gr_of_a_received_transfer_is_matched_with_esb(monkeypatch):
+    """2026-11-07 (migration 079): waiting until ESB syncs it, then matched or the differences per material."""
+    items = [{"code": "RM-MILK", "name": "Fresh Milk", "qty": 500.0}]
+    monkeypatch.setattr(st.db, "fetchrow", lambda q, p=None: None)
+    assert st.gr_check("GR-1", A, items)["status"] == "waiting"
+    monkeypatch.setattr(st.db, "fetchrow", lambda q, p=None: {"doc_num": "GR-1", "doc_date": None, "branch_code": A, "status_name": "Finished"})
+    monkeypatch.setattr(st.db, "fetch", lambda q, p=None: [{"product_code": "RM-MILK", "qty": 500}])
+    assert st.gr_check("GR-1", A, items)["status"] == "matched"
+    assert st.gr_check("GR-1", B, items)["status"] == "otherBranch"
+    monkeypatch.setattr(st.db, "fetch", lambda q, p=None: [{"product_code": "RM-MILK", "qty": 450}])
+    assert st.gr_check("GR-1", A, items)["diffs"] == [{"code": "RM-MILK", "name": "Fresh Milk", "transfer": 500.0, "gr": 450.0}]

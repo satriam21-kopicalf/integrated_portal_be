@@ -84,6 +84,10 @@ EVIDENCE_NOTE_ONLY = {"note": REQ, "photo": OPT}  # a note is required, the phot
 # Stock Preparation, Espresso and Beans (2026-10-28, Operations): the PIC also types the stock in grams (net weight); a
 # rated required item needs it, like its note and photo
 QTY = {"qty": "g"}
+# the premixes and liquids of Stock Preparation (2026-11-08): a plain quantity in gram, pail or teko, as the PIC counts
+# it at the outlet; no conversion, the stock only rates the PIC (Product and WW-WR)
+QTY_UNITS = ("gram", "pail", "teko")
+PREMIX_QTY = {"qty": "g", "units": list(QTY_UNITS)}
 MAX_QTY_G = 1_000_000
 
 CATEGORY_EN = {"Kritikal": "Critical", "Mayor": "Major", "Minor": "Minor"}
@@ -104,7 +108,7 @@ DEFINITIONS: dict[str, dict] = {
         "groups": [
             _grp("availability", "Ketersediaan", "Availability", "Ketersediaan dan Kesesuaian Produk", "Product Availability and Conformity", [
                 _sec("stok-preparation", "Stock Preparation", "Stock Preparation",
-                     _list("stok-preparation", [(f"Ketersediaan Stok {i}", f"{e} Stock Available", {**o, **QTY}) for i, e, o in PREMIX])),
+                     _list("stok-preparation", [(f"Ketersediaan Stok {i}", f"{e} Stock Available", {**o, **PREMIX_QTY}) for i, e, o in PREMIX])),
                 _sec("shelf-life", "Label Shelf Life", "Shelf Life Label",
                      _list("shelf-life", [(f"Label Shelf Life {i}", f"{e} Shelf Life Label", o) for i, e, o in PREMIX])),
                 # Beans Specialty: required at the CTGP and CCI outlets only (2026-10-27); the items marked only_for are not
@@ -590,6 +594,11 @@ def save_answers(form: str, user: dict, visit_id: str, patch: dict) -> dict:
                 if not 0 <= qty <= MAX_QTY_G:
                     raise VisitError("Gramasi harus angka 0 sampai 1.000.000 gram")
             cur["qty"] = qty
+        if "unit" in value:  # gram / pail / teko of a premix (2026-11-08)
+            unit = (value["unit"] or "").lower() or None
+            if unit is not None and (unit not in QTY_UNITS or not known[key].get("units")):
+                raise VisitError("Satuan stok harus gram, pail atau teko")
+            cur["unit"] = unit
         if form == "wwwr":  # who of the team filled the item
             cur["by"] = user.get("full_name") or user["username"]
         answers[key] = {k: v for k, v in cur.items() if v is not None}

@@ -440,6 +440,20 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], user_
         where.append("c.out_at IS NULL")
     elif location == "unreviewed":
         where.append("(c.outside_radius OR c.risk_level IN ('medium', 'high')) AND c.review_status IS NULL")
+    if kind == "pic":
+        # only the first check-ins of a PIC's day count (2026-11-08): as many as the branch group of the day's first
+        # outlet allows (once a day without a group); a later check in elsewhere that day is not shown nor counted
+        where.append(f"""c.id IN (
+            SELECT x.id FROM (
+                SELECT k.id, row_number() OVER w AS n,
+                       first_value(coalesce(g.checkin_max_per_day, 1)) OVER w AS cap
+                  FROM {T} k
+                  LEFT JOIN integration_portal.branch_group_member m ON m.branch_code = k.branch_code
+                  LEFT JOIN integration_portal.branch_group g ON g.id = m.group_id
+                 WHERE k.kind = 'pic' AND (k.visited_at AT TIME ZONE 'Asia/Jakarta')::date BETWEEN %(a)s AND %(b)s
+                WINDOW w AS (PARTITION BY k.user_id, (k.visited_at AT TIME ZONE 'Asia/Jakarta')::date ORDER BY k.visited_at
+                             ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)) x
+             WHERE x.n <= x.cap)""")
     cond = " AND ".join(where)
     rows = db.fetch(f"SELECT {COLUMNS} FROM {T} c WHERE {cond} ORDER BY c.visited_at DESC LIMIT %(lim)s", params)
     s = db.fetchrow(

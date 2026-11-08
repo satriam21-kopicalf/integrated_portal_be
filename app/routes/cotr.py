@@ -537,6 +537,10 @@ class WasteIn(BaseModel):
     qty: float = Field(gt=0)
     unit: str = Field(min_length=1, max_length=10)
     reason: str = Field(min_length=1, max_length=300)
+    # migration 081: a waste of the production (with its batch) and the item of the master it deducts
+    kind: Literal["storage", "production"] = "storage"
+    batch_id: Optional[str] = Field(None, max_length=40)
+    item_code: Optional[str] = Field(None, max_length=40)
 
 
 @router.get("/waste")
@@ -632,3 +636,87 @@ def fleet_unassign(assignment_id: int, request: Request, user: dict = Depends(re
 def accessory_usage(dateFrom: Optional[date] = None, dateTo: Optional[date] = None, _: dict = Depends(require_page("cotr.fleet"))):
     end = dateTo or today()
     return {"data": _call(cotr.accessory_usage, dateFrom or end - timedelta(days=30), end)}
+
+
+# ---------------------------------------------------------------- storage & production stock (migration 081)
+
+class BatchWasteIn(BaseModel):
+    qty: int = Field(ge=0, le=100_000)
+    reason: Optional[str] = Field(None, max_length=300)
+
+
+class ReceiptIn(BaseModel):
+    pool: str = Field(min_length=1, max_length=40)
+    day: Optional[date] = None
+    item: str = Field(min_length=1, max_length=40)
+    qty: float = Field(gt=0, le=10_000_000)
+    unit: Optional[str] = Field(None, max_length=20)
+    supplier: Optional[str] = Field(None, max_length=120)
+    docNo: Optional[str] = Field(None, max_length=60)
+    note: Optional[str] = Field(None, max_length=300)
+
+
+class CountIn(BaseModel):
+    id: Optional[str] = Field(None, max_length=40)
+    pool: str = Field(min_length=1, max_length=40)
+    day: Optional[date] = None
+    lines: dict = Field(default_factory=dict)
+    note: Optional[str] = Field(None, max_length=300)
+    submit: bool = False
+
+
+@router.post("/batches/{batch_id}/waste")
+def batch_waste(batch_id: str, body: BatchWasteIn, request: Request, user: dict = Depends(require_page("cotr.production"))):
+    out = _call(cotr.batch_waste, user, batch_id, body.qty, body.reason)
+    _log(request, user, "cotr.batch.waste", f"Waste produksi {out['batchNo']}: {body.qty} cup")
+    return out
+
+
+@router.get("/stock")
+def stock(pool: str, day: Optional[date] = None, _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    return _call(cotr.stock, pool, day)
+
+
+@router.get("/receipts")
+def receipts(pool: Optional[str] = None, dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
+             _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    end = dateTo or today()
+    return {"data": _call(cotr.receipts, pool, dateFrom or end - timedelta(days=30), end)}
+
+
+@router.post("/receipts", status_code=201)
+def receipt_add(body: ReceiptIn, request: Request, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    out = _call(cotr.receipt_add, user, body.model_dump())
+    _log(request, user, "cotr.receipt.add", f"Barang masuk {body.pool}: {body.item} {body.qty}")
+    return out
+
+
+@router.delete("/receipts/{receipt_id}")
+def receipt_delete(receipt_id: str, request: Request, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    _call(cotr.receipt_delete, receipt_id)
+    _log(request, user, "cotr.receipt.delete", "Barang masuk dihapus", {"id": receipt_id})
+    return {"ok": True}
+
+
+@router.get("/counts")
+def counts(pool: Optional[str] = None, _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    return {"data": _call(cotr.counts, pool)}
+
+
+@router.get("/counts/{count_id}")
+def count_detail(count_id: str, _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    return _call(cotr.count_detail, count_id)
+
+
+@router.post("/counts")
+def count_save(body: CountIn, request: Request, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    out = _call(cotr.count_save, user, body.model_dump())
+    _log(request, user, "cotr.count.save", f"Stock opname COTR {body.pool} {out['day']}: {len(out['lines'])} item")
+    return out
+
+
+@router.post("/counts/{count_id}/approve")
+def count_approve(count_id: str, request: Request, user: dict = Depends(require_page("cotr.production"))):
+    out = _call(cotr.count_approve, user, count_id)
+    _log(request, user, "cotr.count.approve", f"Stock opname COTR {out['pool']} {out['day']} di-approve")
+    return out

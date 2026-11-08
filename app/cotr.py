@@ -653,10 +653,12 @@ def waste_list(day_from: date, day_to: date) -> list[dict]:
 
 def waste_add(user: dict, data: dict) -> dict:
     try:
-        r = db.fetchrow(f"""INSERT INTO {P}.cotr_waste (day, pool_code, item, qty, unit, reason, created_by)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-                        (data.get("day") or today(), data.get("pool_code"), (data.get("item") or "").strip(), data.get("qty"),
-                         data.get("unit"), (data.get("reason") or "").strip(), user["id"]))
+        code = (data.get("item_code") or "").strip() or None
+        r = db.fetchrow(f"""INSERT INTO {P}.cotr_waste (day, pool_code, item, qty, unit, reason, created_by, kind, batch_id, item_code)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+                        (data.get("day") or today(), data.get("pool_code"), (data.get("item") or code or "").strip(), data.get("qty"),
+                         data.get("unit"), (data.get("reason") or "").strip(), user["id"], data.get("kind") or "storage",
+                         data.get("batch_id") or None, code))
     except Exception as e:
         raise CotrError(_db_message(e)) from None
     return _plain(r) | {"id": str(r["id"])}
@@ -1485,9 +1487,11 @@ def suggestions(day: date, codes: list[str]) -> dict[str, dict]:
 # ---------------------------------------------------------------- production batches and distribution (migration 062)
 
 def _batch_view(b: dict, sent: int, received: int) -> dict:
+    waste = int(b.get("waste_qty") or 0)
     return {"id": str(b["id"]), "batchNo": b["batch_no"], "hub": b["hub_code"], "menu": b["menu_code"], "qty": b["qty"],
             "producedOn": _iso(b["produced_on"]), "expiresOn": _iso(b["expires_on"]), "note": b["note"],
-            "sent": sent, "received": received, "atHub": b["qty"] - sent, "createdAt": _iso(b["created_at"])}
+            "sent": sent, "received": received, "atHub": b["qty"] - sent - waste, "createdAt": _iso(b["created_at"]),
+            "waste": waste, "wasteReason": b.get("waste_reason")}
 
 
 def batches(d_from: date, d_to: date, hub: Optional[str]) -> dict:
@@ -1549,8 +1553,9 @@ def send_batch(user: dict, batch_id: str, pool: str, qty: int, note: Optional[st
         if not conn.execute(f"SELECT 1 FROM {P}.cotr_pool WHERE code = %s", (pool,)).fetchone():
             raise CotrError("Pool tidak ditemukan")
         sent = conn.execute(f"SELECT coalesce(sum(qty), 0) AS n FROM {P}.cotr_transfer WHERE batch_id = %s", (b["id"],)).fetchone()["n"]
-        if qty <= 0 or qty > b["qty"] - sent:
-            raise CotrError(f"Jumlah kirim 1 sampai {b['qty'] - sent}")
+        left = b["qty"] - sent - int(b.get("waste_qty") or 0)
+        if qty <= 0 or qty > left:
+            raise CotrError(f"Jumlah kirim 1 sampai {left}")
         row = conn.execute(f"""INSERT INTO {P}.cotr_transfer (batch_id, pool_code, qty, note, sent_by) VALUES (%s, %s, %s, %s, %s)
                                RETURNING id::text""", (b["id"], pool, qty, (note or "").strip() or None, user["id"])).fetchone()
     return {"id": row["id"]}
@@ -1684,3 +1689,164 @@ def accessory_usage(d_from: date, d_to: date) -> list[dict]:
     return [{"shift": r["shift"], "day": _iso(r["day"]), "driver": r["driver_code"], "driverName": r["driver"], "fleet": r["fleet_code"],
              "code": r["accessory_code"], "name": r["name"], "qty": r["qty"], "startedAt": _iso(r["started_at"]),
              "endedAt": _iso(r["ended_at"])} for r in rows]
+
+
+# ---------------------------------------------------------------- storage & production stock (migration 081)
+
+def batch_waste(user: dict, batch_id: str, qty: int, reason: Optional[str]) -> dict:
+    """The cups of a batch wasted while it was made (spilled, failed the taste): not sent, still used the materials."""
+    with db.transaction() as conn:
+        b = conn.execute(f"SELECT * FROM {P}.cotr_batch WHERE id::text = %s FOR UPDATE", (batch_id,)).fetchone()
+        if not b:
+            raise CotrError("Batch tidak ditemukan")
+        sent = conn.execute(f"SELECT coalesce(sum(qty), 0) AS n FROM {P}.cotr_transfer WHERE batch_id = %s", (b["id"],)).fetchone()["n"]
+        if qty < 0 or qty > b["qty"] - sent:
+            raise CotrError(f"Waste produksi 0 sampai {b['qty'] - sent} cup")
+        if qty and not (reason or "").strip():
+            raise CotrError("Isi alasan waste produksi")
+        row = conn.execute(f"UPDATE {P}.cotr_batch SET waste_qty = %s, waste_reason = %s WHERE id = %s RETURNING *",
+                           (qty, (reason or "").strip() or None, b["id"])).fetchone()
+    return _batch_view(row, sent, 0)
+
+
+def _base_qty(item: dict, qty: float, unit: Optional[str]) -> float:
+    """A quantity in the item's base unit: a pack (Pail, Dus …) times its content."""
+    if unit and item.get("pack_unit") and unit.lower() == str(item["pack_unit"]).lower() and item.get("pack_qty"):
+        return qty * float(item["pack_qty"])
+    return qty
+
+
+def receipts(pool: Optional[str], d_from: date, d_to: date) -> list[dict]:
+    rows = db.fetch(f"""SELECT r.*, i.name, i.unit FROM {P}.cotr_receipt r JOIN {P}.cotr_item i ON i.code = r.item_code
+                         WHERE r.day BETWEEN %s AND %s AND (%s::text IS NULL OR r.pool_code = %s) ORDER BY r.day DESC, r.created_at DESC""",
+                     (d_from, d_to, pool, pool))
+    return [{"id": str(r["id"]), "pool": r["pool_code"], "day": _iso(r["day"]), "item": r["item_code"], "name": r["name"], "unit": r["unit"],
+             "qty": float(r["qty"]), "supplier": r["supplier"], "docNo": r["doc_no"], "note": r["note"]} for r in rows]
+
+
+def receipt_add(user: dict, data: dict) -> dict:
+    item = db.fetchrow(f"SELECT * FROM {P}.cotr_item WHERE code = %s", (data.get("item"),))
+    if not item:
+        raise CotrError("Item tidak ditemukan")
+    qty = _base_qty(item, float(data.get("qty") or 0), data.get("unit"))
+    if qty <= 0:
+        raise CotrError("Jumlah harus lebih dari 0")
+    try:
+        row = db.fetchrow(f"""INSERT INTO {P}.cotr_receipt (pool_code, day, item_code, qty, supplier, doc_no, note, created_by)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id::text""",
+                          (data.get("pool"), data.get("day") or today(), item["code"], qty, (data.get("supplier") or "").strip() or None,
+                           (data.get("docNo") or "").strip() or None, (data.get("note") or "").strip() or None, user["id"]))
+    except Exception as e:
+        raise CotrError(_db_message(e)) from None
+    return {"id": row["id"]}
+
+
+def receipt_delete(receipt_id: str) -> None:
+    db.fetchrow(f"DELETE FROM {P}.cotr_receipt WHERE id::text = %s RETURNING id", (receipt_id,))
+
+
+def stock(pool: str, day: Optional[date] = None) -> dict:
+    """The running stock of every stock item of a pool / hub: the latest approved count (its day) + received since −
+    used by the batches made there since (cups made × recipe card) − waste since; valued at the item cost."""
+    day = day or today()
+    items = {i["code"]: i for i in db.fetch(f"SELECT * FROM {P}.cotr_item WHERE is_stock AND is_active ORDER BY category, name")}
+    last = db.fetchrow(f"""SELECT id, day FROM {P}.cotr_stock_count WHERE pool_code = %s AND status = 'approved' AND day <= %s
+                            ORDER BY day DESC, approved_at DESC LIMIT 1""", (pool, day))
+    start = last["day"] if last else date(2000, 1, 1)
+    so = {r["item_code"]: float(r["qty"]) for r in db.fetch(f"SELECT item_code, qty FROM {P}.cotr_stock_count_line WHERE count_id = %s",
+                                                            (last["id"],))} if last else {}
+    got: dict[str, float] = {}
+    for r in db.fetch(f"""SELECT item_code, sum(qty) AS qty FROM {P}.cotr_receipt WHERE pool_code = %s AND day > %s AND day <= %s GROUP BY 1""",
+                      (pool, start, day)):
+        got[r["item_code"]] = float(r["qty"])
+    boms = {b["code"]: b for b in db.fetch(f"SELECT * FROM {P}.cotr_bom")}
+    menu = {m["code"]: m for m in db.fetch(f"SELECT code, bom_code FROM {P}.cotr_menu")}
+    used: dict[str, dict] = {}
+    made = db.fetch(f"""SELECT menu_code, sum(qty) AS qty FROM {P}.cotr_batch WHERE hub_code = %s AND produced_on > %s AND produced_on <= %s GROUP BY 1""",
+                    (pool, start, day))
+    for b in made:
+        bom = (menu.get(b["menu_code"]) or {}).get("bom_code")
+        if bom:
+            explode(boms, bom, float(b["qty"]), used)
+    waste: dict[str, float] = {}
+    for r in db.fetch(f"""SELECT coalesce(item_code, item) AS code, qty, unit, kind FROM {P}.cotr_waste
+                           WHERE pool_code = %s AND day > %s AND day <= %s""", (pool, start, day)):
+        it = items.get(r["code"])
+        if it:
+            waste[r["code"]] = waste.get(r["code"], 0.0) + _base_qty(it, float(r["qty"]), r["unit"])
+    rows = []
+    for code, it in items.items():
+        s0, g, u, w = so.get(code, 0.0), got.get(code, 0.0), float((used.get(code) or {}).get("qty", 0.0)), waste.get(code, 0.0)
+        if not (s0 or g or u or w):
+            continue
+        est = s0 + g - u - w
+        cost = float(it["cost"]) if it.get("cost") is not None else None
+        rows.append({"code": code, "name": it["name"], "category": it["category"], "unit": it["unit"], "packUnit": it.get("pack_unit"),
+                     "packQty": float(it["pack_qty"]) if it.get("pack_qty") else None, "so": s0, "received": g, "used": u, "waste": w,
+                     "estimate": round(est, 3), "cost": cost, "value": round(est * cost, 2) if cost is not None else None})
+    return {"pool": pool, "day": day.isoformat(), "soDay": _iso(last["day"]) if last else None, "rows": rows,
+            "value": round(sum(r["value"] or 0 for r in rows), 2), "negative": sum(1 for r in rows if r["estimate"] < -1e-6)}
+
+
+def counts(pool: Optional[str]) -> list[dict]:
+    rows = db.fetch(f"""SELECT c.*, p.name AS pool_name, (SELECT count(*) FROM {P}.cotr_stock_count_line l WHERE l.count_id = c.id)::int AS lines
+                          FROM {P}.cotr_stock_count c JOIN {P}.cotr_pool p ON p.code = c.pool_code
+                         WHERE (%s::text IS NULL OR c.pool_code = %s) ORDER BY c.day DESC, c.created_at DESC LIMIT 200""", (pool, pool))
+    return [{"id": str(r["id"]), "pool": r["pool_code"], "poolName": r["pool_name"], "day": _iso(r["day"]), "status": r["status"],
+             "note": r["note"], "lines": r["lines"], "submittedAt": _iso(r["submitted_at"]), "approvedAt": _iso(r["approved_at"])} for r in rows]
+
+
+def count_detail(count_id: str) -> dict:
+    c = db.fetchrow(f"SELECT * FROM {P}.cotr_stock_count WHERE id::text = %s", (count_id,))
+    if not c:
+        raise CotrError("Stock opname tidak ditemukan")
+    lines = db.fetch(f"""SELECT l.*, i.name, i.unit, i.cost FROM {P}.cotr_stock_count_line l JOIN {P}.cotr_item i ON i.code = l.item_code
+                          WHERE l.count_id = %s ORDER BY i.category, i.name""", (c["id"],))
+    return {"id": str(c["id"]), "pool": c["pool_code"], "day": _iso(c["day"]), "status": c["status"], "note": c["note"],
+            "lines": [{"item": r["item_code"], "name": r["name"], "unit": r["unit"], "qty": float(r["qty"]),
+                       "expected": float(r["expected"]) if r["expected"] is not None else None,
+                       "difference": round(float(r["qty"]) - float(r["expected"]), 3) if r["expected"] is not None else None,
+                       "value": round((float(r["qty"]) - float(r["expected"] or 0)) * float(r["cost"]), 2) if r["cost"] is not None and r["expected"] is not None else None,
+                       "note": r["note"]} for r in lines]}
+
+
+def count_save(user: dict, data: dict) -> dict:
+    """A stock opname of a pool / hub: the counted quantity of each item (base unit, or its pack), kept with the running
+    stock of that moment; `submit` sends it to approval."""
+    pool, day = data.get("pool"), data.get("day") or today()
+    lines = data.get("lines") or {}
+    if not lines:
+        raise CotrError("Isi minimal satu item")
+    items = {i["code"]: i for i in db.fetch(f"SELECT * FROM {P}.cotr_item WHERE code = ANY(%s)", (list(lines),))}
+    expected = {r["code"]: r["estimate"] for r in stock(pool, day)["rows"]}
+    with db.transaction() as conn:
+        cid = data.get("id")
+        if cid:
+            c = conn.execute(f"SELECT * FROM {P}.cotr_stock_count WHERE id::text = %s FOR UPDATE", (cid,)).fetchone()
+            if not c or c["status"] != "draft":
+                raise CotrError("Stock opname sudah dikirim, tidak bisa diubah")
+            conn.execute(f"DELETE FROM {P}.cotr_stock_count_line WHERE count_id = %s", (c["id"],))
+        else:
+            c = conn.execute(f"""INSERT INTO {P}.cotr_stock_count (pool_code, day, note, created_by) VALUES (%s, %s, %s, %s) RETURNING *""",
+                             (pool, day, (data.get("note") or "").strip() or None, user["id"])).fetchone()
+        for code, line in lines.items():
+            it = items.get(code)
+            if not it:
+                raise CotrError(f"Item {code} tidak ditemukan")
+            line = line if isinstance(line, dict) else {"qty": line}
+            q = _base_qty(it, float(line.get("qty") or 0), line.get("unit"))
+            if q < 0:
+                raise CotrError("Jumlah tidak boleh minus")
+            conn.execute(f"""INSERT INTO {P}.cotr_stock_count_line (count_id, item_code, qty, expected, note) VALUES (%s, %s, %s, %s, %s)""",
+                         (c["id"], code, q, expected.get(code, 0.0), (line.get("note") or "").strip() or None))
+        if data.get("submit"):
+            conn.execute(f"UPDATE {P}.cotr_stock_count SET status = 'submitted', submitted_at = now() WHERE id = %s", (c["id"],))
+    return count_detail(str(c["id"]))
+
+
+def count_approve(user: dict, count_id: str) -> dict:
+    row = db.fetchrow(f"""UPDATE {P}.cotr_stock_count SET status = 'approved', approved_by = %s, approved_at = now()
+                           WHERE id::text = %s AND status = 'submitted' RETURNING id""", (user["id"], count_id))
+    if not row:
+        raise CotrError("Hanya stock opname yang sudah dikirim yang bisa di-approve")
+    return count_detail(count_id)

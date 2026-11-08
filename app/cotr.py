@@ -681,6 +681,35 @@ def monitor(day: date) -> dict:
     reloads = db.fetch(f"SELECT * FROM {P}.cotr_reload WHERE shift_id = ANY(%s) ORDER BY at", (ids,)) if ids else []
     reqs = db.fetch(f"SELECT * FROM {P}.cotr_request WHERE at::date = %s OR status = 'sent' ORDER BY at", (day,))
     by = lambda rows, s: [r for r in rows if r["shift_id"] == s["id"]]  # noqa: E731
+    # 2026-11-08: the deductions of a shift (cupping and waste, per menu at its price), what the fleet carried and where
+    # the roster sent the driver
+    menu = _menu_map()
+    dispatch = {x["id"]: x for x in db.fetch(f"SELECT id, cupping FROM {P}.cotr_dispatch WHERE day = %s", (day,))}
+    acc: dict = {}
+    for r in (db.fetch(f"""SELECT sa.shift_id, a.name, sa.qty FROM {P}.cotr_shift_accessory sa
+                            JOIN {P}.cotr_accessory a ON a.code = sa.accessory_code WHERE sa.shift_id = ANY(%s)""", (ids,)) if ids else []):
+        acc.setdefault(r["shift_id"], []).append({"name": r["name"], "qty": r["qty"]})
+    slots: dict = {}
+    for r in db.fetch(f"""SELECT s.driver_code, s.start_time, s.end_time, a.name AS area FROM {P}.cotr_schedule_slot s
+                           LEFT JOIN {P}.cotr_area a ON a.code = s.area_code WHERE s.day = %s ORDER BY s.start_time""", (day,)):
+        slots.setdefault(r["driver_code"], []).append({"start": r["start_time"].strftime("%H:%M"), "end": r["end_time"].strftime("%H:%M"), "area": r["area"]})
+
+    def deductions(sh: dict) -> dict:
+        assigned = (dispatch.get(sh.get("dispatch_id")) or {}).get("cupping") or {}
+        rows = []
+        for kind, src in (("cupping", sh.get("end_cupping") or {}), ("waste", sh.get("end_waste") or {})):
+            for code, q in src.items():
+                q = int(q)
+                if q:
+                    price = float((menu.get(code) or {}).get("price") or 0)
+                    rows.append({"kind": kind, "code": code, "name": (menu.get(code) or {}).get("name") or code, "qty": q, "price": price, "value": price * q,
+                                 "assigned": int(assigned.get(code, 0)) if kind == "cupping" else None})
+        for code, q in assigned.items():  # cupping assigned by the storage, not reported yet at the end
+            if int(q) and not any(r["kind"] == "cupping" and r["code"] == code for r in rows):
+                price = float((menu.get(code) or {}).get("price") or 0)
+                rows.append({"kind": "cupping", "code": code, "name": (menu.get(code) or {}).get("name") or code, "qty": 0, "price": price, "value": 0.0, "assigned": int(q)})
+        return {"lines": rows, "cups": sum(r["qty"] for r in rows), "value": sum(r["value"] for r in rows),
+                "cupping": sum(r["value"] for r in rows if r["kind"] == "cupping"), "waste": sum(r["value"] for r in rows if r["kind"] == "waste")}
     out = []
     for s in shifts:
         d = drivers.get(s["driver_code"], {})
@@ -696,6 +725,8 @@ def monitor(day: date) -> dict:
                           "stock": c["stock"], "note": c["note"], "hasPhoto": c["has_photo"],
                           "hasSignature": c["has_signature"]} for c in by(checkins, s)],
             "recap": recap(s, sal, rel, [r for r in reqs if r["shift_id"] == s["id"]]),
+            "deductions": deductions(s), "accessories": acc.get(s["id"], []), "slots": slots.get(s["driver_code"], []),
+            "phone": d.get("phone"),
         })
     started = {s["driver_code"] for s in shifts}
     return {

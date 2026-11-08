@@ -112,11 +112,73 @@ class WasteError(CheckInError):
     """An entry refused with a message for the user (HTTP 422)."""
 
 
-def catalog(facility: str = "OUTLET") -> dict:
-    """{"items": {scope: [{code, name, unit}]}, "categories": [name]} for the form (premix of the facility type)."""
+# the items of a stock opname list at a facility, as the stock opname resolves them (kopicalf core
+# kopicalf_core/inventory/counts/setup.py EFFECTIVE_ITEMS: the list's groups before its own items, less the exclusions)
+_LIST_ITEMS = """
+    SELECT DISTINCT ON (src.item_id) src.item_id, src.area, src.sort, src.pack_uom, src.esb_uom, src.photo_required,
+           (SELECT dg.date_field FROM kc_inventory.count_list_group dlg
+            JOIN kc_inventory.count_item_group dg ON dg.id = dlg.group_id AND dg.is_active AND dg.date_field IS NOT NULL
+            JOIN kc_inventory.count_item_group_item dgi ON dgi.group_id = dg.id AND dgi.item_id = src.item_id
+            WHERE dlg.list_id::text = %(l)s ORDER BY dlg.sort LIMIT 1) AS date_field
+    FROM (
+      SELECT i.item_id, i.area, i.sort, i.pack_uom, i.esb_uom, i.photo_required, 0 AS prio
+      FROM kc_inventory.count_list_item i WHERE i.list_id::text = %(l)s AND i.is_active
+        AND (NOT EXISTS (SELECT 1 FROM kc_inventory.count_list_group xg
+                         JOIN kc_inventory.count_item_group xig ON xig.id = xg.group_id AND xig.is_active
+                         WHERE xg.list_id::text = %(l)s)
+             OR EXISTS (SELECT 1 FROM kc_inventory.count_list_group xg
+                        JOIN kc_inventory.count_item_group xig ON xig.id = xg.group_id AND xig.is_active
+                        JOIN kc_inventory.count_item_group_item xgi ON xgi.group_id = xig.id AND xgi.item_id = i.item_id
+                        WHERE xg.list_id::text = %(l)s))
+      UNION ALL
+      SELECT gi.item_id, gi.area, 100000 * lg.sort + gi.sort, gi.pack_uom, gi.esb_uom, gi.photo_required, lg.sort
+      FROM kc_inventory.count_list_group lg
+      JOIN kc_inventory.count_item_group g ON g.id = lg.group_id AND g.is_active
+      JOIN kc_inventory.count_item_group_item gi ON gi.group_id = g.id
+      WHERE lg.list_id::text = %(l)s
+    ) src
+    WHERE NOT EXISTS (SELECT 1 FROM kc_inventory.count_list_exclusion x
+                      WHERE x.facility_id::text = %(f)s AND x.list_id::text = %(l)s AND x.item_id = src.item_id)
+    ORDER BY src.item_id, src.prio"""
+
+
+def own_items(branch: Optional[str]) -> Optional[list[dict]]:
+    """The waste and usage items of a branch of another company than the main one (Wasgee Tea, 2026-11-08): the items of
+    its own stock opname list (the monthly one), so the form offers what that brand counts. None = the main company's
+    list of integration_portal.waste_item."""
+    if not branch:
+        return None
+    from app.scope import MAIN_COMPANY
+    f = db.fetchrow(
+        f"""SELECT f.id::text AS id, f.facility_type, coalesce(b.company_code, %(main)s) AS company
+              FROM {SCHEMA}.master_branches b
+              JOIN kc_master.facility_esb_map m ON m.company_code = b.company_code AND m.esb_id = b.branch_id::text
+              JOIN kc_master.facility f ON f.id = m.facility_id
+             WHERE b.branch_code = %(c)s LIMIT 1""", {"c": branch, "main": MAIN_COMPANY})
+    if not f or f["company"] == MAIN_COMPANY:
+        return None
+    list_id = db.fetchrow(
+        """SELECT id::text FROM kc_inventory.count_list WHERE is_active AND count_type IN ('MONTHLY_RAW', 'WEEKLY_RAW')
+              AND (facility_id::text = %(f)s OR (facility_id IS NULL AND facility_type = %(ft)s))
+            ORDER BY facility_id IS NULL, count_type = 'MONTHLY_RAW' DESC LIMIT 1""", {"f": f["id"], "ft": f["facility_type"]})
+    if not list_id:
+        return []
+    rows = db.fetch(f"""SELECT it.code, it.name, it.base_uom AS unit FROM ({_LIST_ITEMS}) e
+                         JOIN kc_master.item it ON it.id = e.item_id AND it.is_active ORDER BY it.name""", {"l": list_id["id"], "f": f["id"]})
+    return [{"code": r["code"], "name": r["name"], "unit": r["unit"] or ""} for r in rows]
+
+
+def catalog(facility: str = "OUTLET", branch: Optional[str] = None) -> dict:
+    """{"items": {scope: [{code, name, unit}]}, "categories": [name]} for the form (premix of the facility type); a branch
+    of another company (Wasgee) gets the items of its own stock opname list for waste and usage."""
     items: dict[str, list[dict]] = {s: [] for s in SCOPES}
-    for r in db.fetch(f"SELECT scope, code, name, unit FROM {T_ITEM} WHERE is_active ORDER BY name"):
-        items[r["scope"]].append({"code": r["code"], "name": r["name"], "unit": r["unit"]})
+    own = own_items(branch)
+    if own is not None:
+        items["waste"] = own
+        items["usage"] = own
+    else:
+        for r in db.fetch(f"SELECT scope, code, name, unit FROM {T_ITEM} WHERE is_active ORDER BY name"):
+            items[r["scope"]].append({"code": r["code"], "name": r["name"], "unit": r["unit"]})
     try:
         items["premix"] = premix_recipes(facility)
     except Exception:  # noqa: BLE001 - kc_recipe unreachable: the form still works for waste and usage
@@ -127,8 +189,8 @@ def catalog(facility: str = "OUTLET") -> dict:
     return {"items": items, "categories": cats["waste"], "usageCategories": cats["usage"], "scopes": SCOPES}
 
 
-def _item(scope: str, code: str, facility: str = "OUTLET") -> Optional[dict]:
-    return next((i for i in catalog(facility)["items"].get(scope, []) if i["code"] == code), None)
+def _item(scope: str, code: str, facility: str = "OUTLET", branch: Optional[str] = None) -> Optional[dict]:
+    return next((i for i in catalog(facility, branch)["items"].get(scope, []) if i["code"] == code), None)
 
 
 def _qty(value: Any) -> Decimal:
@@ -240,7 +302,7 @@ def form(user: dict, branch: Optional[str], day: Optional[date]) -> dict:
     first, last = allowed_days()
     codes = {b["code"] for b in branches}
     out = {"branches": branches, "days": {"from": first.isoformat(), "to": last.isoformat()},
-           **catalog(facility_type(branch) if branch and branch in codes else "OUTLET"), "data": []}
+           **catalog(facility_type(branch) if branch and branch in codes else "OUTLET", branch if branch in codes else None), "data": []}
     if branch and branch in codes:
         rows = db.fetch(f"SELECT {COLUMNS} FROM {T} e WHERE e.branch_code = %s AND e.business_date = %s "
                         "ORDER BY e.created_at DESC", (branch, day or last))
@@ -274,7 +336,7 @@ def save_usage(user: dict, body: dict) -> dict:
     longitude}} (migration 045: category and photo required, the photo kept when saved again without one); an empty
     quantity (null) removes the item."""
     branch, day = _branch_day(user, body)
-    cat = catalog()
+    cat = catalog(branch=branch["code"])
     items = {i["code"]: i for i in cat["items"]["usage"]}
     cats = cat["usageCategories"]
     lines = body.get("lines") or {}
@@ -366,7 +428,7 @@ def create(user: dict, body: dict, device: Optional[str], ip: Optional[str]) -> 
     if scope not in ENTRY_SCOPES:
         raise WasteError("Jenis waste tidak dikenal")
     facility = facility_type(branch["code"]) if scope == "premix" else "OUTLET"
-    item = _item(scope, body.get("itemCode") or "", facility)
+    item = _item(scope, body.get("itemCode") or "", facility, branch["code"])
     if item is None:
         raise WasteError("Item tidak ada di daftar waste")
     qty = _qty(body.get("qty"))

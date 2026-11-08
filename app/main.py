@@ -38,7 +38,7 @@ from app.routes.visit_forms import router as visit_forms_router
 from app.routes.branch_groups import router as branch_groups_router
 from app.routes.rating import router as rating_router
 from app.routes.cotr import public_router as cotr_public_router, router as cotr_router
-from app.scope import branch_scope, company_of_request, company_scope
+from app.scope import COST_CONTROL_PATHS, brand_scope, branch_scope, company_of_request, company_scope
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("integrated_portal_be")
@@ -85,6 +85,7 @@ async def scope_to_user_branches(request: Request, call_next):
     at a time, `?company=` (app/scope.py)."""
     token = None
     company_token = company_scope.set(company_of_request(request.url.path, request.query_params.get("company")))
+    brand_token = brand_scope.set(request.url.path.startswith(COST_CONTROL_PATHS))
     if request.url.path.startswith("/api/") and not request.url.path.startswith("/api/auth/"):
         user = await run_in_threadpool(session_lookup, request)
         if user and user["role"] not in accounts.GLOBAL_ROLES:
@@ -95,6 +96,7 @@ async def scope_to_user_branches(request: Request, call_next):
         if token is not None:
             branch_scope.reset(token)
         company_scope.reset(company_token)
+        brand_scope.reset(brand_token)
 
 
 @app.middleware("http")

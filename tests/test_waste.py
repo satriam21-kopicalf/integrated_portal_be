@@ -33,7 +33,7 @@ def test_waste_pages_in_the_catalog():
 
 def test_entry_needs_category_photo_and_a_known_item(anon, store, fake_db, page_access, monkeypatch):
     monkeypatch.setattr(waste, "branch_options", lambda user, every=False: [KEMANG])
-    monkeypatch.setattr(waste, "catalog", lambda *a: CATALOG)
+    monkeypatch.setattr(waste, "catalog", lambda *a, **k: CATALOG)
     monkeypatch.setattr(waste, "today", lambda: date(2026, 10, 31))
     monkeypatch.setattr(waste, "facility_type", lambda code: "OUTLET")
     saved = {}
@@ -63,7 +63,7 @@ def test_entry_needs_category_photo_and_a_known_item(anon, store, fake_db, page_
 
 def test_monitor_and_review(anon, store, fake_db, page_access, monkeypatch):
     calls = []
-    monkeypatch.setattr(waste, "catalog", lambda *a: CATALOG)
+    monkeypatch.setattr(waste, "catalog", lambda *a, **k: CATALOG)
     monkeypatch.setattr(waste.db, "fetch", lambda q, p=None: calls.append(q) or ([_row(id="a"), _row(id="b")]
                                                                                 if "RETURNING" in q else []))
     monkeypatch.setattr(waste.db, "fetchrow", lambda q, p=None: {"entries": 0})
@@ -117,7 +117,7 @@ def _tx(monkeypatch):
 
 def test_usage_list_and_no_waste(anon, store, fake_db, page_access, monkeypatch):
     monkeypatch.setattr(waste, "branch_options", lambda user, every=False: [KEMANG])
-    monkeypatch.setattr(waste, "catalog", lambda *a: {**CATALOG, "items": {**CATALOG["items"], "usage": [
+    monkeypatch.setattr(waste, "catalog", lambda *a, **k: {**CATALOG, "items": {**CATALOG["items"], "usage": [
         {"code": "INSU-00005", "name": "CABLE TIES", "unit": "PACK"}, {"code": "AIIR-00001", "name": "AIR", "unit": "GR"}]}})
     monkeypatch.setattr(waste, "today", lambda: date(2026, 10, 31))
     conn = _tx(monkeypatch)

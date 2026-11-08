@@ -461,13 +461,21 @@ def lines_of(ids: list[str]) -> list[dict]:
 
 
 def _sources_for(user: dict) -> list[dict]:
-    """The outlets a user may ask: the real outlets, or for a test branch the other test branches only (2026-11-07)."""
+    """The outlets a user may ask: the outlets of the same brand, or for a test branch the other test branches only
+    (2026-11-07)."""
     from app import test_branches
     mine = [b["code"] for b in branch_options(user)]
     if any(test_branches.is_test(c) for c in mine):
         names = _names(list(test_branches.sources()))
         return [{"code": c, "name": names.get(c, c)} for c in sorted(test_branches.sources())]
-    return [{"code": b["code"], "name": b["name"]} for b in branch_options({}, every=True)]
+    every = [{"code": b["code"], "name": b["name"]} for b in branch_options({}, every=True)]
+    # one brand (2026-11-08): a Wasgee Tea outlet asks Wasgee Tea outlets, a Kopi Calf outlet the Kopi Calf ones
+    from app.scope import BRANDS, MAIN_COMPANY, brand_branches
+    for brand in (*BRANDS, MAIN_COMPANY):
+        codes = set(brand_branches(brand))
+        if mine and all(c in codes for c in mine):
+            return [b for b in every if b["code"] in codes]
+    return every
 
 
 def form(user: dict) -> dict:

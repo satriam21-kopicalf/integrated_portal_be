@@ -55,7 +55,9 @@ def facilities_of(codes: list[str]) -> list[str]:
     return hit
 
 
-def assertion(user: dict, secret: str) -> str:
+def assertion(user: dict, secret: str, company: str = "") -> str:
+    """The signed principal for the stock opname gateway; `company` (a Cost Control page on one brand, 2026-11-08) adds
+    "only": the facilities of that brand, so the monitor, reviews and reports show that brand alone."""
     role = access.so_role(user) if user["role"] in accounts.ROLES else "user"
     payload = {
         "sub": str(user["id"]),
@@ -65,6 +67,9 @@ def assertion(user: dict, secret: str) -> str:
         "facilities": [] if role in accounts.GLOBAL_ROLES else facilities_of(list(user.get("branch_codes") or [])),
         "exp": int(time.time()) + 60,
     }
+    if company and company.lower() != "all":
+        from app.scope import brand_branches
+        payload["only"] = facilities_of(list(brand_branches(company.upper())))
     body = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
     return body + "." + hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
 
@@ -92,7 +97,8 @@ async def so_proxy(path: str, request: Request, user: dict = Depends(current_use
     if user["role"] != "superadmin" and not any(access.has_page(user, p) for p in pages):
         access.deny(request, user)
     body = await request.body()
-    headers = {"x-portal-assertion": assertion(user, s.so_gateway_secret)}
+    company = (request.query_params.get("company") or "").strip()
+    headers = {"x-portal-assertion": assertion(user, s.so_gateway_secret, company)}
     if request.headers.get("content-type"):
         headers["content-type"] = request.headers["content-type"]
     url = f"{s.so_gateway_url.rstrip('/')}/api/{path}"

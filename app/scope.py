@@ -33,6 +33,14 @@ COMPANY_NAMES = {"CALF": "Kopi Calf", "CALF7": "Wasgee Tea"}
 ALL_COMPANIES = "all"
 # endpoints whose figures are about one company at a time (prefixes of the request path)
 SALES_PATHS = ("/api/overview", "/api/summary", "/api/transactions", "/api/live", "/api/branches", "/api/exports")
+# Cost Control (2026-11-08): narrowed to one brand only when the page asks (`?company=`), so the Operations forms that
+# share some endpoints never are; a brand = its outlets, the main company = everything else (outlets, hubs, warehouses)
+COST_CONTROL_PATHS = ("/api/cost-control/", "/api/monitoring/", "/api/waste/monitor", "/api/waste/reviews", "/api/waste/daily",
+                      "/api/waste/usage", "/api/waste/investigations")
+# the companies of another brand than the main one (Wasgee Tea); the other ESB companies (roastery, hubs …) are Kopi Calf
+BRANDS = ("CALF7",)
+# True while a Cost Control request is narrowed to a brand (allowed_branches reads brand_branches then)
+brand_scope: ContextVar[bool] = ContextVar("brand_scope", default=False)
 
 _cache = TTLCache()
 
@@ -57,8 +65,35 @@ def company_branches(company: str) -> tuple[str, ...]:
     return hit
 
 
+def brand_branches(company: str) -> tuple[str, ...]:
+    """The branch and facility codes of a brand (Cost Control): a brand company (Wasgee) = its ESB branches and the
+    facilities mapped to it; the main company = every other branch, facility and test branch."""
+    hit = _cache.get(f"brand:{company}")
+    if hit is None:
+        rows = db.fetch(
+            """SELECT b.branch_code AS code, b.company_code AS company FROM integration_esb.master_branches b WHERE COALESCE(b.branch_code, '') <> ''
+               UNION SELECT f.code, m.company_code FROM kc_master.facility f LEFT JOIN kc_master.facility_esb_map m ON m.facility_id = f.id
+               UNION SELECT DISTINCT d.branch_code, NULL FROM integration_portal.agg_sales_daily d WHERE COALESCE(d.branch_code, '') <> ''""")
+        brand = {r["code"] for r in rows if r["company"] in BRANDS and (company in BRANDS and r["company"] == company)}
+        if company not in BRANDS:
+            other = {r["code"] for r in rows if r["company"] in BRANDS}
+            brand = {r["code"] for r in rows} - other
+            try:
+                from app import test_branches
+                brand |= set(test_branches.sources())
+            except Exception:  # noqa: BLE001
+                pass
+        hit = tuple(sorted(brand))
+        _cache.set(f"brand:{company}", hit, 300)
+    return hit
+
+
 def company_of_request(path: str, requested: Optional[str]) -> Optional[str]:
-    """The company a request is about: None (not narrowed) outside the sales endpoints or for "all"."""
+    """The company a request is about: None (not narrowed) outside the sales endpoints or for "all"; a Cost Control
+    endpoint only when `company` is given."""
+    if path.startswith(COST_CONTROL_PATHS):
+        value = (requested or "").strip()
+        return None if not value or value.lower() == ALL_COMPANIES else value.upper()
     if not path.startswith(SALES_PATHS):
         return None
     value = (requested or "").strip()
@@ -73,7 +108,7 @@ def allowed_branches() -> Optional[tuple[str, ...]]:
     company = company_scope.get()
     if company is None:
         return allowed
-    codes = company_branches(company)
+    codes = brand_branches(company) if brand_scope.get() else company_branches(company)
     if allowed is None:
         return codes
     mine = set(allowed)

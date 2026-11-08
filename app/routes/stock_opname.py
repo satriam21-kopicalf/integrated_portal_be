@@ -88,6 +88,9 @@ def so_sites(_user: dict = Depends(require_superadmin)) -> list[dict]:
     return [{"branch_code": r["code"], "branch_name": r["name"], "facility_type": r["facility_type"]} for r in rows]
 
 
+BRAND_PATHS = ("counts", "count-reports")
+
+
 @router.api_route("/api/so/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 async def so_proxy(path: str, request: Request, user: dict = Depends(current_user)) -> Response:
     s = get_settings()
@@ -97,7 +100,9 @@ async def so_proxy(path: str, request: Request, user: dict = Depends(current_use
     if user["role"] != "superadmin" and not any(access.has_page(user, p) for p in pages):
         access.deny(request, user)
     body = await request.body()
-    company = (request.query_params.get("company") or "").strip()
+    # one brand only for reading the counts (list, monitor, today, reports): the settings, item master and recipes
+    # need the role's global rights, which a brand would narrow to facilities (2026-11-08)
+    company = (request.query_params.get("company") or "").strip() if request.method == "GET" and path.startswith(BRAND_PATHS) else ""
     headers = {"x-portal-assertion": assertion(user, s.so_gateway_secret, company)}
     if request.headers.get("content-type"):
         headers["content-type"] = request.headers["content-type"]

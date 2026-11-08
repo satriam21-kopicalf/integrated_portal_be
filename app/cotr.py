@@ -349,6 +349,10 @@ def check_in(user: dict, kind: str, photo: str, lat: float, lng: float, accuracy
                 f"""INSERT INTO {P}.cotr_shift (driver_code, day, pool_code, fleet_code, start_stock, dispatch_id)
                     VALUES (%s, %s, %s, %s, %s, %s) RETURNING *""",
                 (d["code"], today(), d["pool_code"], d["fleet_code"], Jsonb(counted), x["id"])).fetchone()
+            if d["fleet_code"]:  # the accessories on the fleet now go with this shift (migration 080)
+                conn.execute(f"""INSERT INTO {P}.cotr_shift_accessory (shift_id, accessory_code, fleet_code, qty)
+                                 SELECT %s, accessory_code, fleet_code, qty FROM {P}.cotr_fleet_accessory
+                                  WHERE fleet_code = %s AND removed_on IS NULL ON CONFLICT DO NOTHING""", (s["id"], d["fleet_code"]))
         else:
             if not s or s["status"] != "open":
                 raise CotrError("Belum ada shift yang berjalan")
@@ -475,6 +479,11 @@ MASTERS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
                                      "stnk_expires", "insurance_no", "insurance_expires", "odometer_km", "next_service",
                                      "gps_id"), "code"),
     "fleet-types": ("cotr_fleet_type", "code", ("code", "name", "sort"), "sort, name"),
+    # migration 080: the selling / standby places of the drivers and the accessories of the fleet
+    "areas": ("cotr_area", "code", ("code", "name", "address", "district", "city", "province", "postal_code", "latitude",
+                                    "longitude", "radius_m", "pool_code", "note", "is_active"), "name"),
+    "accessories": ("cotr_accessory", "code", ("code", "name", "category", "unit", "serial_no", "condition", "note",
+                                               "is_active"), "category, name"),
     "incentive-schemes": ("cotr_incentive_scheme", "code", ("code", "name", "valid_from", "tiers", "product_bonus",
                                                             "late_penalty", "absent_penalty", "min_attendance_pct",
                                                             "is_active", "note"), "valid_from DESC, code"),
@@ -497,7 +506,7 @@ SENSITIVE = {"drivers": ("nik", "salary_monthly", "allowance_monthly", "bank_nam
 IMAGES = {"drivers": {"photo": ("photo", "photo_type")},
           "fleet": {"photo": ("photo", "photo_type"), "qris": ("qris_image", "qris_image_type")}}
 _BYTES = {"photo", "photo_type", "qris_image", "qris_image_type", "updated_by"}
-UPPER_CODES = {"pools", "fleet", "menus", "boms", "drivers", "items", "shift-templates", "incentive-schemes"}  # fleet types keep their code as typed (sepeda_listrik)
+UPPER_CODES = {"pools", "fleet", "menus", "boms", "drivers", "items", "shift-templates", "incentive-schemes", "areas", "accessories"}  # fleet types keep their code as typed (sepeda_listrik)
 
 
 def _plain(row: dict) -> dict:
@@ -1083,6 +1092,12 @@ def schedule(d_from: date, d_to: date, pool: Optional[str]) -> dict:
         drivers = [d for d in drivers if d["pool_code"] == pool]
     entries = {(r["driver_code"], r["day"]): r for r in db.fetch(
         f"SELECT * FROM {P}.cotr_schedule WHERE day BETWEEN %s AND %s", (d_from, d_to))}
+    slots: dict[tuple, list[dict]] = {}
+    for r in db.fetch(f"""SELECT s.*, a.name AS area_name FROM {P}.cotr_schedule_slot s LEFT JOIN {P}.cotr_area a ON a.code = s.area_code
+                           WHERE s.day BETWEEN %s AND %s ORDER BY s.start_time""", (d_from, d_to)):
+        slots.setdefault((r["driver_code"], r["day"]), []).append(
+            {"id": r["id"], "template": r["template_code"], "start": r["start_time"].strftime("%H:%M"), "end": r["end_time"].strftime("%H:%M"),
+             "area": r["area_code"], "areaName": r["area_name"], "fleet": r["fleet_code"], "note": r["note"]})
     shifts = {(r["driver_code"], r["day"]): r for r in db.fetch(
         f"""SELECT driver_code, day, to_char(started_at AT TIME ZONE 'Asia/Jakarta', 'HH24:MI') AS started,
                    to_char(ended_at AT TIME ZONE 'Asia/Jakarta', 'HH24:MI') AS ended, status
@@ -1103,7 +1118,7 @@ def schedule(d_from: date, d_to: date, pool: Optional[str]) -> dict:
                 cells.append({"driver": d["code"], "day": day.isoformat(), "status": e["status"] if e else None,
                               "template": e["template_code"] if e else None, "pool": e["pool_code"] if e else None,
                               "note": e["note"] if e else None, "started": sh["started"] if sh else None,
-                              "ended": sh["ended"] if sh else None, "attendance": state})
+                              "ended": sh["ended"] if sh else None, "attendance": state, "slots": slots.get((d["code"], day), [])})
             if e and e["status"] == "work":
                 tally["scheduled"] += 1
             if sh:
@@ -1127,6 +1142,7 @@ def schedule_save(user: dict, entries: list[dict]) -> int:
             status = e.get("status")
             if status is None:
                 cur.execute(f"DELETE FROM {P}.cotr_schedule WHERE driver_code = %s AND day = %s", (e["driver"], e["day"]))
+                cur.execute(f"DELETE FROM {P}.cotr_schedule_slot WHERE driver_code = %s AND day = %s", (e["driver"], e["day"]))
                 n += 1
                 continue
             if status not in STATUSES:
@@ -1134,6 +1150,12 @@ def schedule_save(user: dict, entries: list[dict]) -> int:
             template = e.get("template") if status == "work" else None
             if status == "work" and not template:
                 raise CotrError("Jadwal kerja butuh shift")
+            given = e.get("slots") if status == "work" else []
+            if given:  # several assignments in the day (migration 080): the first one is the day's shift
+                given = sorted(given, key=lambda x: x["start"])
+                template = template or given[0].get("template")
+                if not template:
+                    raise CotrError("Slot pertama butuh template shift")
             cur.execute(
                 f"""INSERT INTO {P}.cotr_schedule (driver_code, day, status, template_code, pool_code, note, updated_by)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -1141,6 +1163,19 @@ def schedule_save(user: dict, entries: list[dict]) -> int:
                         template_code = EXCLUDED.template_code, pool_code = EXCLUDED.pool_code, note = EXCLUDED.note,
                         updated_at = now(), updated_by = EXCLUDED.updated_by""",
                 (e["driver"], e["day"], status, template, e.get("pool") or None, e.get("note") or None, user["id"]))
+            if given is not None:
+                cur.execute(f"DELETE FROM {P}.cotr_schedule_slot WHERE driver_code = %s AND day = %s", (e["driver"], e["day"]))
+                for x in given:
+                    if x["end"] <= x["start"]:
+                        raise CotrError(f"Jam selesai slot {x['start']} harus setelah jam mulai")
+                    cur.execute(
+                        f"""INSERT INTO {P}.cotr_schedule_slot (driver_code, day, template_code, start_time, end_time, area_code,
+                                fleet_code, note, updated_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        (e["driver"], e["day"], x.get("template") or None, x["start"], x["end"], x.get("area") or None,
+                         x.get("fleet") or None, x.get("note") or None, user["id"]))
+                for a, b in zip(given, given[1:]):
+                    if b["start"] < a["end"]:
+                        raise CotrError(f"Slot {a['start']}–{a['end']} dan {b['start']}–{b['end']} bertumpuk")
             n += 1
     return n
 
@@ -1162,7 +1197,15 @@ def schedule_copy(user: dict, src: date, dst: date, days: int, drivers: Optional
                     template_code = EXCLUDED.template_code, pool_code = EXCLUDED.pool_code, note = EXCLUDED.note,
                     updated_at = now(), updated_by = EXCLUDED.updated_by""",
             (offset, user["id"], src, date.fromordinal(src.toordinal() + days), *args))
-        return cur.rowcount
+        n = cur.rowcount
+        end = date.fromordinal(src.toordinal() + days)
+        cur.execute(f"""DELETE FROM {P}.cotr_schedule_slot WHERE day >= %s AND day < %s {where}""",
+                    (date.fromordinal(dst.toordinal()), date.fromordinal(dst.toordinal() + days), *args))
+        cur.execute(
+            f"""INSERT INTO {P}.cotr_schedule_slot (driver_code, day, template_code, start_time, end_time, area_code, fleet_code, note, updated_by)
+                SELECT driver_code, day + %s, template_code, start_time, end_time, area_code, fleet_code, note, %s
+                  FROM {P}.cotr_schedule_slot WHERE day >= %s AND day < %s {where}""", (offset, user["id"], src, end, *args))
+        return n
 
 
 # ---------------------------------------------------------------- incentives (migration 053)
@@ -1558,3 +1601,55 @@ def renew_label_token(code: str) -> str:
     if not row:
         raise CotrError("Armada tidak ditemukan")
     return row["label_token"]
+
+
+# ---------------------------------------------------------------- fleet accessories (migration 080)
+
+def fleet_accessories(fleet: Optional[str] = None) -> list[dict]:
+    """The accessories on the fleet (and the ones taken off), with the shifts that carried them."""
+    rows = db.fetch(f"""SELECT fa.*, a.name, a.category, a.unit, a.serial_no, a.condition
+                          FROM {P}.cotr_fleet_accessory fa JOIN {P}.cotr_accessory a ON a.code = fa.accessory_code
+                         WHERE (%(f)s::text IS NULL OR fa.fleet_code = %(f)s)
+                         ORDER BY fa.removed_on IS NOT NULL, fa.fleet_code, a.category, a.name""", {"f": fleet})
+    return [{"id": r["id"], "fleet": r["fleet_code"], "code": r["accessory_code"], "name": r["name"], "category": r["category"],
+             "unit": r["unit"], "serialNo": r["serial_no"], "condition": r["condition"], "qty": r["qty"],
+             "assignedOn": _iso(r["assigned_on"]), "removedOn": _iso(r["removed_on"]), "note": r["note"]} for r in rows]
+
+
+def fleet_assign(user: dict, fleet: str, code: str, qty: int, note: Optional[str]) -> list[dict]:
+    """Put an accessory on a fleet (one active row per fleet and accessory; the qty is updated when it is already on)."""
+    if qty <= 0:
+        raise CotrError("Jumlah minimal 1")
+    on = db.fetchrow(f"SELECT fleet_code FROM {P}.cotr_fleet_accessory WHERE accessory_code = %s AND removed_on IS NULL AND fleet_code <> %s",
+                     (code, fleet))
+    a = db.fetchrow(f"SELECT serial_no FROM {P}.cotr_accessory WHERE code = %s", (code,))
+    if not a:
+        raise CotrError("Accessories tidak ditemukan")
+    if on and a["serial_no"]:  # an item with a serial number is on one fleet at a time
+        raise CotrError(f"{code} masih terpasang di fleet {on['fleet_code']}")
+    with db.transaction() as conn:
+        conn.execute(f"""INSERT INTO {P}.cotr_fleet_accessory (fleet_code, accessory_code, qty, note, updated_by)
+                         VALUES (%s, %s, %s, %s, %s)
+                         ON CONFLICT (fleet_code, accessory_code) WHERE removed_on IS NULL
+                         DO UPDATE SET qty = EXCLUDED.qty, note = EXCLUDED.note, updated_at = now(), updated_by = EXCLUDED.updated_by""",
+                     (fleet, code, qty, (note or "").strip() or None, user["id"]))
+    return fleet_accessories(fleet)
+
+
+def fleet_unassign(user: dict, assignment_id: int) -> None:
+    """Take an accessory off its fleet (kept with the day it was taken off)."""
+    db.fetchrow(f"""UPDATE {P}.cotr_fleet_accessory SET removed_on = CURRENT_DATE, updated_at = now(), updated_by = %s
+                     WHERE id = %s AND removed_on IS NULL RETURNING id""", (user["id"], assignment_id))
+
+
+def accessory_usage(d_from: date, d_to: date) -> list[dict]:
+    """Who carried which accessories and when: every shift of the period with the accessories of its fleet."""
+    rows = db.fetch(f"""SELECT s.id::text AS shift, s.day, s.driver_code, d.name AS driver, sa.fleet_code, sa.accessory_code, a.name, sa.qty,
+                               s.started_at, s.ended_at
+                          FROM {P}.cotr_shift_accessory sa JOIN {P}.cotr_shift s ON s.id = sa.shift_id
+                          JOIN {P}.cotr_accessory a ON a.code = sa.accessory_code
+                          LEFT JOIN {P}.cotr_driver d ON d.code = s.driver_code
+                         WHERE s.day BETWEEN %s AND %s ORDER BY s.day DESC, s.started_at DESC, a.name""", (d_from, d_to))
+    return [{"shift": r["shift"], "day": _iso(r["day"]), "driver": r["driver_code"], "driverName": r["driver"], "fleet": r["fleet_code"],
+             "code": r["accessory_code"], "name": r["name"], "qty": r["qty"], "startedAt": _iso(r["started_at"]),
+             "endedAt": _iso(r["ended_at"])} for r in rows]

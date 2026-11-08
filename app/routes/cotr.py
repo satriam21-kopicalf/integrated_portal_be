@@ -71,8 +71,10 @@ from app.thumbs import image_response
 router = APIRouter(prefix="/api/cotr", tags=["cotr"])
 driver_only = require_roles("driver")
 ENTITY_PAGE = {"pools": "cotr.pools", "fleet": "cotr.fleet", "fleet-types": "cotr.fleet", "shift-templates": "cotr.schedule", "incentive-schemes": "cotr.incentive", "menus": "cotr.menu",
-               "boms": "cotr.production", "items": "cotr.production", "drivers": "cotr.drivers"}
-Entity = Literal["pools", "fleet", "fleet-types", "shift-templates", "incentive-schemes", "menus", "boms", "items", "drivers"]
+               "boms": "cotr.production", "items": "cotr.production", "drivers": "cotr.drivers",
+               "areas": "cotr.pools", "accessories": "cotr.fleet"}  # migration 080: with the pools and the fleet
+Entity = Literal["pools", "fleet", "fleet-types", "shift-templates", "incentive-schemes", "menus", "boms", "items", "drivers",
+                 "areas", "accessories"]
 MANAGEMENT = "cotr.management"  # salary, bank and NIK of the drivers (migration 050)
 
 
@@ -402,6 +404,20 @@ class ScheduleCell(BaseModel):
     template: Optional[str] = Field(None, max_length=40)
     pool: Optional[str] = Field(None, max_length=40)
     note: Optional[str] = Field(None, max_length=300)
+    # several assignments of the day (migration 080); null = keep the slots as they are
+    slots: Optional[list["SlotIn"]] = Field(None, max_length=12)
+
+
+class SlotIn(BaseModel):
+    template: Optional[str] = Field(None, max_length=40)
+    start: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    end: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    area: Optional[str] = Field(None, max_length=40)
+    fleet: Optional[str] = Field(None, max_length=40)
+    note: Optional[str] = Field(None, max_length=300)
+
+
+ScheduleCell.model_rebuild()
 
 
 class ScheduleIn(BaseModel):
@@ -585,3 +601,34 @@ def public_driver_photo(token: str, driver: str, w: Optional[int] = Query(None, 
     if not row or not row["data"]:
         raise HTTPException(404, detail="Foto tidak ada")
     return image_response(row["data"], row["type"], w, "public, max-age=300")
+
+
+class AccessoryIn(BaseModel):
+    code: str = Field(min_length=1, max_length=40)
+    qty: int = Field(1, ge=1, le=1000)
+    note: Optional[str] = Field(None, max_length=300)
+
+
+@router.get("/fleet-accessories")
+def fleet_accessories(fleet: Optional[str] = None, _: dict = Depends(require_page("cotr.fleet"))):
+    return {"data": _call(cotr.fleet_accessories, fleet)}
+
+
+@router.post("/fleet/{fleet}/accessories")
+def fleet_assign(fleet: str, body: AccessoryIn, request: Request, user: dict = Depends(require_page("cotr.fleet"))):
+    out = _call(cotr.fleet_assign, user, fleet, body.code.upper(), body.qty, body.note)
+    _log(request, user, "cotr.fleet.accessory", f"Accessories {body.code} ke fleet {fleet}")
+    return {"data": out}
+
+
+@router.delete("/fleet-accessories/{assignment_id}")
+def fleet_unassign(assignment_id: int, request: Request, user: dict = Depends(require_page("cotr.fleet"))):
+    _call(cotr.fleet_unassign, user, assignment_id)
+    _log(request, user, "cotr.fleet.accessory", f"Accessories dilepas ({assignment_id})")
+    return {"ok": True}
+
+
+@router.get("/accessory-usage")
+def accessory_usage(dateFrom: Optional[date] = None, dateTo: Optional[date] = None, _: dict = Depends(require_page("cotr.fleet"))):
+    end = dateTo or today()
+    return {"data": _call(cotr.accessory_usage, dateFrom or end - timedelta(days=30), end)}

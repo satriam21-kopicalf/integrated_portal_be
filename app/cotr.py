@@ -283,6 +283,15 @@ def today_of(user: dict) -> dict:
         "reloads": [_reload_view(x) for x in reloads],
         "requests": [_request_view(x) for x in reqs],
         "recap": recap(s, sales, reloads, [r for r in reqs if s and r["shift_id"] == s["id"]]) if s else None,
+        # 2026-11-08: where the roster sends the driver today and the accessories on the fleet
+        "slots": [{"start": r["start_time"].strftime("%H:%M"), "end": r["end_time"].strftime("%H:%M"), "area": r["area"], "address": r["address"],
+                   "lat": float(r["latitude"]) if r["latitude"] is not None else None, "lng": float(r["longitude"]) if r["longitude"] is not None else None}
+                  for r in db.fetch(f"""SELECT s.start_time, s.end_time, a.name AS area, a.address, a.latitude, a.longitude FROM {P}.cotr_schedule_slot s
+                                         LEFT JOIN {P}.cotr_area a ON a.code = s.area_code WHERE s.driver_code = %s AND s.day = %s ORDER BY s.start_time""",
+                                     (d["code"], today()))],
+        "accessories": [{"name": r["name"], "qty": r["qty"]} for r in db.fetch(
+            f"""SELECT a.name, fa.qty FROM {P}.cotr_fleet_accessory fa JOIN {P}.cotr_accessory a ON a.code = fa.accessory_code
+                 WHERE fa.fleet_code = %s AND fa.removed_on IS NULL ORDER BY a.name""", (d["fleet_code"],))] if d.get("fleet_code") else [],
     }
 
 

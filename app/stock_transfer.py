@@ -128,6 +128,17 @@ def stock_list(branches: Optional[list[str]]) -> dict:
     codes = sorted({c for v in s.values() for c in v["items"]} | {c for v in run.values() for c in v["items"]})
     info, price = items_info(codes), prices(codes)
     names = _names(list(s))
+    # the stock opname before the latest one of each branch (2026-11-08): its date and quantity next to the latest
+    from app import menu_costing as mc
+    prev: dict[str, dict] = {}
+    by_day: dict[str, list[str]] = {}
+    for b, v in s.items():
+        by_day.setdefault(v["so"]["date"], []).append(b)
+    for d, bs in by_day.items():
+        try:
+            prev.update(mc.portal_counts(date.fromisoformat(d) - timedelta(days=1), bs, back=LATEST_SO_DAYS, ahead=0))
+        except Exception:  # noqa: BLE001 - the previous count is extra
+            pass
     rows, heads = [], []
     for b, v in sorted(s.items(), key=lambda kv: names.get(kv[0], kv[0])):
         value = est_value = 0.0
@@ -151,9 +162,11 @@ def stock_list(branches: Optional[list[str]]) -> dict:
                          "received": round(mv.get("received", 0.0), 3),
                          "otherMoves": round(sum(q for k, q in mv.items() if k not in TRANSFER_KINDS and k != "received"), 3),
                          "waste": round((e or {}).get("waste", 0.0), 3), "used": round((e or {}).get("used", 0.0), 3),
-                         "estimate": round(est, 3), "estimateValue": ev})
+                         "estimate": round(est, 3), "estimateValue": ev,
+                         "prevSo": round(prev[b]["items"][code][0], 3) if b in prev and code in prev[b]["items"] else None})
         heads.append({"branch": b, "branchName": names.get(b, b), "soDate": v["so"]["date"], "refs": v["so"]["refs"],
-                      "final": r["so"].get("final"), "items": len(v["items"]), "value": round(value, 2), "estimateValue": round(est_value, 2)})
+                      "final": r["so"].get("final"), "items": len(v["items"]),
+                      "prevSoDate": prev[b]["date"] if b in prev else None, "prevRefs": prev[b]["refs"] if b in prev else [], "value": round(value, 2), "estimateValue": round(est_value, 2)})
     return {"branches": heads, "rows": rows, "estimatedAt": date.today().isoformat()}
 
 

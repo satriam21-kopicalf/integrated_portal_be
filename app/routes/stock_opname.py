@@ -108,6 +108,13 @@ async def so_proxy(path: str, request: Request, user: dict = Depends(current_use
         logger.warning("stock opname gateway %s %s failed: %s", request.method, path, exc)
         raise HTTPException(502, detail="Layanan stock opname tidak dapat dihubungi, coba lagi") from None
     out = {k: v for k, v in r.headers.items() if k.lower() in PASS_HEADERS}
+    w = request.query_params.get("w")
+    if request.method == "GET" and path.startswith("count-photos/") and r.status_code == 200 and w and w.isdigit():
+        # a small copy of a count photo (the review grid loads many: full photos stall the page), 2026-11-08
+        from app.thumbs import thumbnail
+        body, kind = thumbnail(r.content, r.headers.get("content-type"), int(w))
+        out = {k: v for k, v in out.items() if k.lower() not in ("content-type", "content-length")}
+        return Response(body, status_code=200, media_type=kind, headers=out)
     return Response(r.content, status_code=r.status_code, headers=out)
 
 

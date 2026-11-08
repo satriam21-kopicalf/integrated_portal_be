@@ -183,7 +183,7 @@ def stock_list(branches: Optional[list[str]]) -> dict:
                          "estimate": round(est, 3), "estimateValue": ev,
                          "prevSo": round(prev[b]["items"][code][0], 3) if b in prev and code in prev[b]["items"] else None})
         heads.append({"branch": b, "branchName": names.get(b, b), "soDate": v["so"]["date"], "refs": v["so"]["refs"],
-                      "final": r["so"].get("final"), "items": len(v["items"]),
+                      "final": r["so"].get("final"), "soAt": r["so"].get("cutoff"), "items": len(v["items"]),
                       "prevSoDate": prev[b]["date"] if b in prev else None, "prevRefs": prev[b]["refs"] if b in prev else [], "value": round(value, 2), "estimateValue": round(est_value, 2)})
     return {"branches": heads, "rows": rows, "estimatedAt": date.today().isoformat()}
 

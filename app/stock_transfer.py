@@ -116,6 +116,24 @@ def stock(branches: Optional[list[str]], exclude: Optional[str] = None) -> dict[
 TRANSFER_KINDS = ("transferIn", "transferOut")
 
 
+def moves_before(starts: dict[str, date], cutoffs: dict) -> dict[str, dict[str, dict[tuple[str, str], float]]]:
+    """{branch: {kind: {(item, UNIT): signed qty}}} of the transfers of the SO day that happened before the SO was sent
+    (moves() counts them by day): taken off again, the count already holds them (2026-11-08)."""
+    out: dict[str, dict[str, dict[tuple[str, str], float]]] = {}
+    for b, cut in cutoffs.items():
+        for r in db.fetch(
+                f"""SELECT x.kind, l.item_code, l.unit, sum(x.sign * l.qty) AS qty
+                      FROM {T} t JOIN {T_LINE} l ON l.transfer_id = t.id
+                      CROSS JOIN LATERAL (VALUES ('transferIn', 1, t.received_at, t.status = 'received', t.to_branch),
+                                                 ('transferOut', -1, coalesce(t.cc_at, t.received_at), t.status = ANY(%(s)s), t.from_branch)) x(kind, sign, at, counts, branch)
+                     WHERE x.counts AND x.branch = %(b)s AND (x.at AT TIME ZONE 'Asia/Jakarta')::date >= %(d)s AND x.at < %(cut)s
+                     GROUP BY 1, 2, 3""", {"s": list(SHIPPED), "b": b, "d": starts[b], "cut": cut}):
+            bucket = out.setdefault(b, {}).setdefault(r["kind"], {})
+            key = (r["item_code"], str(r["unit"] or "").upper())
+            bucket[key] = bucket.get(key, 0.0) + float(r["qty"])
+    return out
+
+
 def stock_list(branches: Optional[list[str]]) -> dict:
     """Monitoring Stock → Stock List: one row per branch × item with its value, and per branch its latest count; with the
     running stock (app/running_stock.py: the estimate now, from the SO and every move, waste and usage since)."""

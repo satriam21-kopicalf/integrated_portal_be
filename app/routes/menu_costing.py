@@ -23,7 +23,7 @@
 A role "user" given a page sees only its own branches (app/scope.py).
 """
 from datetime import date, timedelta
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -54,8 +54,24 @@ class PricesIn(BaseModel):
 
 @router.get("/pricelist")
 def pricelist(search: str = "", category: str = "", day: Optional[date] = Query(None, alias="date"),
-              _: dict = Depends(require_page(PRICE, CALC))) -> dict:
-    return mc.items(search, category, day)
+              status: Literal["active", "inactive", "all"] = "active", _: dict = Depends(require_page(PRICE, CALC))) -> dict:
+    return mc.items(search, category, day, status)
+
+
+class ActiveIn(BaseModel):
+    active: bool
+
+
+@router.put("/pricelist/{code}/active")
+def item_active(code: str, body: ActiveIn, request: Request, user: dict = Depends(require_page(PRICE))) -> dict:
+    """List & Pricelist Items (2026-11-09): activate / deactivate an item of the master."""
+    try:
+        out = mc.set_item_active(code, body.active, user)
+    except mc.CostingError as exc:
+        _refuse(exc)
+    activity.record("cc.item_active", user=user, request=request, page="/cost-control/pricelist",
+                    summary=f"Item {out['code']} {out['name']} {'diaktifkan' if out['active'] else 'dinonaktifkan'}", details=out)
+    return out
 
 
 @router.get("/pricelist/{code}/history")

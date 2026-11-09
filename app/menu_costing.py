@@ -52,18 +52,24 @@ def _f(v: Any) -> float:
 
 # ---------------------------------------------------------------- pricelist
 
-def items(search: str = "", category: str = "", on: Optional[date] = None) -> dict:
+ITEM_STATUS = {"active": "i.is_active", "inactive": "NOT i.is_active", "all": "true"}
+
+
+def items(search: str = "", category: str = "", on: Optional[date] = None, status: str = "active") -> dict:
     """STOCK items of kc_master with their category, base unit, the price valid on `on` (today) and the average
-    purchase price of the last 90 days."""
+    purchase price of the last 90 days. `status` (2026-11-09, List & Pricelist Items): active (the default, what the
+    costing uses), inactive or all."""
+    if status not in ITEM_STATUS:
+        raise CostingError("Status item tidak dikenal")
     day = on or date.today()
     rows = db.fetch(
-        f"""SELECT i.code, i.name, i.base_uom, c.name AS category,
+        f"""SELECT i.code, i.name, i.base_uom, c.name AS category, i.is_active,
                    pr.price, pr.valid_from, pr.note
               FROM kc_master.item i LEFT JOIN kc_master.item_category c ON c.id = i.category_id
               LEFT JOIN LATERAL (SELECT price, valid_from, note FROM {P}.cc_item_price p
                                   WHERE p.item_code = i.code AND p.valid_from <= %(day)s
                                   ORDER BY valid_from DESC LIMIT 1) pr ON true
-             WHERE i.is_active AND i.item_type = 'STOCK'
+             WHERE {ITEM_STATUS[status]} AND i.item_type = 'STOCK'
                AND (%(q)s = '' OR i.code ILIKE %(like)s OR i.name ILIKE %(like)s)
                AND (%(cat)s = '' OR c.name = %(cat)s)
              ORDER BY c.name NULLS LAST, i.name""",
@@ -72,13 +78,25 @@ def items(search: str = "", category: str = "", on: Optional[date] = None) -> di
     hpp = esb_hpp(day)
     cats = [r["name"] for r in db.fetch(
         """SELECT DISTINCT c.name FROM kc_master.item i JOIN kc_master.item_category c ON c.id = i.category_id
-            WHERE i.is_active AND i.item_type = 'STOCK' ORDER BY 1""")]
-    return {"day": day.isoformat(), "categories": cats, "data": [{
-        "code": r["code"], "name": r["name"], "unit": r["base_uom"], "category": r["category"],
+            WHERE i.item_type = 'STOCK' ORDER BY 1""")]
+    counts = db.fetchrow("""SELECT count(*) FILTER (WHERE is_active) AS active, count(*) FILTER (WHERE NOT is_active) AS inactive
+                              FROM kc_master.item WHERE item_type = 'STOCK'""")
+    return {"day": day.isoformat(), "categories": cats, "counts": {"active": counts["active"], "inactive": counts["inactive"]}, "data": [{
+        "code": r["code"], "name": r["name"], "unit": r["base_uom"], "category": r["category"], "active": r["is_active"],
         "price": _f(r["price"]) if r["price"] is not None else None,
         "validFrom": r["valid_from"].isoformat() if r["valid_from"] else None, "note": r["note"],
         "purchaseAvg": avg.get((r["code"], str(r["base_uom"] or "").upper())),
         "esbHpp": hpp.get(r["code"], (None, 0))[0], "esbHppLocations": hpp.get(r["code"], (None, 0))[1]} for r in rows]}
+
+
+def set_item_active(code: str, active: bool, user: dict) -> dict:
+    """Activate or deactivate an item of the master (2026-11-09): an inactive item leaves the stock opname forms, the
+    Pricelist and the item pickers; its history stays."""
+    row = db.fetchrow("""UPDATE kc_master.item SET is_active = %s, updated_at = now() WHERE code = %s
+                         RETURNING code, name, is_active""", (active, code))
+    if not row:
+        raise CostingError("Item tidak ditemukan")
+    return {"code": row["code"], "name": row["name"], "active": row["is_active"]}
 
 
 def esb_hpp(day: date) -> dict[str, tuple[float, int]]:

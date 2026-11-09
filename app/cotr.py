@@ -585,6 +585,18 @@ def _value(col: str, v: Any) -> Any:
     return v
 
 
+_NOT_NULL: dict[str, set[str]] = {}
+
+
+def _not_null_text(table: str) -> set[str]:
+    """The text columns of a master table that may not be null (cached for the process)."""
+    if table not in _NOT_NULL:
+        _NOT_NULL[table] = {r["column_name"] for r in db.fetch(
+            """SELECT column_name FROM information_schema.columns WHERE table_schema = %s AND table_name = %s
+                AND is_nullable = 'NO' AND data_type IN ('text', 'character varying')""", (P, table))}
+    return _NOT_NULL[table]
+
+
 def master_save(user: dict, entity: str, key: Optional[str], data: dict, sensitive: bool = False) -> dict:
     """Create (key None) or update one master row; the code may change (references follow it). Without the COTR
     management page the salary, bank and NIK of a driver are left as they are."""
@@ -595,6 +607,10 @@ def master_save(user: dict, entity: str, key: Optional[str], data: dict, sensiti
         raise CotrError("Kode wajib diisi")
     if row.get("code") and entity in UPPER_CODES:
         row["code"] = str(row["code"]).strip().upper()
+    # a text field left empty in a column that may not be null (address, city …) is stored empty, not null (2026-11-09)
+    for c in _not_null_text(table):
+        if c in row and row[c] is None:
+            row[c] = ""
     names = list(row)
     try:
         if key is None:
@@ -661,6 +677,9 @@ def _db_message(e: Exception) -> str:
         return "Masih dipakai data lain, atau referensi (pool / armada / BOM / akun) tidak ada"
     if "check constraint" in text:
         return "Isian tidak valid"
+    if "not-null" in text or "null value" in text:
+        col = text.split('column "')[1].split('"')[0] if 'column "' in text else ""
+        return f"Isian wajib belum diisi{f' ({col})' if col else ''}"
     return "Data tidak dapat disimpan"
 
 

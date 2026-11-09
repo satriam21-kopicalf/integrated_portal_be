@@ -23,3 +23,15 @@ def test_running_stock_of_a_hub(monkeypatch):
     # 5000 counted + 2000 received − 20 cups × 150 ml − 1 box (1000 ml) wasted = 3000 ml
     assert (r["so"], r["received"], r["used"], r["waste"], r["estimate"]) == (5000, 2000, 3000, 1000, 3000)
     assert r["value"] == 60000 and out["soDay"] == "2026-11-01"
+
+
+def test_an_empty_text_field_is_saved_empty_not_null(monkeypatch):
+    """2026-11-09: a new pool without an address was refused (address may not be null)."""
+    seen = {}
+    monkeypatch.setattr(cotr, "_not_null_text", lambda table: {"address", "city", "name", "code", "kind"})
+    def fetchrow(q, p=None):
+        seen["p"] = p
+        return {"code": "P1", "name": "Pool", "address": ""}
+    monkeypatch.setattr(cotr.db, "fetchrow", fetchrow)
+    cotr.master_save({"id": "u"}, "pools", None, {"code": "p1", "name": "Pool", "kind": "parent", "city": "Jakarta", "address": ""})
+    assert "" in seen["p"] and None not in seen["p"][:5]

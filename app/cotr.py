@@ -498,6 +498,7 @@ MASTERS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
                                                             "is_active", "note"), "valid_from DESC, code"),
     "shift-templates": ("cotr_shift_template", "code", ("code", "name", "start_time", "end_time", "break_min", "grace_min",
                                                         "color", "is_active", "sort", "pay_rate"), "sort, start_time"),
+    "menu-categories": ("cotr_menu_category", "code", ("code", "name", "sort", "is_active"), "sort, name"),
     "menus": ("cotr_menu", "code", ("code", "name", "category", "price", "bom_code", "is_active", "sort", "shelf_life_days"), "sort, name"),
     "boms": ("cotr_bom", "code", ("code", "name", "output", "yield_qty", "yield_unit", "lines", "kind", "units", "note"),
              "kind DESC, name"),
@@ -515,7 +516,7 @@ SENSITIVE = {"drivers": ("nik", "salary_monthly", "allowance_monthly", "bank_nam
 IMAGES = {"drivers": {"photo": ("photo", "photo_type")},
           "fleet": {"photo": ("photo", "photo_type"), "qris": ("qris_image", "qris_image_type")}}
 _BYTES = {"photo", "photo_type", "qris_image", "qris_image_type", "updated_by"}
-UPPER_CODES = {"pools", "fleet", "menus", "boms", "drivers", "items", "shift-templates", "incentive-schemes", "areas", "accessories"}  # fleet types keep their code as typed (sepeda_listrik)
+UPPER_CODES = {"menu-categories", "pools", "fleet", "menus", "boms", "drivers", "items", "shift-templates", "incentive-schemes", "areas", "accessories"}  # fleet types keep their code as typed (sepeda_listrik)
 
 
 def _plain(row: dict) -> dict:
@@ -628,10 +629,26 @@ def image(entity: str, code: str, slot: str) -> Optional[dict]:
     return db.fetchrow(f"SELECT {data_col} AS data, {type_col} AS type FROM {P}.{table} WHERE {pk} = %s", (code,))
 
 
+DEFAULT_POOL = "DEFAULT"  # migration 082
+
+
 def master_delete(entity: str, key: str) -> None:
     table, pk, _, _ = MASTERS[entity]
+    if entity == "pools" and key == DEFAULT_POOL:
+        raise CotrError("Pool Default tidak dapat dihapus")
     try:
-        db.fetchrow(f"DELETE FROM {P}.{table} WHERE {pk} = %s RETURNING {pk}", (key,))
+        with db.transaction() as conn:
+            if entity == "pools":  # its employees and fleet go to the Pool Default (2026-11-09), the pools under it lose their parent
+                conn.execute(f"UPDATE {P}.cotr_driver SET pool_code = %s, updated_at = now() WHERE pool_code = %s", (DEFAULT_POOL, key))
+                conn.execute(f"UPDATE {P}.cotr_fleet SET pool_code = %s, updated_at = now() WHERE pool_code = %s", (DEFAULT_POOL, key))
+                conn.execute(f"UPDATE {P}.cotr_pool SET parent_code = NULL WHERE parent_code = %s", (key,))
+            if entity == "menu-categories":
+                name = conn.execute(f"SELECT name FROM {P}.cotr_menu_category WHERE code = %s", (key,)).fetchone()
+                if name and conn.execute(f"SELECT 1 FROM {P}.cotr_menu WHERE category = %s LIMIT 1", (name["name"],)).fetchone():
+                    raise CotrError("Kategori masih dipakai menu; ganti kategori menunya dulu")
+            conn.execute(f"DELETE FROM {P}.{table} WHERE {pk} = %s", (key,))
+    except CotrError:
+        raise
     except Exception as e:
         raise CotrError(_db_message(e)) from None
 
@@ -1661,7 +1678,7 @@ def fleet_accessories(fleet: Optional[str] = None) -> list[dict]:
              "assignedOn": _iso(r["assigned_on"]), "removedOn": _iso(r["removed_on"]), "note": r["note"]} for r in rows]
 
 
-def fleet_assign(user: dict, fleet: str, code: str, qty: int, note: Optional[str]) -> list[dict]:
+def fleet_assign(user: dict, fleet: str, code: str, qty: int, note: Optional[str], assigned_on: Optional[date] = None) -> list[dict]:
     """Put an accessory on a fleet (one active row per fleet and accessory; the qty is updated when it is already on)."""
     if qty <= 0:
         raise CotrError("Jumlah minimal 1")
@@ -1673,11 +1690,12 @@ def fleet_assign(user: dict, fleet: str, code: str, qty: int, note: Optional[str
     if on and a["serial_no"]:  # an item with a serial number is on one fleet at a time
         raise CotrError(f"{code} masih terpasang di fleet {on['fleet_code']}")
     with db.transaction() as conn:
-        conn.execute(f"""INSERT INTO {P}.cotr_fleet_accessory (fleet_code, accessory_code, qty, note, updated_by)
-                         VALUES (%s, %s, %s, %s, %s)
+        conn.execute(f"""INSERT INTO {P}.cotr_fleet_accessory (fleet_code, accessory_code, qty, note, updated_by, assigned_on)
+                         VALUES (%s, %s, %s, %s, %s, %s)
                          ON CONFLICT (fleet_code, accessory_code) WHERE removed_on IS NULL
-                         DO UPDATE SET qty = EXCLUDED.qty, note = EXCLUDED.note, updated_at = now(), updated_by = EXCLUDED.updated_by""",
-                     (fleet, code, qty, (note or "").strip() or None, user["id"]))
+                         DO UPDATE SET qty = EXCLUDED.qty, note = EXCLUDED.note, assigned_on = EXCLUDED.assigned_on,
+                                       updated_at = now(), updated_by = EXCLUDED.updated_by""",
+                     (fleet, code, qty, (note or "").strip() or None, user["id"], assigned_on or today()))
     return fleet_accessories(fleet)
 
 

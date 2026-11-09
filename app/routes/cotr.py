@@ -72,9 +72,9 @@ router = APIRouter(prefix="/api/cotr", tags=["cotr"])
 driver_only = require_roles("driver")
 ENTITY_PAGE = {"pools": "cotr.pools", "fleet": "cotr.fleet", "fleet-types": "cotr.fleet", "shift-templates": "cotr.schedule", "incentive-schemes": "cotr.incentive", "menus": "cotr.menu",
                "boms": "cotr.production", "items": "cotr.production", "drivers": "cotr.drivers",
-               "areas": "cotr.pools", "accessories": "cotr.fleet"}  # migration 080: with the pools and the fleet
+               "areas": "cotr.pools", "accessories": "cotr.fleet", "menu-categories": "cotr.menu"}  # migration 080: with the pools and the fleet
 Entity = Literal["pools", "fleet", "fleet-types", "shift-templates", "incentive-schemes", "menus", "boms", "items", "drivers",
-                 "areas", "accessories"]
+                 "areas", "accessories", "menu-categories"]
 MANAGEMENT = "cotr.management"  # salary, bank and NIK of the drivers (migration 050)
 
 
@@ -611,6 +611,7 @@ class AccessoryIn(BaseModel):
     code: str = Field(min_length=1, max_length=40)
     qty: int = Field(1, ge=1, le=1000)
     note: Optional[str] = Field(None, max_length=300)
+    assignedOn: Optional[date] = None  # the day it is used from (2026-11-09)
 
 
 @router.get("/fleet-accessories")
@@ -620,7 +621,7 @@ def fleet_accessories(fleet: Optional[str] = None, _: dict = Depends(require_pag
 
 @router.post("/fleet/{fleet}/accessories")
 def fleet_assign(fleet: str, body: AccessoryIn, request: Request, user: dict = Depends(require_page("cotr.fleet"))):
-    out = _call(cotr.fleet_assign, user, fleet, body.code.upper(), body.qty, body.note)
+    out = _call(cotr.fleet_assign, user, fleet, body.code.upper(), body.qty, body.note, body.assignedOn)
     _log(request, user, "cotr.fleet.accessory", f"Accessories {body.code} ke fleet {fleet}")
     return {"data": out}
 

@@ -24,7 +24,7 @@ from app.pic_checkin import CheckInError, branch_options, judge, locations, pars
 T = "integration_portal.visit_form"
 TP = "integration_portal.visit_form_photo"
 RATINGS = ("UNDER", "MEET", "EXCEED")
-MAX_PHOTOS_PER_ITEM = 3
+MAX_PHOTOS_PER_ITEM = 5  # 2026-11-09 (Operations): 5 photos an item
 DAILY_SINCE = date(2026, 10, 23)  # one visit per branch per day from here; days off are counted from this day
 
 
@@ -86,8 +86,13 @@ EVIDENCE_NOTE_ONLY = {"note": REQ, "photo": OPT}  # a note is required, the phot
 QTY = {"qty": "g"}
 # the premixes and liquids of Stock Preparation (2026-11-08): a plain quantity in gram, pail or teko, as the PIC counts
 # it at the outlet; no conversion, the stock only rates the PIC (Product and WW-WR)
-QTY_UNITS = ("gram", "pail", "teko")
-PREMIX_QTY = {"qty": "g", "units": list(QTY_UNITS)}
+QTY_UNITS = ("gram", "pail", "teko", "porsi", "pax")
+PREMIX_QTY = {"qty": "g", "units": ["gram", "pail", "teko"]}
+# the food of Stock Preparation (2026-11-09): counted in portions or pax too
+FOOD = {"Dimsum", "Roti Kukus", "Puding", "Side Dish Lainnya", "Maincourse"}
+FOOD_QTY = {"qty": "g", "units": ["gram", "porsi", "pax"]}
+# Raw Materials (2026-11-09): no photo nor note, a link to the request form instead
+LINK_ONLY = {"note": "none", "photo": "none", "link": REQ}
 MAX_QTY_G = 1_000_000
 
 CATEGORY_EN = {"Kritikal": "Critical", "Mayor": "Major", "Minor": "Minor"}
@@ -108,7 +113,7 @@ DEFINITIONS: dict[str, dict] = {
         "groups": [
             _grp("availability", "Ketersediaan", "Availability", "Ketersediaan dan Kesesuaian Produk", "Product Availability and Conformity", [
                 _sec("stok-preparation", "Stock Preparation", "Stock Preparation",
-                     _list("stok-preparation", [(f"Ketersediaan Stok {i}", f"{e} Stock Available", {**o, **PREMIX_QTY}) for i, e, o in PREMIX])),
+                     _list("stok-preparation", [(f"Ketersediaan Stok {i}", f"{e} Stock Available", {**o, **(FOOD_QTY if i in FOOD else PREMIX_QTY)}) for i, e, o in PREMIX])),
                 _sec("shelf-life", "Label Shelf Life", "Shelf Life Label",
                      _list("shelf-life", [(f"Label Shelf Life {i}", f"{e} Shelf Life Label", o) for i, e, o in PREMIX])),
                 # Beans Specialty: required at the CTGP and CCI outlets only (2026-10-27); the items marked only_for are not
@@ -135,11 +140,11 @@ DEFINITIONS: dict[str, dict] = {
                     ("Ketersediaan Plastik Takeaway", "Takeaway Plastic Available"),
                 ])),
                 _sec("bahan-baku", "Bahan Baku", "Raw Materials", _list("bahan-baku", [
-                    ("Kesesuaian Form Request Bahan Baku", "Raw Material Request Form Matches"),
-                    ("Kesesuaian Form Request FM, Oat Milk, Ice Cream, Brookfarm", "FM, Oat Milk, Ice Cream, Brookfarm Request Form Matches"),
-                    ("Kesesuaian Form Request Ice Hot, Rich Gold", "Ice Hot, Rich Gold Request Form Matches", {**O, "only_for": ["CTGP", "CCI"]}),
-                    ("Kesesuaian Form Request Bahan Baku Main Course", "Main Course Raw Material Request Form Matches", {**O, "only_for": ["CTGP", "CCI"]}),
-                    ("Kesesuaian Form Request Bahan Baku Side Dish", "Side Dish Raw Material Request Form Matches"),
+                    ("Kesesuaian Form Request Bahan Baku", "Raw Material Request Form Matches", LINK_ONLY),
+                    ("Kesesuaian Form Request FM, Oat Milk, Ice Cream, Brookfarm", "FM, Oat Milk, Ice Cream, Brookfarm Request Form Matches", LINK_ONLY),
+                    ("Kesesuaian Form Request Ice Hot, Rich Gold", "Ice Hot, Rich Gold Request Form Matches", {**O, **LINK_ONLY, "only_for": ["CTGP", "CCI"]}),
+                    ("Kesesuaian Form Request Bahan Baku Main Course", "Main Course Raw Material Request Form Matches", {**O, **LINK_ONLY, "only_for": ["CTGP", "CCI"]}),
+                    ("Kesesuaian Form Request Bahan Baku Side Dish", "Side Dish Raw Material Request Form Matches", LINK_ONLY),
                 ])),
             ]),
             _grp("kualitas-produk", "Kualitas Produk", "Product Quality", "5 Indra - Rasa", "5 Senses - Taste", [
@@ -178,17 +183,17 @@ DEFINITIONS: dict[str, dict] = {
                         'Menyiram tanaman dan memastikan tanaman tidak mati.', 'Plants watered and none of them dead.', required=False),
                 ])),
                 _sec('tp-customer', 'Zona 2 — Area Customer', 'Zone 2 — Customer Area', _list('tp-customer', [
-                    _tp('Lantai, Meja & Kursi', 'Floor, Tables & Chairs', 'Mayor',
+                    _tp('Lantai, Meja & Kursi', 'Floor, Tables & Chairs', 'Kritikal',
                         'Lantai area customer · meja dan kursi · dinding, kaca, pencahayaan',
                         'Customer area floor · tables and chairs · walls, glass, lighting',
                         'Lantai bersih dan kering tanpa tumpahan, meja sudah di-clear dan dilap, kursi sesuai layout, semua lampu menyala.',
                         'Floor clean and dry with no spills, tables cleared and wiped, chairs in layout, every light on.'),
-                    _tp('Toilet / Restroom', 'Toilet / Restroom', 'Mayor',
+                    _tp('Toilet / Restroom', 'Toilet / Restroom', 'Kritikal',
                         'Lantai & kloset · wastafel & cermin · sabun, tisu, tempat sampah · kartu kontrol kebersihan',
                         'Floor & toilet bowl · sink & mirror · soap, tissue, bin · cleaning control card',
                         'Bersih, kering, tidak berbau. Sabun dan tisu tersedia, tempat sampah tidak penuh, kartu kontrol terisi sesuai jam pemeriksaan.',
                         'Clean, dry, no odour. Soap and tissue available, the bin not full, the control card filled at the check times.', required=False),
-                    _tp('Display Produk & Merchandise', 'Product & Merchandise Display', 'Kritikal',
+                    _tp('Display Produk & Merchandise', 'Product & Merchandise Display', 'Mayor',
                         'Showcase pastry atau produk siap jual · label tanggal / best before · display merchandise dan harga',
                         'Pastry or ready-to-sell showcase · date / best-before labels · merchandise display and prices',
                         'Tidak ada produk lewat masa simpan di display, semua produk berlabel tanggal, showcase pada suhu standar, harga terbaca dan sesuai POS.',
@@ -209,8 +214,8 @@ DEFINITIONS: dict[str, dict] = {
                     _tp('Mesin Espresso, Grinder & Kalibrasi', 'Espresso Machine, Grinder & Calibration', 'Kritikal',
                         'Group head dan steam wand · hopper dan grinder · catatan kalibrasi shift (dose, yield, waktu)',
                         'Group head and steam wand · hopper and grinder · shift calibration notes (dose, yield, time)',
-                        'Group head sudah di-backflush, steam wand bebas residu susu dan di-purge, hopper bersih, hasil kalibrasi dalam rentang resep dan tercatat, susu steam 60–66 °C.',
-                        'Group head backflushed, steam wand purged and free of milk residue, hopper clean, calibration within the recipe range and recorded, steamed milk 60–66 °C.', required=False),
+                        'Pressure 9 bar dan suhu 92 °C. Group head sudah di-backflush, steam wand bebas residu susu dan di-purge, hopper bersih, hasil kalibrasi dalam rentang resep dan tercatat, susu steam 60–66 °C.',
+                        'Pressure 9 bar and temperature 92 °C. Group head backflushed, steam wand purged and free of milk residue, hopper clean, calibration within the recipe range and recorded, steamed milk 60–66 °C.', required=False),
                     _tp('Tools: Sealer, Can Sealer, Blender', 'Tools: Sealer, Can Sealer, Blender', 'Mayor',
                         'Foto close-up tiap alat dalam kondisi siap pakai', 'Close-up photo of each tool ready to use',
                         'Alat bersih dari residu produk, tidak berkarat atau rusak, kabel aman, hasil seal rapat pada uji pertama.',
@@ -229,6 +234,12 @@ DEFINITIONS: dict[str, dict] = {
                         'Waste bin di area bar dan kasir', 'Waste bins at the bar and the cashier',
                         'Tertutup, tidak penuh, kantong tidak bocor, tidak ada cairan menggenang di dasar bin.',
                         'Closed, not full, bag not leaking, no liquid pooling at the bottom.'),
+                    # 2026-11-09 (Operations)
+                    _tp('Utensil Tools', 'Utensil Tools', 'Mayor',
+                        'Scoop ice · timbangan (scale) · jigger, pitcher, spoon dan alat bar lainnya',
+                        'Ice scoop · scale · jigger, pitcher, spoon and the other bar tools',
+                        'Lengkap sesuai par level, bersih dan kering, scoop ice disimpan di luar es, timbangan berfungsi dan terkalibrasi (tara 0).',
+                        'Complete to par level, clean and dry, the ice scoop kept out of the ice, the scale working and calibrated (tare 0).'),
                 ])),
                 _sec('tp-boh', 'Zona 4 — Back of House', 'Zone 4 — Back of House', _list('tp-boh', [
                     _tp('Chiller & Freezer', 'Chiller & Freezer', 'Kritikal',
@@ -615,10 +626,15 @@ def save_answers(form: str, user: dict, visit_id: str, patch: dict) -> dict:
                 if not 0 <= qty <= MAX_QTY_G:
                     raise VisitError("Gramasi harus angka 0 sampai 1.000.000 gram")
             cur["qty"] = qty
+        if "link" in value:  # the link of the request form (Raw Materials, 2026-11-09)
+            link = (str(value["link"] or "")).strip()[:500] or None
+            if link is not None and (not known[key].get("link") or not link.lower().startswith(("http://", "https://"))):
+                raise VisitError("Link harus diawali http:// atau https://")
+            cur["link"] = link
         if "unit" in value:  # gram / pail / teko of a premix (2026-11-08)
             unit = (value["unit"] or "").lower() or None
-            if unit is not None and (unit not in QTY_UNITS or not known[key].get("units")):
-                raise VisitError("Satuan stok harus gram, pail atau teko")
+            if unit is not None and unit not in (known[key].get("units") or []):
+                raise VisitError("Satuan stok tidak dikenal untuk butir ini")
             cur["unit"] = unit
         if form == "wwwr":  # who of the team filled the item
             cur["by"] = user.get("full_name") or user["username"]
@@ -680,7 +696,8 @@ def missing(form: str, answers: dict, photos: list[dict], group: Optional[str] =
             continue
         need = [x for x, ok in (("note", it.get("note") != "required" or bool(a.get("note"))),
                                 ("photo", it.get("photo") != "required" or it["key"] in with_photo),
-                                ("qty", not it.get("qty") or a.get("qty") is not None)) if not ok]
+                                ("qty", not it.get("qty") or a.get("qty") is not None),
+                                ("link", it.get("link") != "required" or bool(a.get("link")))) if not ok]
         if need:
             out.append({"key": it["key"], "label": it["label"], "labelEn": it.get("labelEn"), "need": "+".join(need)})
     return out
@@ -705,7 +722,7 @@ def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Opti
     if any(t["need"] == "rating" for t in todo):
         raise VisitError(f"Belum bisa dikirim: {sum(1 for t in todo if t['need'] == 'rating')} butir wajib belum dinilai")
     if todo:
-        raise VisitError(f"Belum bisa dikirim: {len(todo)} butir yang dinilai belum lengkap catatan/foto/gram")
+        raise VisitError(f"Belum bisa dikirim: {len(todo)} butir yang dinilai belum lengkap catatan/foto/gram/link")
     group = group_of(row["branch_code"])
     if unrated(form, row["answers"] or {}, group) == len([i for i in all_items(form) if i["kind"] == "rating" and applies(i, group)]):
         raise VisitError("Belum ada butir yang dinilai")

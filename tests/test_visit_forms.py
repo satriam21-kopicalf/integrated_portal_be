@@ -17,14 +17,14 @@ def test_items_follow_the_form_visit_workbook():
     assert len(product) == 19 + 19 + 6 + 16 + 5 + 9 == 74
     # Outlet Cleanliness = the Travel Path SOP (2026-10-30), 21 points in 5 zones since Ambience, Grooming & Kesiapan
     # Crew and Cupping & Test Food Daily were removed (2026-11-02)
-    assert len(outlet) == 21 + 5 + 4 + 3 + 4 + 15 + 8 + 3 + 7 == 70  # + Administrasi & Finance (2026-10-21); − Merchandise (2026-11-04)
+    assert len(outlet) == 21 + 5 + 4 + 3 + 4 + 15 + 8 + 3 + 7 + 1 == 71  # + Administrasi & Finance (2026-10-21); − Merchandise (2026-11-04); + Utensil Tools (2026-11-09)
     assert not {"Ambience", "Grooming & Kesiapan Crew", "Cupping & Test Food Daily"} & {i["label"] for i in outlet}
     optional = {i["label"]: vf.is_required(i, None) for i in product + outlet}
     assert optional["Cupping Menu Specialty"] is False and optional["Mesin Espresso, Grinder & Kalibrasi"] is False
     assert [g["title"] for g in vf.DEFINITIONS["product"]["groups"]] == ["Ketersediaan", "Kualitas Produk"]
     assert [g["title"] for g in vf.DEFINITIONS["outlet"]["groups"]][0] == "Kebersihan dan Rating Outlet"
     assert [g["title"] for g in vf.DEFINITIONS["outlet"]["groups"]][-2:] == ["Kenyamanan Outlet", "Administrasi & Finance"]
-    assert len({i["key"] for i in product}) == 74 and len({i["key"] for i in outlet}) == 70
+    assert len({i["key"] for i in product}) == 74 and len({i["key"] for i in outlet}) == 71
     late = next(i for i in outlet if i["label"] == "Nama Barista Telat")
     assert late["kind"] == "text" and late["required"] is False  # a name, not a rating; optional
     # every item, section and group has its English text (ENG / IDN, 2026-10-27)
@@ -37,8 +37,8 @@ def test_items_follow_the_form_visit_workbook():
                 assert all(i.get("detailEn") and i.get("standardEn") for i in sec["items"] if i.get("detail"))
     assert any(i["label"] == "SO Daily" for i in outlet) and not any(i["label"] == "SO Packaging" for i in outlet)
     tp = [i for i in outlet if i["section"].startswith("tp-")]
-    assert len(tp) == 21 and all(i["detail"] and i["standard"] and i["category"] in ("Kritikal", "Mayor", "Minor") for i in tp)
-    assert sum(i["category"] == "Kritikal" for i in tp) == 9 and all(i["photo"] == "required" for i in tp)
+    assert len(tp) == 22 and all(i["detail"] and i["standard"] and i["category"] in ("Kritikal", "Mayor", "Minor") for i in tp)
+    assert sum(i["category"] == "Kritikal" for i in tp) == 10 and all(i["photo"] == "required" for i in tp)
 
 
 def _required(form, group):
@@ -57,7 +57,7 @@ def test_required_items_per_branch_group():
                   "Ketersediaan Set Spork", "Test Food Menu Side Dish", "Kesesuaian Form Request Ice Hot, Rich Gold"):
         assert label not in ctg, label
     outlet = _required("outlet", "CTG")
-    assert len(outlet) == 14 + 5 + 2 + 3 + 4 + 10 + 6 + 3 + 6 == 53  # Travel Path: 14 required, the rest an outlet may lack
+    assert len(outlet) == 14 + 5 + 2 + 3 + 4 + 10 + 6 + 3 + 6 + 1 == 54  # Travel Path: 15 required (Utensil Tools, 2026-11-09), the rest an outlet may lack
     for label in ("Kedisiplinan Barista", "Lap Gelas", "Sabun Toilet", "Kondisi Merchandise", "Form Self Pickup", "Mesin Espresso, Grinder & Kalibrasi"):
         assert label not in outlet, label
 
@@ -68,7 +68,7 @@ def test_counts_and_what_blocks_the_submit():
     answers[items[0]["key"]] = {"rating": "UNDER"}
     answers[items[1]["key"]] = {"rating": "EXCEED"}
     c = vf._counts("outlet", answers)
-    assert (c["under"], c["exceed"], c["rated"], c["total"]) == (1, 1, 69, 69) and c["score"] == round(68 * 100 / 69, 1)
+    assert (c["under"], c["exceed"], c["rated"], c["total"]) == (1, 1, 70, 70) and c["score"] == round(69 * 100 / 70, 1)
     required = [i for i in items if vf.is_required(i, "CTG") and not i.get("platform")]
     todo = vf.missing("outlet", answers, [], "CTG")
     by_key = {t["key"]: t["need"] for t in todo}
@@ -90,7 +90,7 @@ def test_counts_and_what_blocks_the_submit():
 
 def test_beans_specialty_is_required_at_ctgp_and_cci_only():
     items = [i for i in vf.all_items("product") if i["kind"] == "rating"]
-    answers = {i["key"]: {"rating": "MEET", "note": "ok", **({"qty": 500} if i.get("qty") else {})} for i in items}
+    answers = {i["key"]: {"rating": "MEET", "note": "ok", **({"qty": 500} if i.get("qty") else {}), **({"link": "https://x"} if i.get("link") else {})} for i in items}
     photos = [{"item": i["key"]} for i in items]
     beans = next(i for i in items if i["label"] == "Ketersediaan Stok Beans Specialty")
     del answers[beans["key"]]
@@ -257,3 +257,13 @@ def test_grabfood_rating_is_read_but_the_pic_may_change_it(monkeypatch):
     monkeypatch.setattr(vf, "grab_rating", lambda code: {"stars": 4.9, "reviews": 2106, "source": "grabfood", "fetchedAt": "2026-11-07"})
     assert vf.AUTO_RATING["grabfood"]("CTG27")["stars"] == 4.9
     assert {it["platform"] for it in vf._auto_items("outlet")} == {"google", "grabfood"}
+
+
+def test_raw_materials_need_a_link_not_a_photo_nor_a_note():
+    """2026-11-09: the Raw Materials items ask the link of the request form; the food counts in portions or pax."""
+    raw = [i for i in vf.all_items("product") if i["key"].startswith("bahan-baku.")]
+    assert raw and all(i["note"] == "none" and i["photo"] == "none" and i["link"] == "required" for i in raw)
+    first = raw[0]
+    assert [t["need"] for t in vf.missing("product", {first["key"]: {"rating": "MEET"}}, [], "CTG") if t["key"] == first["key"]] == ["link"]
+    dimsum = next(i for i in vf.all_items("product") if i["label"] == "Ketersediaan Stok Dimsum")
+    assert dimsum["units"] == ["gram", "porsi", "pax"] and vf.MAX_PHOTOS_PER_ITEM == 5

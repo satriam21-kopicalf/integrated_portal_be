@@ -25,7 +25,6 @@ from app.utils import today
 
 P = "integration_portal"
 PAYMENTS = ("cash", "qris")
-REQUEST_KINDS = ("fuel", "ice", "stall", "repair", "parking", "other")
 MAX_QTY = 1000  # cups in one line
 
 
@@ -252,7 +251,7 @@ def dispatch_of(driver_code: str, day: date) -> Optional[dict]:
 def _request_view(r: dict) -> dict:
     return {"id": str(r["id"]), "at": _iso(r["at"]), "kind": r["kind"], "amount": float(r["amount"]), "note": r["note"],
             "status": r["status"], "decidedAt": _iso(r["decided_at"]), "decisionNote": r["decision_note"],
-            "driverCode": r["driver_code"]}
+            "driverCode": r["driver_code"], "hasPhoto": r.get("photo") is not None}
 
 
 def _driver_view(d: dict) -> dict:
@@ -282,6 +281,10 @@ def today_of(user: dict) -> dict:
         "sales": [_sale_view(x) for x in sales],
         "reloads": [_reload_view(x) for x in reloads],
         "requests": [_request_view(x) for x in reqs],
+        # migration 083: the kinds of a request, from Master → Pengajuan
+        "requestKinds": [{"code": k["code"], "name": k["name"], "description": k["description"], "needsPhoto": k["needs_photo"],
+                          "maxAmount": float(k["max_amount"]) if k["max_amount"] is not None else None, "active": k["is_active"]}
+                         for k in request_kinds(active_only=False)],  # the inactive ones still name the older requests
         "recap": recap(s, sales, reloads, [r for r in reqs if s and r["shift_id"] == s["id"]]) if s else None,
         # 2026-11-08: where the roster sends the driver today and the accessories on the fleet
         "slots": [{"start": r["start_time"].strftime("%H:%M"), "end": r["end_time"].strftime("%H:%M"), "area": r["area"], "address": r["address"],
@@ -454,8 +457,14 @@ def receive_reload(user: dict, reload_id: str, counts: Optional[dict] = None, no
     return today_of(user)
 
 
+def request_kinds(active_only: bool = True) -> list[dict]:
+    """The kinds of a request (master cotr_request_kind, migration 083), in their order."""
+    return db.fetch(f"SELECT * FROM {P}.cotr_request_kind {'WHERE is_active' if active_only else ''} ORDER BY sort, name")
+
+
 def send_request(user: dict, kind: str, amount: Any, note: str, photo: str) -> dict:
-    if kind not in REQUEST_KINDS:
+    k = next((x for x in request_kinds() if x["code"] == kind), None)
+    if not k:
         raise CotrError("Jenis pengajuan tidak dikenal")
     try:
         value = Decimal(str(amount))
@@ -463,10 +472,14 @@ def send_request(user: dict, kind: str, amount: Any, note: str, photo: str) -> d
         raise CotrError("Nominal tidak valid") from None
     if value <= 0 or value > Decimal(100_000_000):
         raise CotrError("Nominal tidak valid")
+    if k["max_amount"] is not None and value > k["max_amount"]:
+        raise CotrError(f"Nominal {k['name']} paling banyak Rp {int(k['max_amount']):,}".replace(",", "."))
     if not (note or "").strip():
         raise CotrError("Tulis keterangan")
     d = require_driver(user)
-    ptype, pdata = parse_photo(photo)
+    if not photo and k["needs_photo"]:
+        raise CotrError("Lampirkan foto nota")
+    ptype, pdata = parse_photo(photo) if photo else (None, None)
     s = shift_of(d["code"], today())
     db.fetchrow(f"""INSERT INTO {P}.cotr_request (driver_code, shift_id, kind, amount, note, photo, photo_type)
                     VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
@@ -498,6 +511,8 @@ MASTERS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
                                                             "is_active", "note"), "valid_from DESC, code"),
     "shift-templates": ("cotr_shift_template", "code", ("code", "name", "start_time", "end_time", "break_min", "grace_min",
                                                         "color", "is_active", "sort", "pay_rate"), "sort, start_time"),
+    "request-kinds": ("cotr_request_kind", "code", ("code", "name", "description", "max_amount", "needs_photo", "sort", "is_active"),
+                      "sort, name"),  # migration 083
     "menu-categories": ("cotr_menu_category", "code", ("code", "name", "sort", "is_active"), "sort, name"),
     "menus": ("cotr_menu", "code", ("code", "name", "category", "price", "bom_code", "is_active", "sort", "shelf_life_days"), "sort, name"),
     "boms": ("cotr_bom", "code", ("code", "name", "output", "yield_qty", "yield_unit", "lines", "kind", "units", "note"),

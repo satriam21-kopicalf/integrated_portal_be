@@ -245,3 +245,16 @@ def test_label_qr_without_sign_in_hides_papers_qris_and_phones(monkeypatch):
     full = cotr.fleet_card("BNI 01", True)
     assert full["fleet"]["stnk_no"] == "B 1" and "label_token" not in full["fleet"] and full["pool"]["phone"] == "0812"
     assert full["drivers"][0]["phone"] == "0813" and "nik" not in full["drivers"][0] and "salary_monthly" not in full["drivers"][0]
+
+
+def test_a_request_follows_its_kind_in_the_master(monkeypatch):
+    kinds = [{"code": "fuel", "name": "BBM", "max_amount": 50000, "needs_photo": True},
+             {"code": "parking", "name": "Parkir", "max_amount": None, "needs_photo": False}]
+    monkeypatch.setattr(cotr, "request_kinds", lambda active_only=True: kinds)
+    with pytest.raises(cotr.CotrError, match="tidak dikenal"):
+        cotr.send_request({}, "ice", 1000, "x", "")
+    with pytest.raises(cotr.CotrError, match="paling banyak Rp 50.000"):
+        cotr.send_request({}, "fuel", 60000, "x", "")
+    monkeypatch.setattr(cotr, "require_driver", lambda u: {"code": "D1"})
+    with pytest.raises(cotr.CotrError, match="foto nota"):
+        cotr.send_request({}, "fuel", 20000, "isi bensin", "")

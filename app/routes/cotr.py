@@ -11,7 +11,7 @@ Driver app (fe-calfontheroad), accounts of role driver tied to a Master Driver r
     POST /api/cotr/driver/sales/{id}/void       {"reason"}
     POST /api/cotr/driver/reloads               {"lines": {code: cups}, "note"}
     POST /api/cotr/driver/reloads/{id}/receive  {"counts", "note"}: the check of an approved reload (as the assignment)
-    POST /api/cotr/driver/requests              {"kind": fuel|ice|stall|repair|parking|other, "amount", "note", "photo"}
+    POST /api/cotr/driver/requests              {"kind": a code of Master → Pengajuan, "amount", "note", "photo"}
     POST /api/cotr/driver/locations             {"points": [{"at", "lat", "lng", "accuracy", "speed", "heading", "battery"}]}
                                                 the GPS of the phone while the shift is open (migration 048)
 Every driver action answers the new state of the day (as GET today).
@@ -72,9 +72,9 @@ router = APIRouter(prefix="/api/cotr", tags=["cotr"])
 driver_only = require_roles("driver")
 ENTITY_PAGE = {"pools": "cotr.pools", "fleet": "cotr.fleet", "fleet-types": "cotr.fleet", "shift-templates": "cotr.schedule", "incentive-schemes": "cotr.incentive", "menus": "cotr.menu",
                "boms": "cotr.production", "items": "cotr.production", "drivers": "cotr.drivers",
-               "areas": "cotr.pools", "accessories": "cotr.fleet", "menu-categories": "cotr.menu"}  # migration 080: with the pools and the fleet
+               "areas": "cotr.pools", "accessories": "cotr.fleet", "menu-categories": "cotr.menu", "request-kinds": "cotr.check-in"}  # migration 080: with the pools and the fleet
 Entity = Literal["pools", "fleet", "fleet-types", "shift-templates", "incentive-schemes", "menus", "boms", "items", "drivers",
-                 "areas", "accessories", "menu-categories"]
+                 "areas", "accessories", "menu-categories", "request-kinds"]
 MANAGEMENT = "cotr.management"  # salary, bank and NIK of the drivers (migration 050)
 
 
@@ -132,10 +132,10 @@ class ReloadIn(BaseModel):
 
 
 class RequestIn(BaseModel):
-    kind: Literal["fuel", "ice", "stall", "repair", "parking", "other"]
+    kind: str = Field(min_length=1, max_length=40)  # a code of Master → Pengajuan (migration 083)
     amount: float = Field(gt=0, le=100_000_000)
     note: str = Field(min_length=1, max_length=500)
-    photo: str = Field(min_length=20, max_length=5_000_000)
+    photo: Optional[str] = Field(None, max_length=5_000_000)  # required unless the kind says otherwise
 
 
 @router.get("/driver/today")

@@ -250,3 +250,10 @@ def test_items_not_asked_at_ctg_outlets():
     rated = sum(1 for i in vf.all_items("product") if i["kind"] == "rating")
     assert vf._counts("product", {}, "CTG")["total"] == rated - 7 and vf._counts("product", {}, "CCI")["total"] == rated
     assert any(i["key"].startswith("product:") and i.get("onlyFor") for i in vf.all_items("wwwr"))
+
+
+def test_grabfood_rating_is_read_but_the_pic_may_change_it(monkeypatch):
+    """2026-11-09: GrabFood's official rating fills the Outlet form; a figure typed by the PIC stays."""
+    monkeypatch.setattr(vf, "grab_rating", lambda code: {"stars": 4.9, "reviews": 2106, "source": "grabfood", "fetchedAt": "2026-11-07"})
+    assert vf.AUTO_RATING["grabfood"]("CTG27")["stars"] == 4.9
+    assert {it["platform"] for it in vf._auto_items("outlet")} == {"google", "grabfood"}

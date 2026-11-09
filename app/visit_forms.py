@@ -483,8 +483,23 @@ def google_rating(branch_code: str) -> Optional[dict]:
             "fetchedAt": r["fetched_at"].isoformat() if r.get("fetched_at") else None, "mapsUri": d.get("googleMapsUri")}
 
 
+def grab_rating(branch_code: str) -> Optional[dict]:
+    """The outlet's latest official GrabFood rating (Aggregator → GrabFood, app/grab.py); None when not on Grab (2026-11-09)."""
+    r = db.fetchrow("""SELECT g.score, g.rating_count, g.captured_on FROM integration_esb.grab_store s
+                         JOIN integration_esb.grab_rating g ON g.merchant_id = s.merchant_id
+                        WHERE s.branch_code = %s AND g.score IS NOT NULL ORDER BY g.captured_on DESC LIMIT 1""", (branch_code,))
+    if not r:
+        return None
+    return {"stars": round(float(r["score"]), 1), "reviews": r["rating_count"], "source": "grabfood",
+            "fetchedAt": r["captured_on"].isoformat() if r.get("captured_on") else None}
+
+
+# the ratings read automatically: Google Maps always; GrabFood as the starting figure the PIC may change (2026-11-09)
+AUTO_RATING = {"google": lambda code: google_rating(code), "grabfood": lambda code: grab_rating(code)}
+
+
 def _auto_items(form: str) -> list[dict]:
-    return [it for it in all_items(form) if it.get("platform") == "google"]
+    return [it for it in all_items(form) if it.get("platform") in AUTO_RATING]
 
 
 def full(visit_id: str) -> dict:
@@ -493,8 +508,14 @@ def full(visit_id: str) -> dict:
     out["branchGroup"] = group_of(row["branch_code"])  # which items are required at this outlet
     if row["status"] == "DRAFT" and _auto_items(row["form"]):
         # a draft shows the current figure; it is kept in the answers at sending
-        g = google_rating(row["branch_code"])
-        out["auto"] = {it["key"]: g for it in _auto_items(row["form"])} if g else {}
+        out["auto"] = {}
+        for it in _auto_items(row["form"]):
+            try:
+                g = AUTO_RATING[it["platform"]](row["branch_code"])
+            except Exception:  # noqa: BLE001 - the figure is extra
+                g = None
+            if g:
+                out["auto"][it["key"]] = g
     return out
 
 
@@ -697,10 +718,16 @@ def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Opti
     j = judge(lat, lng, accuracy, outlet) if lat is not None and lng is not None else {"distance_m": None, "outside_radius": False, "low_accuracy": False}
     answers = dict(row["answers"] or {})
     auto = _auto_items(form)
-    g = google_rating(row["branch_code"]) if auto else None
     for it in auto:
-        # the Google rating of the moment of sending stays with the visit
-        cur = {k: v for k, v in (answers.get(it["key"]) or {}).items() if k not in ("stars", "reviews", "source", "fetchedAt")}
+        try:
+            g = AUTO_RATING[it["platform"]](row["branch_code"])
+        except Exception:  # noqa: BLE001
+            g = None
+        mine = answers.get(it["key"]) or {}
+        if it["platform"] != "google" and mine.get("stars") is not None and mine.get("source") == "manual":
+            continue  # GrabFood typed by the PIC: the PIC's figure stays
+        # the rating of the moment of sending stays with the visit
+        cur = {k: v for k, v in mine.items() if k not in ("stars", "reviews", "source", "fetchedAt")}
         answers[it["key"]] = {**cur, **({k: g[k] for k in ("stars", "reviews", "source", "fetchedAt")} if g else {})}
         if not answers[it["key"]]:
             answers.pop(it["key"])

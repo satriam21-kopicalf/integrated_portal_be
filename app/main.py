@@ -4,6 +4,7 @@ Integrated Portal Backend API (FastAPI)
 Run locally: uvicorn app.main:app --reload --port 8002
 """
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
@@ -60,6 +61,9 @@ class SelectiveGZipMiddleware(GZipMiddleware):
 async def lifespan(app: FastAPI):
     db.open_pool()
     logger.info("Integrated Portal Backend started (port %s)", get_settings().port)
+    if not os.environ.get("PYTEST_CURRENT_TEST"):  # the Stock List of every branch, built in the background (2026-11-09)
+        from app import stock_transfer
+        stock_transfer.warm()
     yield
     db.close_pool()
 

@@ -21,10 +21,10 @@ from typing import Optional
 
 from app import database as db
 from app.scope import MAIN_COMPANY
-from app.utils import TTLCache
+from app.utils import Fresh
 
 P = "integration_portal"
-CACHE_S = 300  # the running stock of every branch takes a few seconds: kept 5 minutes (cleared by a transfer received)
+CACHE_S = 300  # the running stock of every branch takes ~15 s: kept 5 minutes, refreshed in the background (and after a move)
 LATEST_SO_DAYS = 60
 FINAL = ("APPROVED", "EXPORTED")
 
@@ -199,22 +199,34 @@ def system_usage(starts: dict[str, date], d_to: date, cutoffs: Optional[dict[str
     return out
 
 
-_cache = TTLCache()
+# every branch at once, kept warm (2026-11-09): a set of branches is a part of it, so it is computed once per worker
+_all = Fresh(lambda: _running(None), CACHE_S)
+_followers: list[Fresh] = []  # the values built on it (the Stock List): stale with it
+
+
+def follow(f: Fresh) -> None:
+    _followers.append(f)
 
 
 def clear() -> None:
-    _cache.clear()
+    """A move happened (transfer, waste, goods receipt): the next reader starts a refresh."""
+    _all.stale()
+    for f in _followers:
+        f.stale()
+
+
+def reset() -> None:
+    """Drop the values (tests)."""
+    _all.reset()
+    for f in _followers:
+        f.reset()
 
 
 def running(branches: Optional[list[str]]) -> dict[str, dict]:
     """{branch: {so: {date, refs, final, statuses}, items: {code: {so, unit, moves: {kind: qty}, waste, used, estimate}}}}
-    (cached CACHE_S seconds per set of branches)."""
-    key = ",".join(sorted(branches)) if branches is not None else "*"
-    hit = _cache.get(key)
-    if hit is None:
-        hit = _running(branches)
-        _cache.set(key, hit, CACHE_S)
-    return hit
+    (every branch computed together and kept warm, CACHE_S seconds; refreshed in the background)."""
+    data = _all.get()
+    return data if branches is None else {b: v for b, v in data.items() if b in set(branches)}
 
 
 def _running(branches: Optional[list[str]]) -> dict[str, dict]:

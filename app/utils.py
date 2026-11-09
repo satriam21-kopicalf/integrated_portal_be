@@ -4,8 +4,8 @@ from contextvars import ContextVar
 from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 from decimal import Decimal
-from threading import Lock
-from typing import Any, Optional
+from threading import Lock, Thread
+from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
 from app.config import get_settings
@@ -91,3 +91,63 @@ class TTLCache:
             now = time.monotonic()
             self._data = {k: v for k, v in self._data.items() if v[0] > now}
             self._data[key] = (now + ttl, value)
+
+
+class Fresh:
+    """One value kept warm (stale-while-revalidate, 2026-11-09): computed once, then served from memory; after `ttl`
+    seconds, or once marked stale, the next reader starts a refresh in the background and still gets the previous value
+    at once. Only the very first reader of a worker waits for the computation."""
+
+    def __init__(self, compute: Callable[[], Any], ttl: float) -> None:
+        self._compute, self._ttl = compute, ttl
+        self._value: Any = None
+        self._at = 0.0          # monotonic time of the value; 0 = none yet
+        self._stale = False
+        self._lock = Lock()     # one computation at a time
+        self._busy = False
+
+    def _refresh(self) -> Any:
+        with self._lock:
+            stale = self._stale
+            self._stale = False
+            try:
+                value = self._compute()
+            except Exception:
+                self._stale = self._stale or stale
+                raise
+            finally:
+                self._busy = False
+            self._value, self._at = value, time.monotonic()
+            return value
+
+    def _background(self) -> None:
+        try:
+            self._refresh()
+        except Exception:  # noqa: BLE001 - the previous value stays served; the next reader tries again
+            pass
+
+    def get(self) -> Any:
+        if not self._at:
+            with self._lock:
+                if self._at:  # computed while this reader waited
+                    return self._value
+            return self._refresh()
+        if (self._stale or time.monotonic() - self._at >= self._ttl) and not self._busy:
+            self._busy = True
+            Thread(target=self._background, daemon=True).start()
+        return self._value
+
+    def stale(self) -> None:
+        """Something changed: the next reader starts a refresh (and gets the previous value meanwhile)."""
+        self._stale = True
+
+    def reset(self) -> None:
+        """Drop the value: the next reader computes it again (tests)."""
+        with self._lock:
+            self._value, self._at, self._stale = None, 0.0, False
+
+    def warm(self) -> None:
+        """Compute it in the background now (the start of the worker)."""
+        if not self._at and not self._busy:
+            self._busy = True
+            Thread(target=self._background, daemon=True).start()

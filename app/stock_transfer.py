@@ -20,6 +20,7 @@ from datetime import date, timedelta
 from typing import Any, Optional
 
 from app import database as db
+from app.utils import Fresh
 from app.database import SCHEMA
 from app.pic_checkin import _names, branch_options, parse_photo
 
@@ -136,7 +137,33 @@ def moves_before(starts: dict[str, date], cutoffs: dict) -> dict[str, dict[str, 
 
 def stock_list(branches: Optional[list[str]]) -> dict:
     """Monitoring Stock → Stock List: one row per branch × item with its value, and per branch its latest count; with the
-    running stock (app/running_stock.py: the estimate now, from the SO and every move, waste and usage since)."""
+    running stock (app/running_stock.py: the estimate now, from the SO and every move, waste and usage since).
+    Every branch is built together and kept warm (2026-11-09); the branches of an account are a part of it."""
+    data = _list().get()
+    if branches is None:
+        return data
+    keep = set(branches)
+    return {**data, "branches": [h for h in data["branches"] if h["branch"] in keep], "rows": [r for r in data["rows"] if r["branch"] in keep]}
+
+
+_LIST: Optional[Fresh] = None
+
+
+def _list() -> Fresh:
+    global _LIST
+    if _LIST is None:
+        from app import running_stock
+        _LIST = Fresh(lambda: _stock_list(None), running_stock.CACHE_S)
+        running_stock.follow(_LIST)
+    return _LIST
+
+
+def warm() -> None:
+    """The start of a worker: the Stock List of every branch is built in the background."""
+    _list().warm()
+
+
+def _stock_list(branches: Optional[list[str]]) -> dict:
     from app import running_stock
     s = stock(branches)
     try:

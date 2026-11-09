@@ -116,6 +116,35 @@ def left_expected(stock: Stock, waste: Stock, cupping: Stock) -> Stock:
             if stock.get(k, 0) - waste.get(k, 0) - cupping.get(k, 0)}
 
 
+def unrecorded(on_fleet: Stock, counted: Stock, waste: Stock, cupping: Stock) -> Stock:
+    """The cups gone from the fleet that no transaction, waste or cupping explains: sold but not tapped in (recap at
+    the pool, migration 084). More left than expected is not a sale: it stays a difference."""
+    expected = left_expected(on_fleet, waste, cupping)
+    return {k: expected[k] - counted.get(k, 0) for k in sorted(expected) if expected[k] - counted.get(k, 0) > 0}
+
+
+def recap_sales(gone: Stock, menus: dict[str, dict], qris: Optional[Any]) -> list[tuple[str, list[dict], Decimal]]:
+    """The recap sales of the unrecorded cups at the menu price: (payment, lines, total) — the QRIS part as read from the
+    QRIS mutations (without lines), the rest cash with the lines, so the cups are counted once."""
+    lines, total = [], Decimal(0)
+    for code, qty in gone.items():
+        m = menus.get(code)
+        if not m:
+            continue
+        price = Decimal(m["price"])
+        lines.append({"code": code, "name": m["name"], "qty": qty, "price": float(price)})
+        total += price * qty
+    q = Decimal(str(qris or 0))
+    if q < 0 or q > total:
+        raise CotrError(f"QRIS rekap tidak boleh lebih dari total penjualan rekap Rp {int(total):,}".replace(",", "."))
+    if not lines:
+        return []
+    out = [("cash", lines, total - q)]
+    if q > 0:
+        out.append(("qris", [], q))
+    return out
+
+
 def balance(cash_sales: float, cash_spent: Optional[Any], cash_actual: Optional[Any]) -> Optional[float]:
     """Cash counted - (cash sales - cash spent on the road); None before the end of the shift."""
     if cash_actual is None:
@@ -141,7 +170,10 @@ def recap(shift: dict, sales: list[dict], reloads: list[dict], requests: list[di
     diff = difference(shift.get("end_stock") or {}, shift.get("expected_stock") or {}) if shift.get("end_stock") is not None else None
     return {
         "cups": sum(m["qty"] for m in per_menu.values()), "total": sum(by_pay.values()), "cash": by_pay["cash"],
-        "qris": by_pay["qris"], "voided": len(sales) - len(ok), "perMenu": sorted(per_menu.values(), key=lambda m: -m["qty"]),
+        "qris": by_pay["qris"], "voided": len(sales) - len(ok),
+        # migration 084: what was booked at the pool from the stock (not tapped in during the shift)
+        "recapCups": sum(int(x["qty"]) for t in ok if t.get("source") == "recap" for x in t["lines"]),
+        "recapTotal": float(sum(Decimal(t["total"]) for t in ok if t.get("source") == "recap")), "perMenu": sorted(per_menu.values(), key=lambda m: -m["qty"]),
         "reloaded": sum(sum(int(v) for v in received(r).values()) for r in reloads if r["status"] == "received"),
         "requested": float(sum(Decimal(r["amount"]) for r in requests if r["status"] != "rejected")),
         "difference": diff,
@@ -224,6 +256,7 @@ def _parts(shift_id: str) -> tuple[list[dict], list[dict]]:
 
 def _sale_view(s: dict) -> dict:
     return {"id": str(s["id"]), "at": _iso(s["at"]), "lines": s["lines"], "payment": s["payment"], "total": float(s["total"]),
+            "source": s.get("source") or "live",
             "voided": {"at": _iso(s["voided_at"]), "reason": s["void_reason"]} if s["voided_at"] else None}
 
 
@@ -337,7 +370,8 @@ def confirm_dispatch(user: dict, counts: dict, note: Optional[str]) -> dict:
 
 def check_in(user: dict, kind: str, photo: str, lat: float, lng: float, accuracy: Optional[float], stock: dict,
              note: Optional[str], waste: Optional[dict] = None, cupping: Optional[dict] = None,
-             cash_actual: Optional[float] = None, cash_spent: Optional[float] = None, signature: Optional[str] = None) -> dict:
+             cash_actual: Optional[float] = None, cash_spent: Optional[float] = None, signature: Optional[str] = None,
+             recap: bool = False, recap_qris: Optional[float] = None) -> dict:
     d = require_driver(user)
     ptype, pdata = parse_photo(photo)
     menu_codes = _menu_map()
@@ -377,6 +411,12 @@ def check_in(user: dict, kind: str, photo: str, lat: float, lng: float, accuracy
             on_fleet = stock_now(s["start_stock"], reloads, sales)
             if any(wasted.get(k, 0) + tasted.get(k, 0) > on_fleet.get(k, 0) for k in set(wasted) | set(tasted)):
                 raise CotrError("Wasting + cupping melebihi stok di armada")
+            if recap:  # migration 084: the cups not tapped in are booked as recap sales, then nothing is left unexplained
+                for payment, lines, total in recap_sales(unrecorded(on_fleet, counted, wasted, tasted), menu_codes, recap_qris):
+                    conn.execute(f"INSERT INTO {P}.cotr_sale (shift_id, lines, payment, total, source) VALUES (%s, %s, %s, %s, 'recap')",
+                                 (s["id"], Jsonb(lines), payment, total))
+                sales = conn.execute(f"SELECT * FROM {P}.cotr_sale WHERE shift_id = %s", (s["id"],)).fetchall()
+                on_fleet = stock_now(s["start_stock"], reloads, sales)
             expected = left_expected(on_fleet, wasted, tasted)
             if difference(counted, expected) and not note:
                 raise CotrError("Ada selisih dengan stok sistem: tulis penjelasannya di catatan")

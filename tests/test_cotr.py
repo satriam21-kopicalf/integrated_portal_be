@@ -258,3 +258,18 @@ def test_a_request_follows_its_kind_in_the_master(monkeypatch):
     monkeypatch.setattr(cotr, "require_driver", lambda u: {"code": "D1"})
     with pytest.raises(cotr.CotrError, match="foto nota"):
         cotr.send_request({}, "fuel", 20000, "isi bensin", "")
+
+
+def test_the_cups_not_tapped_in_become_recap_sales():
+    gone = cotr.unrecorded({"EKC": 50, "AMR": 10}, {"EKC": 8, "AMR": 12}, {"EKC": 2}, {})
+    assert gone == {"EKC": 40}  # more AMR left than expected stays a difference, not a sale
+    out = cotr.recap_sales(gone, MENUS, 150000)
+    assert [(p, float(t)) for p, _, t in out] == [("cash", 450000.0), ("qris", 150000.0)]
+    assert out[0][1] == [{"code": "EKC", "name": "Es Kopi Calf", "qty": 40, "price": 15000.0}] and out[1][1] == []
+    assert cotr.recap_sales({}, MENUS, 0) == []
+    with pytest.raises(cotr.CotrError, match="QRIS rekap"):
+        cotr.recap_sales(gone, MENUS, 700000)
+    shift = {"end_stock": None}
+    r = cotr.recap(shift, [{"lines": out[0][1], "payment": "cash", "total": out[0][2], "source": "recap"},
+                           {"lines": [], "payment": "qris", "total": out[1][2], "source": "recap"}], [], [])
+    assert r["cups"] == 40 and r["total"] == 600000 and r["qris"] == 150000 and r["recapCups"] == 40

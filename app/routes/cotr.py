@@ -105,6 +105,9 @@ class CheckInIn(BaseModel):
     cashActual: Optional[float] = Field(None, ge=0, le=100_000_000)
     cashSpent: Optional[float] = Field(None, ge=0, le=100_000_000)
     signature: Optional[str] = Field(None, max_length=1_000_000)  # start: PNG data URL of the signature pad
+    # end, migration 084: the cups not tapped in are booked as recap sales (the QRIS part read from the QRIS mutations)
+    recapSales: bool = False
+    recapQris: Optional[float] = Field(None, ge=0, le=100_000_000)
 
 
 class CountsIn(BaseModel):
@@ -146,7 +149,8 @@ def driver_today(user: dict = Depends(driver_only)):
 @router.post("/driver/check-in")
 def driver_check_in(body: CheckInIn, request: Request, user: dict = Depends(driver_only)):
     out = _call(cotr.check_in, user, body.kind, body.photo, body.latitude, body.longitude, body.accuracyM, body.stock, body.note,
-                body.waste, body.cupping, body.cashActual, body.cashSpent, body.signature)
+                body.waste, body.cupping, body.cashActual, body.cashSpent, body.signature,
+                body.recapSales, body.recapQris)
     _log(request, user, f"cotr.check_in.{body.kind}", f"COTR check {'in' if body.kind == 'start' else 'out'}: {out['driver']['code']}",
          {"stock": body.stock})
     return out

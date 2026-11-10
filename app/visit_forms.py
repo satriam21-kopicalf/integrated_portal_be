@@ -91,8 +91,9 @@ PREMIX_QTY = {"qty": "g", "units": ["gram", "pail", "teko"]}
 # the food of Stock Preparation (2026-11-09): counted in portions or pax too
 FOOD = {"Dimsum", "Roti Kukus", "Puding", "Side Dish Lainnya", "Maincourse"}
 FOOD_QTY = {"qty": "g", "units": ["gram", "porsi", "pax"]}
-# Raw Materials (2026-11-09): no photo nor note, a link to the request form instead
-LINK_ONLY = {"note": "none", "photo": "none", "link": REQ}
+# Raw Materials (2026-11-09): no photo nor note, a link to the request form instead;
+# 2026-11-10 (Operations): back to a note only — no photo, no link
+NOTE_ONLY = {"note": REQ, "photo": "none"}
 MAX_QTY_G = 1_000_000
 
 CATEGORY_EN = {"Kritikal": "Critical", "Mayor": "Major", "Minor": "Minor"}
@@ -108,8 +109,8 @@ def _tp(label: str, label_en: str, category: str, detail: str, detail_en: str, s
 
 DEFINITIONS: dict[str, dict] = {
     "product": {
-        "title": "Monitoring Product",
-        "titleEn": "Monitoring Product",
+        "title": "Product",
+        "titleEn": "Product",
         "groups": [
             _grp("availability", "Ketersediaan", "Availability", "Ketersediaan dan Kesesuaian Produk", "Product Availability and Conformity", [
                 _sec("stok-preparation", "Stock Preparation", "Stock Preparation",
@@ -140,11 +141,11 @@ DEFINITIONS: dict[str, dict] = {
                     ("Ketersediaan Plastik Takeaway", "Takeaway Plastic Available"),
                 ])),
                 _sec("bahan-baku", "Bahan Baku", "Raw Materials", _list("bahan-baku", [
-                    ("Kesesuaian Form Request Bahan Baku", "Raw Material Request Form Matches", LINK_ONLY),
-                    ("Kesesuaian Form Request FM, Oat Milk, Ice Cream, Brookfarm", "FM, Oat Milk, Ice Cream, Brookfarm Request Form Matches", LINK_ONLY),
-                    ("Kesesuaian Form Request Ice Hot, Rich Gold", "Ice Hot, Rich Gold Request Form Matches", {**O, **LINK_ONLY, "only_for": ["CTGP", "CCI"]}),
-                    ("Kesesuaian Form Request Bahan Baku Main Course", "Main Course Raw Material Request Form Matches", {**O, **LINK_ONLY, "only_for": ["CTGP", "CCI"]}),
-                    ("Kesesuaian Form Request Bahan Baku Side Dish", "Side Dish Raw Material Request Form Matches", LINK_ONLY),
+                    ("Kesesuaian Form Request Bahan Baku", "Raw Material Request Form Matches", NOTE_ONLY),
+                    ("Kesesuaian Form Request FM, Oat Milk, Ice Cream, Brookfarm", "FM, Oat Milk, Ice Cream, Brookfarm Request Form Matches", NOTE_ONLY),
+                    ("Kesesuaian Form Request Ice Hot, Rich Gold", "Ice Hot, Rich Gold Request Form Matches", {**O, **NOTE_ONLY, "only_for": ["CTGP", "CCI"]}),
+                    ("Kesesuaian Form Request Bahan Baku Main Course", "Main Course Raw Material Request Form Matches", {**O, **NOTE_ONLY, "only_for": ["CTGP", "CCI"]}),
+                    ("Kesesuaian Form Request Bahan Baku Side Dish", "Side Dish Raw Material Request Form Matches", NOTE_ONLY),
                 ])),
             ]),
             _grp("kualitas-produk", "Kualitas Produk", "Product Quality", "5 Indra - Rasa", "5 Senses - Taste", [
@@ -162,8 +163,8 @@ DEFINITIONS: dict[str, dict] = {
         ],
     },
     "outlet": {
-        "title": "Monitoring Outlet",
-        "titleEn": "Monitoring Outlet",
+        "title": "Outlet",
+        "titleEn": "Outlet",
         "groups": [
             _grp("kebersihan-rating", "Kebersihan dan Rating Outlet", "Outlet Cleanliness and Rating", "5 Indra - Penglihatan", "5 Senses - Sight", [
                 # Outlet Cleanliness = Travel Path SOP Rev. 3 (2026-10-30), one photo per point; Ambience, Grooming & Kesiapan

@@ -177,7 +177,7 @@ def test_endpoints_follow_their_pages(anon, store, page_access, monkeypatch):
     monkeypatch.setattr(vf, "monitor", lambda *a, **k: {"data": [], "summary": {}})
     monkeypatch.setattr(vf, "open_visit", lambda form, user, code: (_ for _ in ()).throw(vf.VisitError("Cabang tidak tersedia untuk akun Anda")))
     login(anon, "kasir", "Kasir1234")  # role user: fills both forms, no monitoring
-    assert anon.get("/api/forms/product").json()["definition"]["title"] == "Monitoring Product"
+    assert anon.get("/api/forms/product").json()["definition"]["title"] == "Product"
     r = anon.post("/api/forms/product/visits", json={"branchCode": "CTG54"})
     assert r.status_code == 422 and "Cabang" in r.json()["error"]
     assert anon.get("/api/monitoring/product").status_code == 403
@@ -259,11 +259,11 @@ def test_grabfood_rating_is_read_but_the_pic_may_change_it(monkeypatch):
     assert {it["platform"] for it in vf._auto_items("outlet")} == {"google", "grabfood"}
 
 
-def test_raw_materials_need_a_link_not_a_photo_nor_a_note():
-    """2026-11-09: the Raw Materials items ask the link of the request form; the food counts in portions or pax."""
+def test_raw_materials_need_a_note_only():
+    """2026-11-10: the Raw Materials items ask a note only — no photo, no link (the link of 2026-11-09 is gone)."""
     raw = [i for i in vf.all_items("product") if i["key"].startswith("bahan-baku.")]
-    assert raw and all(i["note"] == "none" and i["photo"] == "none" and i["link"] == "required" for i in raw)
+    assert raw and all(i["note"] == "required" and i["photo"] == "none" and not i.get("link") for i in raw)
     first = raw[0]
-    assert [t["need"] for t in vf.missing("product", {first["key"]: {"rating": "MEET"}}, [], "CTG") if t["key"] == first["key"]] == ["link"]
+    assert [t["need"] for t in vf.missing("product", {first["key"]: {"rating": "MEET"}}, [], "CTG") if t["key"] == first["key"]] == ["note"]
     dimsum = next(i for i in vf.all_items("product") if i["label"] == "Ketersediaan Stok Dimsum")
     assert dimsum["units"] == ["gram", "porsi", "pax"] and vf.MAX_PHOTOS_PER_ITEM == 5

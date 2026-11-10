@@ -52,7 +52,7 @@ def outlets(d_from: date, d_to: date, branches: Optional[list[str]]) -> dict:
               FROM {P}.agg_sales_daily WHERE tx_type = 'sales' AND sales_date BETWEEN %s AND %s AND branch_code = ANY(%s)
              GROUP BY 1""", (d_from, d_to, sorted(set(src.values()))))}
     sales = {b: by_src[s] for b, s in src.items() if s in by_src}
-    wrows = db.fetch(f"""SELECT * FROM {waste.T} WHERE status = 'approved' AND business_date BETWEEN %s AND %s AND branch_code = ANY(%s)""",
+    wrows = db.fetch(f"""SELECT {waste.LIGHT} FROM {waste.T} WHERE status = 'approved' AND business_date BETWEEN %s AND %s AND branch_code = ANY(%s)""",
                      (d_from, d_to, covered))
     wval: dict[str, float] = {}
     for v in waste.with_values(wrows):

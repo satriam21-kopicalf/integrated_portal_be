@@ -25,6 +25,11 @@ from app.pic_checkin import SCHEMA, CheckInError, branch_options, parse_photo
 from app.utils import today
 
 T = "integration_portal.waste_entry"
+# every column of an entry but the pictures (photo, signature): what the figures and the values need (2026-11-10: the
+# photos made a read of a week of waste take seconds)
+LIGHT = ("id, user_id, username, full_name, role, branch_code, branch_name, business_date, scope, item_code, item_name, unit, qty, "
+         "category, note, photo_type, photo_taken_at, latitude, longitude, status, review_note, reviewed_by, reviewed_at, device, ip, "
+         "created_at, production_date, expired_date, qty_base, exploded, signature_type, investigation_id, (signature IS NOT NULL) AS signed")
 T_ITEM = "integration_portal.waste_item"
 T_CAT = "integration_portal.waste_category"
 T_USAGE = "integration_portal.usage_count"

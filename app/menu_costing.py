@@ -37,8 +37,24 @@ from app import database as db
 from app.database import SCHEMA
 from app import test_branches
 from app.scope import COMPANY_NAMES, MAIN_COMPANY
+from app.utils import TTLCache
 
 P = "integration_portal"
+# the Sales Calculator kept warm (2026-11-10): the menus sold (the heavy part of Assign Menus) a few minutes, a report per
+# filter a couple of minutes and only while nothing of the calculator changed (stamp(): prices, cards, mapping, extras,
+# variants, goods receipt corrections); the sales and stock opname of the day follow within REPORT_S
+MENUS_S, REPORT_S = 600, 120
+_cache = TTLCache()
+
+
+def stamp() -> str:
+    """The last change of what the calculator is set up with: a save anywhere makes the cached reports stale."""
+    r = db.fetchrow(f"""SELECT concat_ws('|',
+          (SELECT max(updated_at)::text || count(*) FROM {P}.cc_item_price), (SELECT max(updated_at)::text || count(*) FROM {P}.cc_menu_recipe),
+          (SELECT max(updated_at)::text || count(*) FROM {P}.cc_menu_recipe_map), (SELECT max(updated_at)::text || count(*) FROM {P}.cc_extra_item),
+          (SELECT max(updated_at)::text || count(*) FROM {P}.cc_option_rule), (SELECT max(created_at)::text || count(*) FROM {P}.cc_gr_correction),
+          (SELECT max(updated_at)::text FROM kc_master.item)) AS s""")
+    return r["s"] if r else ""
 SKIP_STATUSES = ("Rejected", "Cancelled", "Void")
 
 
@@ -365,6 +381,22 @@ def menus(days: int = 90) -> list[dict]:
     """Every menu of the POS transactions (menus, packages and extras, from the monthly rollup of every month, as the
     sales pages), with its brand (ESB company of the branches that sold it), the quantity of the last `days` days, the
     last day it sold and the card assigned to it. Most sold first, then by name."""
+    rows = _cache.get(f"menus:{days}:{date.today()}")
+    if rows is None:
+        rows = _menus_sold(days)
+        _cache.set(f"menus:{days}:{date.today()}", rows, MENUS_S)
+    mapped = {r["menu_id"]: r["recipe_code"] for r in db.fetch(f"SELECT menu_id, recipe_code FROM {P}.cc_menu_recipe_map")}
+    out = [{"id": r["menu_id"], "name": r["name"] or r["menu_id"], "category": r["category"] or "",
+            "detail": r["detail"] or "", "kinds": sorted((r["kinds"] or "menu").split(",")),
+            "companies": [{"code": c, "name": COMPANY_NAMES.get(c, c)} for c in sorted((r["companies"] or MAIN_COMPANY).split(","))],
+            "qty": _f(r["qty"]), "lastSold": (r["last_day"] or r["last_month"]).isoformat() if (r["last_day"] or r["last_month"]) else None,
+            "recipe": mapped.get(r["menu_id"])} for r in rows]
+    out.sort(key=lambda m: (-m["qty"], m["name"].lower()))
+    return out
+
+
+def _menus_sold(days: int) -> list[dict]:
+    """The menus of the POS transactions with their brand, quantity of the last `days` days and last day sold."""
     since = date.today() - timedelta(days=days)
     rows = db.fetch(
         f"""WITH br AS ({BRANCH_COMPANY}),
@@ -379,9 +411,8 @@ def menus(days: int = 90) -> list[dict]:
                               FROM {P}.agg_menu_daily a LEFT JOIN br ON br.branch_code = a.branch_code
                              WHERE a.sales_date >= %(since)s AND a.menu_id <> '?' GROUP BY 1)
             SELECT coalesce(e.menu_id, r.menu_id) AS menu_id, e.name, e.category, e.detail, e.kinds, e.companies, e.last_month,
-                   r.qty, r.last_day, m.recipe_code
-              FROM every e FULL JOIN recent r ON r.menu_id = e.menu_id
-              LEFT JOIN {P}.cc_menu_recipe_map m ON m.menu_id = coalesce(e.menu_id, r.menu_id)""",
+                   r.qty, r.last_day
+              FROM every e FULL JOIN recent r ON r.menu_id = e.menu_id""",
         {"since": since, "main": MAIN_COMPANY})
     missing = [r["menu_id"] for r in rows if r["name"] is None]
     if missing:  # sold this month, not rolled up yet: the names from the daily rows
@@ -396,13 +427,7 @@ def menus(days: int = 90) -> list[dict]:
         for r in rows:
             if r["name"] is None and r["menu_id"] in names:
                 r.update({k: names[r["menu_id"]][k] for k in ("name", "category", "detail", "kinds", "companies")})
-    out = [{"id": r["menu_id"], "name": r["name"] or r["menu_id"], "category": r["category"] or "",
-            "detail": r["detail"] or "", "kinds": sorted((r["kinds"] or "menu").split(",")),
-            "companies": [{"code": c, "name": COMPANY_NAMES.get(c, c)} for c in sorted((r["companies"] or MAIN_COMPANY).split(","))],
-            "qty": _f(r["qty"]), "lastSold": (r["last_day"] or r["last_month"]).isoformat() if (r["last_day"] or r["last_month"]) else None,
-            "recipe": r["recipe_code"]} for r in rows]
-    out.sort(key=lambda m: (-m["qty"], m["name"].lower()))
-    return out
+    return rows
 
 
 def explode(card: dict, portions: float, wip: dict[str, dict], out: dict[str, dict]) -> None:
@@ -610,6 +635,16 @@ def _delta_cost(key: str, qty: float, price: dict[str, float]) -> Optional[float
 
 
 def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int = 7, buffer_pct: float = 10) -> dict:
+    """The calculator of a period (see _report), kept REPORT_S seconds per filter while nothing of the setup changed."""
+    key = f"report:{d_from}:{d_to}:{','.join(sorted(branches)) if branches is not None else '*'}:{horizon}:{buffer_pct}:{stamp()}"
+    hit = _cache.get(key)
+    if hit is None:
+        hit = _report(d_from, d_to, branches, horizon, buffer_pct)
+        _cache.set(key, hit, REPORT_S)
+    return hit
+
+
+def _report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int = 7, buffer_pct: float = 10) -> dict:
     days = (d_to - d_from).days + 1
     cards = {k: c for k, c in resolve({r["code"]: r for r in recipes()}).items() if c["isActive"]}  # a bundle may hold an inactive card
     mapped = {m["id"]: code for code, c in cards.items() for m in c["menus"]}
@@ -689,7 +724,7 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
     if covered:
         try:
             from app import waste
-            w = waste.with_values(db.fetch(f"""SELECT * FROM {waste.T} WHERE business_date BETWEEN %s AND %s
+            w = waste.with_values(db.fetch(f"""SELECT {waste.LIGHT} FROM {waste.T} WHERE business_date BETWEEN %s AND %s
                                                  AND branch_code = ANY(%s) AND status <> 'rejected'""", (d_from, d_to, covered)))
             waste_value = round(sum(v["value"] or 0 for v in w), 2)
         except Exception:  # noqa: BLE001 - no waste data: the difference stays unexplained

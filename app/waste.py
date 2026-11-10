@@ -29,7 +29,8 @@ T = "integration_portal.waste_entry"
 # photos made a read of a week of waste take seconds)
 LIGHT = ("id, user_id, username, full_name, role, branch_code, branch_name, business_date, scope, item_code, item_name, unit, qty, "
          "category, note, photo_type, photo_taken_at, latitude, longitude, status, review_note, reviewed_by, reviewed_at, device, ip, "
-         "created_at, production_date, expired_date, qty_base, exploded, signature_type, investigation_id, (signature IS NOT NULL) AS signed")
+         "created_at, production_date, expired_date, qty_base, exploded, signature_type, investigation_id, (signature IS NOT NULL) AS signed, "
+         "(SELECT count(*) FROM integration_portal.waste_correction c WHERE c.entry_id = waste_entry.id)::int AS corrections")
 T_ITEM = "integration_portal.waste_item"
 T_CAT = "integration_portal.waste_category"
 T_USAGE = "integration_portal.usage_count"
@@ -38,6 +39,7 @@ SCOPES = {"waste": "Waste", "usage": "Usage Management", "premix": "Premix"}
 ENTRY_SCOPES = ("waste", "premix")  # usage is the daily list (save_usage)
 STATUSES = ("submitted", "investigating", "approved", "rejected")
 T_INV = "integration_portal.waste_investigation"
+T_FIX = "integration_portal.waste_correction"  # migration 087
 CATEGORY_SCOPES = ("waste", "usage")  # Form Waste (and premix) / Usage Management (migration 055)
 MAX_QTY = Decimal("1000000")
 # the WIP of the stock opname count (kopicalf_core recipes.count_recipes): active recipe, active version, facility type
@@ -217,7 +219,8 @@ def allowed_days() -> tuple[date, date]:
 COLUMNS = """e.id::text, e.user_id::text, e.username, e.full_name, e.role, e.branch_code, e.branch_name, e.business_date,
     e.scope, e.item_code, e.item_name, e.unit, e.qty, e.category, e.note, e.production_date, e.expired_date, e.qty_base, e.exploded, e.photo_taken_at, e.latitude, e.longitude,
     e.status, e.review_note, e.reviewed_by, e.reviewed_at, e.created_at, e.signature IS NOT NULL AS signed,
-    e.investigation_id::text AS investigation_id"""
+    e.investigation_id::text AS investigation_id,
+    (SELECT count(*) FROM integration_portal.waste_correction c WHERE c.entry_id = e.id)::int AS corrections"""
 
 
 def _view(r: dict) -> dict:
@@ -232,6 +235,7 @@ def _view(r: dict) -> dict:
             "photoTakenAt": r["photo_taken_at"].isoformat() if r["photo_taken_at"] else None,
             "latitude": num(r["latitude"]), "longitude": num(r["longitude"]), "status": r["status"],
             "signed": bool(r.get("signed")), "investigationId": r.get("investigation_id"),
+            "corrections": int(r.get("corrections") or 0),
             "review": None if r["status"] in ("submitted", "investigating") else {
                 "note": r["review_note"], "by": r["reviewed_by"],
                 "at": r["reviewed_at"].isoformat() if r["reviewed_at"] else None},
@@ -539,6 +543,91 @@ def review(ids: list[str], status: str, note: Optional[str], user: dict, branche
             RETURNING id::text, branch_name, item_name""",
         {"s": status, "n": (note or "").strip()[:500] or None, "by": user.get("full_name") or user["username"],
          "ids": ids, "all": branches is None, "br": list(branches or [])})
+
+
+FIX_FIELDS = ("qty", "item", "category", "businessDate", "productionDate", "expiredDate", "note")
+
+
+def correct(entry_id: str, body: dict, user: dict, branches: Optional[tuple]) -> Optional[dict]:
+    """Cost Control fixes an entry of its branches (migration 087): quantity (and unit of a premix), item of the same
+    scope, category, business date, production / expired date, note; a reason is required and every changed field is
+    logged with its old and new value. The entry keeps its status; values and the running stock follow at once.
+    None = not found / not in the reviewer's branches."""
+    from app import running_stock
+    reason = (body.get("reason") or "").strip()
+    if len(reason) < 3:
+        raise WasteError("Tulis alasan koreksi")
+    with db.transaction() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT {LIGHT} FROM {T} WHERE id::text = %s FOR UPDATE", (entry_id,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        if branches is not None and row["branch_code"] not in branches:
+            return None
+        new: dict[str, Any] = {}
+        log: list[tuple[str, Any, Any]] = []
+        scope, facility = row["scope"], (facility_type(row["branch_code"]) if row["scope"] == "premix" else "OUTLET")
+        code = body.get("itemCode") or row["item_code"]
+        qty = _qty(body["qty"]) if body.get("qty") is not None else row["qty"]
+        uom = body.get("uom") or row["unit"]
+        if code != row["item_code"] or qty != row["qty"] or uom != row["unit"]:
+            item = _item(scope, code, facility, row["branch_code"])
+            if item is None:
+                raise WasteError("Item tidak ada di daftar waste")
+            unit, grams, comps = explode(item, uom, qty) if scope == "premix" else (item["unit"], None, None)
+            if code != row["item_code"]:
+                log.append(("item", f"{row['item_code']} {row['item_name']}", f"{item['code']} {item['name']}"))
+                new.update(item_code=item["code"], item_name=item["name"])
+            if qty != row["qty"] or unit != row["unit"]:
+                log.append(("qty", f"{row['qty'].normalize():f} {row['unit']}", f"{qty.normalize():f} {unit}"))
+            new.update(qty=qty, unit=unit, qty_base=grams, exploded=json.dumps(comps) if comps is not None else None)
+        if body.get("category") is not None and body["category"] != row["category"]:
+            if body["category"] not in catalog(facility)["categories"]:
+                raise WasteError("Pilih kategori waste")
+            log.append(("category", row["category"], body["category"]))
+            new["category"] = body["category"]
+        for key, col in (("businessDate", "business_date"), ("productionDate", "production_date"), ("expiredDate", "expired_date")):
+            if key in body and body[key] != row[col]:
+                if key == "businessDate" and (body[key] is None or body[key] > today()):
+                    raise WasteError("Tanggal waste tidak boleh kosong atau di masa depan")
+                log.append((key, row[col].isoformat() if row[col] else None, body[key].isoformat() if body[key] else None))
+                new[col] = body[key]
+        made, expires = new.get("production_date", row["production_date"]), new.get("expired_date", row["expired_date"])
+        if made and expires and expires < made:
+            raise WasteError("Expired date harus setelah production date")
+        if "note" in body and ((body["note"] or "").strip() or None) != row["note"]:
+            note = (body["note"] or "").strip()[:500] or None
+            log.append(("note", row["note"], note))
+            new["note"] = note
+        if not log:
+            raise WasteError("Tidak ada perubahan")
+        sets = ", ".join(f"{k} = %({k})s" + ("::jsonb" if k == "exploded" else "") for k in new)
+        cur.execute(f"UPDATE {T} SET {sets} WHERE id = %(id)s", {**new, "id": row["id"]})
+        by = user.get("full_name") or user["username"]
+        cur.executemany(f"INSERT INTO {T_FIX} (entry_id, field, old_value, new_value, reason, by_name, by_user) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        [(row["id"], f, o, n, reason[:500], by, user.get("id")) for f, o, n in log])
+    running_stock.clear()
+    out = db.fetchrow(f"SELECT {COLUMNS} FROM {T} e WHERE e.id::text = %s", (entry_id,))
+    return {**with_values([out])[0], "changed": [f for f, _, _ in log]}
+
+
+def correct_options(entry_id: str, branches: Optional[tuple]) -> Optional[dict]:
+    """What a correction may pick for an entry: the items of its scope at its branch (premix with their units) and the
+    waste categories."""
+    row = db.fetchrow(f"SELECT scope, branch_code FROM {T} WHERE id::text = %s", (entry_id,))
+    if row is None or (branches is not None and row["branch_code"] not in branches):
+        return None
+    facility = facility_type(row["branch_code"]) if row["scope"] == "premix" else "OUTLET"
+    cat = catalog(facility, row["branch_code"])
+    return {"items": cat["items"].get(row["scope"], []), "categories": cat["categories"]}
+
+
+def corrections(entry_id: str) -> list[dict]:
+    rows = db.fetch(f"""SELECT field, old_value, new_value, reason, by_name, created_at FROM {T_FIX}
+                        WHERE entry_id::text = %s ORDER BY created_at, id""", (entry_id,))
+    return [{"field": r["field"], "old": r["old_value"], "new": r["new_value"], "reason": r["reason"], "by": r["by_name"],
+             "at": r["created_at"].isoformat()} for r in rows]
 
 
 def photo_of(entry_id: str) -> Optional[dict]:

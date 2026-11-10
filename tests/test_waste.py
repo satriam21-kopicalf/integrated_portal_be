@@ -202,3 +202,53 @@ def test_investigation_prefills_the_form_of_one_branch(monkeypatch):
         waste.open_investigation(["a", "b"], {"username": "cc", "full_name": "CC"}, None)
     with pytest.raises(waste.WasteError, match="di luar cabang"):
         waste.open_investigation(["a", "b"], {"username": "cc"}, ("CCI01",))
+
+
+def test_cost_control_corrects_an_entry_and_the_change_is_logged(monkeypatch):
+    # 2026-11-10 (migration 087): qty, category and date fixed in place, one log row per field, a reason required
+    from contextlib import contextmanager
+    from decimal import Decimal
+    row = _row(scope="waste", item_code="RMFR-00003", item_name="DIMSUM", unit="PCS", qty=Decimal("5.000"),
+               category="Packaging Rusak", investigation_id=None)
+    done = {}
+
+    class Cur:
+        def execute(self, sql, args=None):
+            if sql.lstrip().startswith("UPDATE"):
+                done["update"] = args
+        def fetchone(self):
+            return dict(row)
+        def executemany(self, sql, rows):
+            done["log"] = rows
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    class Conn:
+        def cursor(self):
+            return Cur()
+
+    @contextmanager
+    def tx():
+        yield Conn()
+
+    monkeypatch.setattr(waste.db, "transaction", tx)
+    monkeypatch.setattr(waste.db, "fetchrow", lambda *a, **k: {**row, "qty": Decimal("3"), "corrections": 3})
+    monkeypatch.setattr(waste, "catalog", lambda *a, **k: CATALOG)
+    monkeypatch.setattr(waste, "today", lambda: date(2026, 11, 10))
+    monkeypatch.setattr(waste, "with_values", lambda rows: [waste._view(r) for r in rows])
+    import app.running_stock as rs
+    monkeypatch.setattr(rs, "clear", lambda: None)
+    user = {"id": None, "username": "cc", "full_name": "Cost Control"}
+    with pytest.raises(waste.WasteError):
+        waste.correct(row["id"], {"qty": 3}, user, None)  # no reason
+    with pytest.raises(waste.WasteError):
+        waste.correct(row["id"], {"reason": "salah", "qty": 5}, user, None)  # nothing changed
+    assert waste.correct(row["id"], {"reason": "salah", "qty": 3}, user, ("CCI99",)) is None  # not in the reviewer's branches
+    out = waste.correct(row["id"], {"reason": "salah input", "qty": 3, "category": "Premix Expired/ Over Stock",
+                                    "businessDate": date(2026, 10, 30)}, user, None)
+    assert out["changed"] == ["qty", "category", "businessDate"] and out["corrections"] == 3
+    assert done["update"]["qty"] == Decimal("3.000") and done["update"]["business_date"] == date(2026, 10, 30)
+    assert [r[1:4] for r in done["log"]] == [("qty", "5 PCS", "3 PCS"), ("category", "Packaging Rusak", "Premix Expired/ Over Stock"),
+                                             ("businessDate", "2026-10-31", "2026-10-30")]

@@ -10,6 +10,10 @@
                                            scope&category&status&userId -> entries, totals per item / branch / category
     GET    /api/waste/reviews               page cc.waste-review: the entries waiting for review (same filters)
     POST   /api/waste/reviews               page cc.waste-review: {"ids": [...], "status": approved|rejected, "note"}
+    PATCH  /api/waste/reviews/{id}          page cc.waste-review: Cost Control corrects an entry {reason, qty?, uom?,
+                                           itemCode?, category?, businessDate?, productionDate?, expiredDate?, note?}
+    GET    /api/waste/reviews/{id}/options  page cc.waste-review: the items (of the entry's scope and branch) and categories
+    GET    /api/waste/reviews/{id}/corrections  monitor / review: what was corrected (old -> new, reason, by, when)
     GET    /api/waste/entries/{id}/photo    the evidence: the author's branches, or a monitor / review account
     PUT    /api/waste/usage                 page "waste": the Usage Management list {branchCode, businessDate,
                                            lines: {itemCode: qty | null}} of the branch and day
@@ -204,6 +208,45 @@ def review(body: ReviewIn, request: Request, user: dict = Depends(require_page(R
                     summary=f"Waste {verdict}: {len(rows)} item" + (f" ({next(iter(names))})" if len(names) == 1 else ""),
                     details={"ids": [r["id"] for r in rows], "status": body.status, "note": body.note})
     return {"updated": len(rows), "status": body.status}
+
+
+class CorrectIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+    qty: Optional[float] = Field(None, gt=0, le=1_000_000)
+    uom: Optional[str] = Field(None, max_length=40)
+    itemCode: Optional[str] = Field(None, min_length=1, max_length=80)
+    category: Optional[str] = Field(None, min_length=1, max_length=120)
+    businessDate: Optional[date] = None
+    productionDate: Optional[date] = None
+    expiredDate: Optional[date] = None
+    note: Optional[str] = Field(None, max_length=500)
+
+
+@router.patch("/reviews/{entry_id}")
+def correct(entry_id: str, body: CorrectIn, request: Request, user: dict = Depends(require_page(REV))) -> dict:
+    try:
+        row = waste.correct(entry_id, body.model_dump(exclude_unset=True), user, allowed_branches())
+    except waste.CheckInError as exc:
+        _refuse(exc)
+    if row is None:
+        raise HTTPException(404, detail="Waste tidak ditemukan")
+    activity.record("waste.correct", user=user, request=request, page="/cost-control/waste/reviews",
+                    summary=f"Waste dikoreksi: {row['itemName']} ({row['branchName']})",
+                    details={"id": entry_id, "changed": row["changed"], "reason": body.reason})
+    return row
+
+
+@router.get("/reviews/{entry_id}/options")
+def correct_options(entry_id: str, _user: dict = Depends(require_page(REV))) -> dict:
+    out = waste.correct_options(entry_id, allowed_branches())
+    if out is None:
+        raise HTTPException(404, detail="Waste tidak ditemukan")
+    return out
+
+
+@router.get("/reviews/{entry_id}/corrections")
+def entry_corrections(entry_id: str, _user: dict = Depends(require_page(MON, REV))) -> dict:
+    return {"data": waste.corrections(entry_id)}
 
 
 @router.get("/categories")

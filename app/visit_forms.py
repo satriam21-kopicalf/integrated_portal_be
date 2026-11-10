@@ -413,9 +413,9 @@ def all_items(form: str, retired: bool = False) -> list[dict]:
     return out
 
 
-def _counts(form: str, answers: dict, group: Optional[str] = None) -> dict:
+def _counts(form: str, answers: dict, group: Optional[str] = None, branch: Optional[str] = None) -> dict:
     """UNDER / MEET / EXCEED of a visit over the items asked at its outlet (branch group); score = MEET + EXCEED of the rated."""
-    rated = [answers.get(it["key"], {}).get("rating") for it in all_items(form) if it["kind"] == "rating" and applies(it, group)]
+    rated = [answers.get(it["key"], {}).get("rating") for it in all_items(form) if it["kind"] == "rating" and applies(it, group, branch)]
     c = {r: sum(1 for x in rated if x == r) for r in RATINGS}
     done = sum(c.values())
     return {"under": c["UNDER"], "meet": c["MEET"], "exceed": c["EXCEED"], "rated": done, "total": len(rated),
@@ -437,14 +437,19 @@ def group_of(branch_code: str) -> Optional[str]:
     return r["code"] if r else None
 
 
-def applies(item: dict, group: Optional[str]) -> bool:
-    """Is the item asked at an outlet of this branch group? (an outlet without a group is asked everything)"""
+def applies(item: dict, group: Optional[str], branch: Optional[str] = None) -> bool:
+    """Is the item asked at this outlet? Its own setting first (migration 085: shown / hidden at this outlet), then its
+    branch group (an outlet without a group is asked everything)."""
+    if branch and branch in (item.get("hiddenAt") or []):
+        return False
+    if branch and branch in (item.get("addedAt") or []):
+        return True
     return not item.get("onlyFor") or group is None or group in item["onlyFor"]
 
 
-def is_required(item: dict, group: Optional[str]) -> bool:
-    """Must the item be rated before sending, at an outlet of this branch group?"""
-    if not applies(item, group):
+def is_required(item: dict, group: Optional[str], branch: Optional[str] = None) -> bool:
+    """Must the item be rated before sending, at this outlet (of this branch group)?"""
+    if not applies(item, group, branch):
         return False
     return bool(item.get("required", True)) or (group is not None and group in (item.get("requiredFor") or []))
 
@@ -641,7 +646,7 @@ def save_answers(form: str, user: dict, visit_id: str, patch: dict) -> dict:
             cur["by"] = user.get("full_name") or user["username"]
         answers[key] = {k: v for k, v in cur.items() if v is not None}
     answers = {k: v for k, v in answers.items() if v}
-    counts = _counts(form, answers, group_of(row["branch_code"]))
+    counts = _counts(form, answers, group_of(row["branch_code"]), row["branch_code"])
     db.fetchrow(f"""UPDATE {T} SET answers = %s::jsonb, counts = %s::jsonb, score = %s, updated_at = now()
                     WHERE id::text = %s RETURNING id""", (json.dumps(answers), json.dumps(counts), counts["score"], visit_id))
     return {"answers": answers, "counts": counts}
@@ -675,11 +680,11 @@ def delete_photo(form: str, user: dict, visit_id: str, photo_id: str) -> dict:
     return {"photos": photos_of(visit_id)}
 
 
-def unrated(form: str, answers: dict, group: Optional[str] = None) -> int:
-    return sum(1 for it in all_items(form) if it["kind"] == "rating" and applies(it, group) and not (answers.get(it["key"]) or {}).get("rating"))
+def unrated(form: str, answers: dict, group: Optional[str] = None, branch: Optional[str] = None) -> int:
+    return sum(1 for it in all_items(form) if it["kind"] == "rating" and applies(it, group, branch) and not (answers.get(it["key"]) or {}).get("rating"))
 
 
-def missing(form: str, answers: dict, photos: list[dict], group: Optional[str] = None) -> list[dict]:
+def missing(form: str, answers: dict, photos: list[dict], group: Optional[str] = None, branch: Optional[str] = None) -> list[dict]:
     """What blocks the submit (2026-10-27): a required item not rated (need "rating"), or a rated required item without
     the note / photo / grams it asks for (need "note", "photo", "qty" or a combination, e.g. "note+photo"). Optional
     items block nothing; the platform stars of Rating Outlet need neither a note nor a photo. `group` = the outlet's
@@ -687,7 +692,7 @@ def missing(form: str, answers: dict, photos: list[dict], group: Optional[str] =
     with_photo = {p["item"] for p in photos}
     out = []
     for it in all_items(form):
-        if it["kind"] != "rating" or not is_required(it, group):
+        if it["kind"] != "rating" or not is_required(it, group, branch):
             continue
         a = answers.get(it["key"]) or {}
         if not a.get("rating"):
@@ -719,13 +724,14 @@ def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Opti
     else:
         _not_today(form, user, row["branch_code"], row["branch_name"])
     photos = photos_of(visit_id)
-    todo = missing(form, row["answers"] or {}, photos, group_of(row["branch_code"]))
+    todo = missing(form, row["answers"] or {}, photos, group_of(row["branch_code"]), row["branch_code"])
     if any(t["need"] == "rating" for t in todo):
         raise VisitError(f"Belum bisa dikirim: {sum(1 for t in todo if t['need'] == 'rating')} butir wajib belum dinilai")
     if todo:
         raise VisitError(f"Belum bisa dikirim: {len(todo)} butir yang dinilai belum lengkap catatan/foto/gram/link")
     group = group_of(row["branch_code"])
-    if unrated(form, row["answers"] or {}, group) == len([i for i in all_items(form) if i["kind"] == "rating" and applies(i, group)]):
+    if unrated(form, row["answers"] or {}, group, row["branch_code"]) == len([i for i in all_items(form) if i["kind"] == "rating"
+                                                                            and applies(i, group, row["branch_code"])]):
         raise VisitError("Belum ada butir yang dinilai")
     # the signature is optional (like the stock opname); a name goes with it
     sig_type, sig = parse_photo(signature) if signature else (None, None)
@@ -749,7 +755,7 @@ def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Opti
         answers[it["key"]] = {**cur, **({k: g[k] for k in ("stars", "reviews", "source", "fetchedAt")} if g else {})}
         if not answers[it["key"]]:
             answers.pop(it["key"])
-    counts = _counts(form, answers, group)
+    counts = _counts(form, answers, group, row["branch_code"])
     db.fetchrow(
         f"""UPDATE {T} SET status = 'SUBMITTED', submitted_at = now(), updated_at = now(), answers = %s::jsonb, counts = %s::jsonb, score = %s,
                 latitude = %s, longitude = %s, accuracy_m = %s, outlet_latitude = %s, outlet_longitude = %s, radius_m = %s,

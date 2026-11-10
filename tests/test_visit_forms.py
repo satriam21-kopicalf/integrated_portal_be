@@ -267,3 +267,13 @@ def test_raw_materials_need_a_note_only():
     assert [t["need"] for t in vf.missing("product", {first["key"]: {"rating": "MEET"}}, [], "CTG") if t["key"] == first["key"]] == ["note"]
     dimsum = next(i for i in vf.all_items("product") if i["label"] == "Ketersediaan Stok Dimsum")
     assert dimsum["units"] == ["gram", "porsi", "pax"] and vf.MAX_PHOTOS_PER_ITEM == 5
+
+
+def test_an_outlet_may_be_set_apart_from_its_group():
+    """2026-11-10 (migration 085): an item shown at one outlet whose group is not asked it, hidden at one whose group is."""
+    beans = {"key": "x", "kind": "rating", "onlyFor": ["CTGP", "CCI"], "required": False, "requiredFor": ["CTGP", "CCI"],
+             "addedAt": ["CTG54"], "hiddenAt": ["CTGP3"]}
+    assert vf.applies(beans, "CTG", "CTG54") and not vf.applies(beans, "CTG", "CTG1")
+    assert not vf.applies(beans, "CTGP", "CTGP3") and vf.applies(beans, "CTGP", "CTGP1")
+    assert not vf.is_required(beans, "CTGP", "CTGP3") and vf.is_required(beans, "CTGP", "CTGP1")
+    assert vf.applies(beans, "CTGP") and not vf.applies(beans, "CTG")  # without the outlet: the group alone, as before

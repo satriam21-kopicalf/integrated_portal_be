@@ -16,7 +16,7 @@ The PIC assessment settings (migration 069, app/pic_settings.py, app/form_scope.
     GET    /api/monitoring/sales-targets?month=YYYY-MM the net sales of every outlet against its own months before
 """
 from datetime import date, timedelta
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -160,6 +160,27 @@ def save_form_items(body: ScopeIn, request: Request, user: dict = Depends(curren
     out = _run(form_scope.save, [c.model_dump() for c in body.changes], str(user["id"]), vf.DEFINITIONS)
     activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups",
                     summary=f"Mengatur butir form per grup ({out['saved']} perubahan)")
+    return out
+
+
+class BranchScopeChange(BaseModel):
+    form: Literal["product", "outlet"]
+    itemKey: str = Field(min_length=1, max_length=120)
+    branch: str = Field(min_length=1, max_length=40)
+    shown: Optional[bool] = None  # None: the outlet follows its group again
+
+
+class BranchScopeIn(BaseModel):
+    changes: list[BranchScopeChange] = Field(min_length=1, max_length=2000)
+
+
+@router.put("/api/monitoring/form-items/branches")
+def save_form_item_branches(body: BranchScopeIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    """An item shown / hidden at single outlets, apart from their group (migration 085)."""
+    _need(request, user, "mon.branch-groups")
+    out = _run(form_scope.save_branches, [c.model_dump() for c in body.changes], str(user["id"]), vf.DEFINITIONS)
+    activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups",
+                    summary=f"Mengatur butir form per outlet ({out['saved']} perubahan)")
     return out
 
 

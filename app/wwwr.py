@@ -39,10 +39,7 @@ def team() -> list[dict]:
     counts). The job title alone no longer counts."""
     from app import access
 
-    def member(u: dict) -> bool:
-        if u["role"] == "superadmin":
-            return any(access.user_overrides(str(u["id"])).get(p) for p in access.TEAM_PAGES)
-        return any(access.has_page(u, p) for p in access.TEAM_PAGES)
+    member = access.in_swat_team
     users = db.fetch(f"""SELECT id, username, full_name, role, job_title FROM {P}.user_account
                           WHERE is_active ORDER BY coalesce(full_name, username)""")
     return [{"id": str(u["id"]), "username": u["username"], "name": u["full_name"] or u["username"], "jobTitle": u["job_title"]}

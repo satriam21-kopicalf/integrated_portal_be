@@ -111,7 +111,10 @@ def require_roles(*roles: str):
 def signed_in_user(row: dict) -> dict:
     """The user as the app keeps it after sign-in: the account plus the pages it opens."""
     # platforms: {page: [portal | operations | cotr]} where the superadmins set the menus (display only, 054)
-    return {**accounts.public_user(row), "pages": access.pages_for(row), "platforms": access.page_platforms()}
+    out = {**accounts.public_user(row), "pages": access.pages_for(row), "platforms": access.page_platforms()}
+    if access.in_swat_team(row):  # the Operations app shows the SWAT menu only (2026-11-10)
+        out["swatPages"] = list(access.SWAT_OPERATIONS_PAGES)
+    return out
 
 
 def forget_sessions() -> None:

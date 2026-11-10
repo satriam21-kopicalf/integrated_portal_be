@@ -35,8 +35,10 @@ ALL_COMPANIES = "all"
 SALES_PATHS = ("/api/overview", "/api/summary", "/api/transactions", "/api/live", "/api/branches", "/api/exports")
 # Cost Control (2026-11-08): narrowed to one brand only when the page asks (`?company=`), so the Operations forms that
 # share some endpoints never are; a brand = its outlets, the main company = everything else (outlets, hubs, warehouses)
+# The Operations monitors too (2026-11-10): PIC Check In, Product, Outlet, WW-WR, Overview (/api/monitoring/), Damaged
+# Equipment and Fund Request, so Kopi Calf and Wasgee are never mixed there either
 COST_CONTROL_PATHS = ("/api/cost-control/", "/api/monitoring/", "/api/waste/monitor", "/api/waste/reviews", "/api/waste/daily",
-                      "/api/waste/usage", "/api/waste/investigations")
+                      "/api/waste/usage", "/api/waste/investigations", "/api/de/monitor", "/api/pengajuan/monitor")
 # the companies of another brand than the main one (Wasgee Tea); the other ESB companies (roastery, hubs …) are Kopi Calf
 BRANDS = ("CALF7",)
 # True while a Cost Control request is narrowed to a brand (allowed_branches reads brand_branches then)

@@ -261,7 +261,7 @@ def write_file(path: str, d_from: date, d_to: date, branches: Optional[list[str]
     got = rows(d_from, d_to, branches, per_branch=per_branch, per_month=True)
     data, names = got["rows"], got["names"]
     if len(data) > MAX_ROWS:
-        raise mc.CostingError(f"{len(data):,} baris melebihi batas Excel: pilih outlet atau periode yang lebih pendek".replace(",", "."))
+        raise mc.CostingError(f"{len(data):,} rows exceed the Excel limit: choose a branch or a shorter period")
     cols = [c for c in COLUMNS if per_branch or c[0] not in ("branch", "branchName")]
     file_name = file_name or f"Raw Material Breakdown {d_from:%Y%m%d}-{d_to:%Y%m%d}"
     branch_label = "All Branches" if not branches else ", ".join(sorted(branches)[:20]) + (" …" if len(branches) > 20 else "")

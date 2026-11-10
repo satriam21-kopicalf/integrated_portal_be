@@ -150,9 +150,11 @@ REPORTS = {
     "detail": ("Sales Recapitulation Detail Report", "Sales_Recapitulation_Detail"),
     "daily": ("Daily Sales Recapitulation Report", "Daily_Sales_Recapitulation"),
     "menu": ("Sales Recapitulation per Menu", "Sales_Recapitulation_per_Menu"),
+    # Sales Calculator → Breakdown (2026-11-10): the raw materials per menu × additional × outlet (app/menu_breakdown.py)
+    "breakdown": ("Breakdown Bahan Baku per Menu", "Breakdown_Bahan_Baku"),
 }
 # reports written as one file (and one Google Sheet) instead of parts
-SINGLE_FILE_REPORTS = ("daily", "menu")
+SINGLE_FILE_REPORTS = ("daily", "menu", "breakdown")
 # Sales Recapitulation per Menu: one sheet only, so the period is capped (one month of every branch ≈ 450k rows)
 MENU_MAX_DAYS = 62
 MENU_MAX_DAYS_GSHEET = 31  # 10 million cells per Google Sheet: ~500k rows of 20 columns
@@ -197,7 +199,8 @@ FORMATS = ("xlsx", "gsheet")
 
 
 def create_job(date_from: date, date_to: date, branch: Optional[str], tx_type: str = "sales",
-               report: str = "detail", owner: Optional[dict] = None, fmt: str = "xlsx", company: Optional[str] = None) -> dict:
+               report: str = "detail", owner: Optional[dict] = None, fmt: str = "xlsx", company: Optional[str] = None,
+               extra: Optional[dict] = None) -> dict:
     cleanup_old_exports()
     job = {
         "id": uuid.uuid4().hex,
@@ -229,6 +232,7 @@ def create_job(date_from: date, date_to: date, branch: Optional[str], tx_type: s
         "error": None,
         "createdAt": _now(),
         "finishedAt": None,
+        **(extra or {}),  # what one report needs beside the rest (the breakdown: perBranch, ownerFullName)
     }
     _write_job(job)
     _launch(job)
@@ -519,6 +523,9 @@ def _generate(job: dict) -> None:
     if job.get("report") == "menu":
         _generate_menu(job)
         return
+    if job.get("report") == "breakdown":
+        _generate_breakdown(job)
+        return
     date_from = date.fromisoformat(job["dateFrom"])
     branch = job["branch"]
     tx_type = job.get("type") or "sales"
@@ -615,6 +622,19 @@ def _generate_menu(job: dict) -> None:
     _update(job, status="running" if job.get("format") == "gsheet" else "done", fileSize=path.stat().st_size,
             finishedAt=None if job.get("format") == "gsheet" else _now())
     logger.info("Menu export %s done: %s rows", job["id"], rows)
+
+
+def _generate_breakdown(job: dict) -> None:
+    """Breakdown Bahan Baku per Menu (Sales Calculator, 2026-11-10): the design of this export (title rows, bold frozen
+    header, Ringkasan), written by app/menu_breakdown.py."""
+    from app import menu_breakdown
+    path = job_file(job["id"])
+    codes = parse_branches(job["branch"]) if job.get("branch") else None
+    rows = menu_breakdown.write_file(str(path), date.fromisoformat(job["dateFrom"]), date.fromisoformat(job["dateTo"]), codes,
+                                     job.get("perBranch", True), {"username": job.get("ownerName"), "full_name": job.get("ownerFullName")},
+                                     job["fileName"].removesuffix(".xlsx"))
+    _update(job, status="done", rows=rows, items=rows, sheets=4, daysDone=job["totalDays"], fileSize=path.stat().st_size, finishedAt=_now())
+    logger.info("Breakdown export %s done: %s rows", job["id"], rows)
 
 
 def _generate_daily(job: dict) -> None:

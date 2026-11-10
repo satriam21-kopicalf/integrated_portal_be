@@ -96,6 +96,135 @@ def save_rule(name: str, data: dict, user: dict) -> dict:
     return {"name": name, **rules()[k]}
 
 
+# ---------------------------------------------------------------- sugar in grams per card (migration 086)
+
+SUGAR_CHOICES = ("no sugar", "less sugar", "extra sugar")
+SUGAR_LEVEL = {"no sugar": "no", "less sugar": "less", "extra sugar": "extra"}
+SUGAR_PCT = {"no sugar": -100, "less sugar": -50, "extra sugar": 50}  # the fallback: the % rules of migration 071
+
+
+def card_rules() -> dict[tuple[str, str], float]:
+    """{(choice key, card code): grams of sugar of one portion with that choice}."""
+    try:
+        return {(r["name_key"], r["recipe_code"]): _f(r["grams"]) for r in db.fetch(f"SELECT name_key, recipe_code, grams FROM {P}.cc_option_card_rule")}
+    except Exception:  # before 086
+        return {}
+
+
+def card_sugar(card: dict) -> float:
+    """Grams of sugar of one Normal portion of a card: its gula / sugar items."""
+    return sum(_f(ln.get("qty")) for ln in card.get("lines") or [] if ln.get("type") == "item" and SUGAR.search(ln.get("name") or ""))
+
+
+def _sugar_cards(days: int = 90) -> list[dict]:
+    """The cards of the menus sold with a sugar choice (the last `days`), with sugar on the card."""
+    since = date.today() - timedelta(days=days)
+    parents = {r["parent"] for r in db.fetch(
+        f"""WITH br AS ({BRANCH_COMPANY})
+            SELECT DISTINCT coalesce(br.company, %(main)s) || ':' || a.parent_id AS parent
+              FROM {P}.agg_menu_option_daily a LEFT JOIN br ON br.branch_code = a.branch_code
+             WHERE a.sales_date >= %(since)s AND lower(a.option_name) LIKE '%%sugar'""", {"since": since, "main": MAIN_COMPANY})}
+    codes = {r["recipe_code"] for r in db.fetch(f"SELECT menu_id, recipe_code FROM {P}.cc_menu_recipe_map") if r["menu_id"] in parents}
+    cards = db.fetch(f"SELECT code, name, lines FROM {P}.cc_menu_recipe WHERE code = ANY(%s) ORDER BY name", (sorted(codes),))
+    return [c for c in cards if card_sugar(c) > 0]
+
+
+def _esb_sugar() -> dict[str, dict[str, float]]:
+    """{menu name (normalised): {no|less|extra|normal: grams of sugar}} from the ESB BOMs '<menu> (<choice> Sugar)'."""
+    out: dict[str, dict[str, float]] = {}
+    for r in db.fetch(f"""SELECT b.bom_name, sum(l.qty) FILTER (WHERE l.product_name ~* 'gula|sugar') AS sugar
+                            FROM {SCHEMA}.master_bom b JOIN {SCHEMA}.master_bom_lines l ON l.bom_id = b.bom_id
+                           WHERE coalesce(b.is_deleted, false) = false AND b.bom_name ~* '\\((no|less|extra|normal) sugar\\)'
+                           GROUP BY 1"""):
+        m = re.match(r"(.*)\((no|less|extra|normal) sugar\)", r["bom_name"], re.I)
+        if m:
+            out.setdefault(_norm(m.group(1)), {})[m.group(2).lower()] = _f(r["sugar"])
+    return out
+
+
+def sugar_grams(days: int = 90) -> dict:
+    """Variants & Modifiers → Sugar per menu: every card sold with a sugar choice, its Normal sugar and the grams of
+    No / Less / Extra with where they came from (esb, pct, check = an ESB figure that did not look right, manual)."""
+    try:
+        rows = {(r["name_key"], r["recipe_code"]): r for r in db.fetch(f"SELECT * FROM {P}.cc_option_card_rule")}
+    except Exception:  # before 086
+        rows = {}
+    out = []
+    for c in _sugar_cards(days):
+        normal = card_sugar(c)
+        cells = {}
+        for k in SUGAR_CHOICES:
+            row = rows.get((k, c["code"]))
+            cells[SUGAR_LEVEL[k]] = ({"grams": _f(row["grams"]), "source": row["source"], "note": row["note"],
+                                      "updatedBy": row["updated_by"], "updatedAt": row["updated_at"].isoformat()} if row
+                                     else {"grams": round(normal * (1 + SUGAR_PCT[k] / 100), 3), "source": "rule"})
+        out.append({"code": c["code"], "name": c["name"], "normal": round(normal, 3), "choices": cells})
+    return {"data": out, "units": "GR"}
+
+
+def _plausible(level: str, grams: Optional[float], normal: float) -> bool:
+    if grams is None:
+        return False
+    return {"no": grams == 0, "less": 0 < grams < normal, "extra": grams > normal}[level]
+
+
+def fill_sugar(user: dict, days: int = 90) -> dict:
+    """The grams of every card sold with a sugar choice: from its ESB BOM '<menu> (<choice> Sugar)' when it looks right
+    (No = 0, Less below Normal, Extra above), else the % rule (an ESB figure that did not look right is marked check).
+    A row Cost Control set (manual) stays."""
+    esb = _esb_sugar()
+    by = user.get("full_name") or user["username"]
+    n = {"esb": 0, "pct": 0, "check": 0, "kept": 0}
+    with db.transaction() as conn:
+        manual = {(r["name_key"], r["recipe_code"]) for r in conn.execute(
+            f"SELECT name_key, recipe_code FROM {P}.cc_option_card_rule WHERE source = 'manual'").fetchall()}
+        for c in _sugar_cards(days):
+            normal = card_sugar(c)
+            e = esb.get(_norm(c["name"]), {})
+            for k in SUGAR_CHOICES:
+                if (k, c["code"]) in manual:
+                    n["kept"] += 1
+                    continue
+                level = SUGAR_LEVEL[k]
+                v = e.get(level)
+                if _plausible(level, v, normal):
+                    grams, src, note = v, "esb", None
+                else:
+                    grams = round(normal * (1 + SUGAR_PCT[k] / 100), 3)
+                    src = "pct" if v is None else "check"
+                    note = None if v is None else f"ESB: {v:g} g (Normal {normal:g} g) — perlu dicek"
+                conn.execute(f"""INSERT INTO {P}.cc_option_card_rule (name_key, recipe_code, grams, source, note, updated_by)
+                                 VALUES (%s, %s, %s, %s, %s, %s)
+                                 ON CONFLICT (name_key, recipe_code) DO UPDATE SET grams = EXCLUDED.grams, source = EXCLUDED.source,
+                                 note = EXCLUDED.note, updated_by = EXCLUDED.updated_by, updated_at = now()""",
+                             (k, c["code"], grams, src, note, by))
+                n[src] += 1
+    return {"filled": n, **sugar_grams(days)}
+
+
+def save_sugar(changes: list[dict], user: dict) -> dict:
+    """changes: [{card, level: no|less|extra, grams}] — grams None: back to the % rule (the row goes)."""
+    by = user.get("full_name") or user["username"]
+    keys = {v: k for k, v in SUGAR_LEVEL.items()}
+    with db.transaction() as conn:
+        for c in changes:
+            k = keys.get(c.get("level"))
+            code = str(c.get("card") or "")
+            if not k or not code:
+                raise OptionError("Pilih menu dan tingkat gula")
+            if c.get("grams") is None:
+                conn.execute(f"DELETE FROM {P}.cc_option_card_rule WHERE name_key = %s AND recipe_code = %s", (k, code))
+                continue
+            grams = _f(c["grams"])
+            if grams < 0 or grams > 5000:
+                raise OptionError("Gramasi 0 sampai 5.000 gram")
+            conn.execute(f"""INSERT INTO {P}.cc_option_card_rule (name_key, recipe_code, grams, source, note, updated_by)
+                             VALUES (%s, %s, %s, 'manual', NULL, %s)
+                             ON CONFLICT (name_key, recipe_code) DO UPDATE SET grams = EXCLUDED.grams, source = 'manual', note = NULL,
+                             updated_by = EXCLUDED.updated_by, updated_at = now()""", (k, code, grams, by))
+    return {"saved": len(changes)}
+
+
 # ---------------------------------------------------------------- choices sold
 
 BRANCH_COMPANY = f"""SELECT DISTINCT ON (branch_code) branch_code, coalesce(company_code, '{MAIN_COMPANY}') AS company
@@ -166,6 +295,7 @@ def adjustments(choice_rows: list[dict], cards: dict, mapped: dict, wip: dict, r
     unruled: dict[str, dict] = {}
     one_cache: dict[str, dict] = {}
     item_info = _items({ln["code"] for r in rule.values() for ln in r["lines"] if ln.get("code")})
+    grams = card_rules()  # migration 086: the sugar of a choice in grams per card
     for c in choice_rows:
         code = mapped.get(c["parent"])
         if not code or code not in cards:
@@ -182,6 +312,16 @@ def adjustments(choice_rows: list[dict], cards: dict, mapped: dict, wip: dict, r
             explode(cards[code], 1, wip, one)
             one_cache[code] = one
         one = one_cache[code]
+        g = grams.get((key_of(c["name"]), code))
+        sugar = [(k, v) for k, v in one.items() if SUGAR.search(v["name"] or "")]
+        total = sum(v["qty"] for _, v in sugar)
+        if g is not None and total > 0:
+            # the grams set for this card: the card's sugar moves to them, each sugar item by its share
+            for k, v in sugar:
+                rows.setdefault(k, {key: v[key] for key in v if key != "qty"})
+                d = per_menu.setdefault(c["parent"], {})
+                d[k] = d.get(k, 0.0) + (g - total) * (v["qty"] / total) * c["qty"]
+            continue
         for ln in r["lines"]:
             if ln["mode"] == "pct":
                 hits = [(k, v) for k, v in one.items() if (SUGAR.search(v["name"] or "") if ln["target"] == "sugar" else v.get("code") == ln["code"])]

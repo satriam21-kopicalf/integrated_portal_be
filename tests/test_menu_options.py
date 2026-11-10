@@ -63,3 +63,15 @@ def test_a_card_from_the_esb_bom(monkeypatch):
     assert lines["FRESH MILK DIAMOND 946ML"]["qty"] == 94.6                      # 0.1 BTL × 946 GR
     assert lines["Premix Premium"]["type"] == "wip" and lines["Premix Premium"]["qty"] == 40
     assert lines["Stiker"]["type"] == "other" and lines["Stiker"]["price"] == 120 and len(card["notes"]) == 1
+
+
+def test_sugar_in_grams_per_card_comes_before_the_percent_rule(monkeypatch):
+    """Migration 086: Less Sugar on this card = 10 g of aren (not half of the card's 25 g); No Sugar keeps its % rule."""
+    monkeypatch.setattr(mo, "_items", lambda codes: {})
+    monkeypatch.setattr(mo, "card_rules", lambda: {("less sugar", "ESP"): 10.0})
+    rows = [{"parent": "CALF:1", "option": "CALF:92", "name": "Less Sugar", "qty": 30},
+            {"parent": "CALF:1", "option": "CALF:93", "name": "No Sugar", "qty": 10}]
+    per_menu, _, _ = mo.adjustments(rows, {"ESP": CARD}, {"CALF:1": "ESP"}, {}, RULES, mc.explode)
+    assert per_menu["CALF:1"] == {"RM-AREN": 30 * (10 - 25) + 10 * -25}
+    assert mo.card_sugar(CARD) == 25  # the vanilla syrup is a flavour, not sugar
+    assert mo._plausible("less", 10, 25) and not mo._plausible("less", 45.8, 30) and mo._plausible("no", 0, 25)

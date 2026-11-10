@@ -25,10 +25,10 @@ A role "user" given a page sees only its own branches (app/scope.py).
 from datetime import date, timedelta
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
-from app import activity, menu_costing as mc, menu_options as mo
+from app import activity, menu_breakdown, menu_costing as mc, menu_options as mo
 from app.access import require_page
 from app.scope import NO_BRANCH, scoped_branch
 from app.utils import parse_branches, today
@@ -203,6 +203,43 @@ def report(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Quer
     return mc.report(start, end, branches, horizon, buffer)
 
 
+def _period(dateFrom: Optional[date], dateTo: Optional[date], branch: Optional[str]) -> tuple[date, date, Optional[list[str]]]:
+    end = dateTo or today()
+    start = dateFrom or end - timedelta(days=89)
+    if start > end or (end - start).days > 92:
+        raise HTTPException(422, detail="Periode 1 hari sampai 3 bulan")
+    scoped = scoped_branch(branch)
+    return start, end, None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
+
+
+@router.get("/sales-calc/breakdown")
+def breakdown(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
+              _: dict = Depends(require_page(CALC))) -> dict:
+    """Breakdown (2026-11-10): category → sub category → menu → additional → raw materials of the period (3 months by default)."""
+    start, end, branches = _period(dateFrom, dateTo, branch)
+    return menu_breakdown.summary(start, end, branches)
+
+
+class BreakdownExportIn(BaseModel):
+    dateFrom: Optional[date] = None
+    dateTo: Optional[date] = None
+    branch: Optional[str] = Field(None, max_length=4000)
+    perBranch: bool = True
+
+
+@router.post("/sales-calc/breakdown/export", status_code=202)
+def breakdown_export(body: BreakdownExportIn, request: Request, user: dict = Depends(require_page(CALC))) -> dict:
+    """The Excel of the breakdown as an export job (the Sales Transactions exports: progress and download in the export
+    notices): a Data sheet ready for a Pivot Table (month × outlet × menu × additional × material)."""
+    from app import exports
+    start, end, branches = _period(body.dateFrom, body.dateTo, body.branch)
+    job = exports.create_job(start, end, ",".join(branches) if branches else None, "sales", "breakdown", user, "xlsx",
+                             extra={"perBranch": body.perBranch, "ownerFullName": user.get("full_name")})
+    activity.record("cc.sales_calc", user=user, request=request, page="/cost-control/sales-calculator",
+                    summary=f"Export breakdown bahan baku {start:%d-%m-%Y} s/d {end:%d-%m-%Y}")
+    return {k: v for k, v in job.items() if not k.startswith("owner")}
+
+
 @router.get("/cogs/outlets")
 def cogs_outlets(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
                  _: dict = Depends(require_page("cc.cogs"))) -> dict:
@@ -232,6 +269,42 @@ def save_option_rule(body: dict, request: Request, user: dict = Depends(require_
         _refuse(exc)
     activity.record("cc.menu-option", user=user, request=request, page="/cost-control/sales-calculator",
                     summary=f"Aturan pilihan {out['name']}: {out.get('effect') or 'dihapus'}", details=out)
+    return out
+
+
+class SugarChange(BaseModel):
+    card: str = Field(min_length=1, max_length=80)
+    level: Literal["no", "less", "extra"]
+    grams: Optional[float] = Field(None, ge=0, le=5000)  # None: back to the % rule
+
+
+class SugarIn(BaseModel):
+    changes: list[SugarChange] = Field(min_length=1, max_length=2000)
+
+
+@router.get("/sales-calc/options/sugar")
+def sugar_grams(_: dict = Depends(require_page(CALC))) -> dict:
+    """Variants & Modifiers → Sugar per menu (migration 086)."""
+    return mo.sugar_grams()
+
+
+@router.post("/sales-calc/options/sugar/fill")
+def fill_sugar(request: Request, user: dict = Depends(require_page(CALC))) -> dict:
+    """The grams of every card from its ESB BOM, else the % rule; a manual row stays."""
+    out = mo.fill_sugar(user)
+    activity.record("cc.sales_calc", user=user, request=request, page="/cost-control/sales-calculator",
+                    summary=f"Gramasi gula per menu diisi: {out['filled']}")
+    return out
+
+
+@router.put("/sales-calc/options/sugar")
+def save_sugar(body: SugarIn, request: Request, user: dict = Depends(require_page(CALC))) -> dict:
+    try:
+        out = mo.save_sugar([c.model_dump() for c in body.changes], user)
+    except mo.OptionError as exc:
+        _refuse(exc)
+    activity.record("cc.sales_calc", user=user, request=request, page="/cost-control/sales-calculator",
+                    summary=f"Gramasi gula per menu: {out['saved']} perubahan")
     return out
 
 

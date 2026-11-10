@@ -21,7 +21,7 @@ from app.scope import COMPANY_NAMES, MAIN_COMPANY
 
 P = "integration_portal"
 LEVELS = ("No Sugar", "Less Sugar", "Normal Sugar", "Extra Sugar")
-NO_CARD = "(tanpa recipe card)"
+NO_CARD = "(no recipe card)"
 
 
 def sugar_level(name: str) -> Optional[str]:
@@ -230,10 +230,10 @@ def summary(d_from: date, d_to: date, branches: Optional[list[str]]) -> dict:
                        "noCard": sum(1 for m in out_menus if not m["card"])}}
 
 
-COLUMNS = [("month", "Bulan", 10), ("branch", "Kode Outlet", 12), ("branchName", "Outlet", 30), ("brand", "Brand", 14),
-           ("category", "Kategori", 14), ("sub", "Sub Kategori", 24), ("menu", "Menu", 32), ("card", "Recipe Card", 30),
-           ("variant", "Additional", 22), ("portions", "Porsi", 12), ("code", "Kode Bahan", 14), ("material", "Bahan Baku", 34),
-           ("unit", "Satuan", 9), ("qty", "Kebutuhan", 14), ("price", "Harga Satuan (Rp)", 16), ("value", "Nilai (Rp)", 16)]
+COLUMNS = [("month", "Month", 10), ("branch", "Branch Code", 12), ("branchName", "Branch", 30), ("brand", "Brand", 14),
+           ("category", "Category", 14), ("sub", "Sub Category", 24), ("menu", "Menu", 32), ("card", "Recipe Card", 30),
+           ("variant", "Additional", 22), ("portions", "Portions", 12), ("code", "Material Code", 14), ("material", "Raw Material", 34),
+           ("unit", "Unit", 9), ("qty", "Quantity Needed", 16), ("price", "Unit Price (Rp)", 16), ("value", "Value (Rp)", 16)]
 MAX_ROWS = 1_000_000  # Excel holds 1,048,576 rows a sheet
 
 
@@ -254,8 +254,8 @@ def workbook(d_from: date, d_to: date, branches: Optional[list[str]], per_branch
 def write_file(path: str, d_from: date, d_to: date, branches: Optional[list[str]], per_branch: bool = True,
                user: Optional[dict] = None, file_name: Optional[str] = None) -> int:
     """The Excel of the breakdown in the design of the Sales Transactions export (app/exports.py: the title rows, a bold
-    frozen header, column widths, a Ringkasan sheet): Data (one row per month × outlet × menu × additional × material,
-    ready for a Pivot Table from its header row), Per Bahan, Per Menu and Catatan."""
+    frozen header, column widths, a Summary sheet first): Data (one row per month × outlet × menu × additional × material,
+    ready for a Pivot Table from its header row), By Material and By Menu — every text in English (2026-11-10)."""
     from datetime import datetime
     from app.xlsx_stream import StreamingXlsxWriter
     got = rows(d_from, d_to, branches, per_branch=per_branch, per_month=True)
@@ -263,13 +263,13 @@ def write_file(path: str, d_from: date, d_to: date, branches: Optional[list[str]
     if len(data) > MAX_ROWS:
         raise mc.CostingError(f"{len(data):,} baris melebihi batas Excel: pilih outlet atau periode yang lebih pendek".replace(",", "."))
     cols = [c for c in COLUMNS if per_branch or c[0] not in ("branch", "branchName")]
-    file_name = file_name or f"Breakdown Bahan Baku {d_from:%Y%m%d}-{d_to:%Y%m%d}"
-    branch_label = "Semua Outlet" if not branches else ", ".join(sorted(branches)[:20]) + (" …" if len(branches) > 20 else "")
-    preamble = [["Breakdown Bahan Baku per Menu"], ["PT Yuda Prawira Group"], [],
+    file_name = file_name or f"Raw Material Breakdown {d_from:%Y%m%d}-{d_to:%Y%m%d}"
+    branch_label = "All Branches" if not branches else ", ".join(sorted(branches)[:20]) + (" …" if len(branches) > 20 else "")
+    preamble = [["Raw Material Breakdown per Menu"], ["PT Yuda Prawira Group"], [],
                 ["Generated", datetime.now().strftime("%d-%m-%Y %H:%M:%S")],
                 ["Period", f"{d_from:%d-%m-%Y} - {d_to:%d-%m-%Y}"],
                 ["Branch", branch_label],
-                ["Detail", "Per bulan, per outlet" if per_branch else "Per bulan, semua outlet digabung"],
+                ["Detail", "Per month, per branch" if per_branch else "Per month, all branches combined"],
                 ["Generated Username", (user or {}).get("full_name") or (user or {}).get("username") or "Integrated Portal"],
                 ["Report File Name", file_name], []]
     # per material and per menu, for the summary sheets
@@ -291,24 +291,24 @@ def write_file(path: str, d_from: date, d_to: date, branches: Optional[list[str]
             sheet.write_rows([[{**r, "branchName": names.get(r["branch"], r["branch"]), "brand": COMPANY_NAMES.get(r["company"], r["company"])}.get(k)
                                for k, _, _ in cols]
                               for r in sorted(data, key=lambda r: (r["month"], r["branch"], r["category"], r["sub"], r["menu"], r["variant"], r["material"]))])
-            xlsx.add_static_sheet("Per Bahan", [["Kode Bahan", "Bahan Baku", "Satuan", "Kebutuhan", "Harga Satuan (Rp)", "Nilai (Rp)"],
+            xlsx.add_static_sheet("By Material", [["Material Code", "Raw Material", "Unit", "Quantity Needed", "Unit Price (Rp)", "Value (Rp)"],
                                                 *([m["code"], m["material"], m["unit"], round(m["qty"], 3), m["price"], round(m["value"], 2)]
                                                   for m in sorted(mats.values(), key=lambda m: -m["value"]))],
                                   widths=[14, 36, 9, 16, 18, 18], bold_rows=(0,))
-            xlsx.add_static_sheet("Per Menu", [["Kategori", "Sub Kategori", "Menu", "Additional", "Porsi", "Nilai Bahan (Rp)"],
+            xlsx.add_static_sheet("By Menu", [["Category", "Sub Category", "Menu", "Additional", "Portions", "Material Value (Rp)"],
                                                *([cat, sub, menu, variant, round(sum(x["portions"].values()), 3), round(x["value"], 2)]
                                                  for (cat, sub, menu, variant), x in sorted(menus.items()))],
                                   widths=[14, 26, 34, 24, 14, 18], bold_rows=(0,))
-            summary = [["Ringkasan"], [], ["Periode", f"{d_from:%d-%m-%Y} - {d_to:%d-%m-%Y}"], ["Outlet", branch_label],
-                       ["Baris data", len(data)], ["Bahan baku", len([m for m in mats.values() if m["code"]])],
-                       ["Nilai bahan (Rp)", round(total_value, 2)],
-                       ["Menu tanpa recipe card", len({r["menuId"] for r in data if r["material"] == NO_CARD})], [],
-                       ["Catatan"],
-                       ["Porsi = porsi terjual menu itu dengan additional tersebut; porsi tanpa pilihan gula dihitung Normal Sugar."],
-                       ["Kebutuhan = porsi x bahan per porsi di recipe card; gula mengikuti gramasi per menu (Variants & Modifiers), selain itu aturan %."],
-                       ["Additional lain (Extra Shot, Cup Frosted, ...) menambah barisnya sendiri; penggantian cup memakai jumlah negatif untuk cup bawaan."],
-                       ["Harga = Pricelist pada akhir periode, selain itu HPP ESB; Nilai kosong = bahan belum berharga."],
-                       [f"Bahan Baku '{NO_CARD}' = menu yang belum punya recipe card."],
-                       [f"Pivot: pilih sheet Data mulai baris judul kolom (baris {len(preamble) + 1}), lalu Insert > PivotTable."]]
-            xlsx.add_static_sheet("Ringkasan", summary, widths=[26, 60], bold_rows=(0, 9), first=True)
+            summary = [["Summary"], [], ["Period", f"{d_from:%d-%m-%Y} - {d_to:%d-%m-%Y}"], ["Branch", branch_label],
+                       ["Data rows", len(data)], ["Raw materials", len([m for m in mats.values() if m["code"]])],
+                       ["Material value (Rp)", round(total_value, 2)],
+                       ["Menus without a recipe card", len({r["menuId"] for r in data if r["material"] == NO_CARD})], [],
+                       ["Notes"],
+                       ["Portions = the portions of the menu sold with that additional; portions without a sugar choice count as Normal Sugar."],
+                       ["Quantity Needed = portions x the material per portion on the recipe card; sugar follows the grams per menu (Variants & Modifiers), otherwise the % rule."],
+                       ["Other additionals (Extra Shot, Cup Frosted, ...) add rows of their own; a cup swap takes the default cup off with a negative quantity."],
+                       ["Unit Price = the Pricelist on the last day of the period, otherwise the ESB HPP; an empty Value = a material without a price."],
+                       [f"Raw Material '{NO_CARD}' = a menu that has no recipe card yet."],
+                       [f"Pivot: select the Data sheet from its column header row (row {len(preamble) + 1}), then Insert > PivotTable."]]
+            xlsx.add_static_sheet("Summary", summary, widths=[26, 60], bold_rows=(0, 9), first=True)
     return len(data)

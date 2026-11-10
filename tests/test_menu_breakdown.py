@@ -19,9 +19,9 @@ def test_the_excel_has_the_sales_transactions_layout(monkeypatch):
            "portions": 30.0, "code": "RMBV-00025", "material": "GULA AREN 1300GR", "unit": "GR", "qty": 300.0, "price": 30.0, "value": 9000.0}
     monkeypatch.setattr(mb, "rows", lambda *a, **k: {"rows": [row], "names": {"CTG54": "Kopi Calf Cempaka Putih"}})
     wb = load_workbook(io.BytesIO(mb.workbook(mb.date(2026, 8, 11), mb.date(2026, 11, 9), None, True, {"username": "cc"})))
-    assert wb.sheetnames == ["Ringkasan", "Data", "Per Bahan", "Per Menu"]
+    assert wb.sheetnames == ["Summary", "Data", "By Material", "By Menu"]
     data = wb["Data"]
-    assert data["A1"].value == "Breakdown Bahan Baku per Menu" and data["A1"].font.b
+    assert data["A1"].value == "Raw Material Breakdown per Menu" and data["A1"].font.b
     header = [c.value for c in data[11]]
-    assert header[:3] == ["Bulan", "Kode Outlet", "Outlet"] and data.freeze_panes == "A12"
+    assert header[:3] == ["Month", "Branch Code", "Branch"] and data.freeze_panes == "A12"
     assert [c.value for c in data[12]][2] == "Kopi Calf Cempaka Putih" and [c.value for c in data[12]][-1] == 9000

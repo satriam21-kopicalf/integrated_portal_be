@@ -151,7 +151,7 @@ REPORTS = {
     "daily": ("Daily Sales Recapitulation Report", "Daily_Sales_Recapitulation"),
     "menu": ("Sales Recapitulation per Menu", "Sales_Recapitulation_per_Menu"),
     # Sales Calculator → Breakdown (2026-11-10): the raw materials per menu × additional × outlet (app/menu_breakdown.py)
-    "breakdown": ("Breakdown Bahan Baku per Menu", "Breakdown_Bahan_Baku"),
+    "breakdown": ("Raw Material Breakdown per Menu", "Raw_Material_Breakdown"),
 }
 # reports written as one file (and one Google Sheet) instead of parts
 SINGLE_FILE_REPORTS = ("daily", "menu", "breakdown")

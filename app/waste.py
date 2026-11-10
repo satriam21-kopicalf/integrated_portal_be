@@ -219,8 +219,10 @@ def allowed_days() -> tuple[date, date]:
 COLUMNS = """e.id::text, e.user_id::text, e.username, e.full_name, e.role, e.branch_code, e.branch_name, e.business_date,
     e.scope, e.item_code, e.item_name, e.unit, e.qty, e.category, e.note, e.production_date, e.expired_date, e.qty_base, e.exploded, e.photo_taken_at, e.latitude, e.longitude,
     e.status, e.review_note, e.reviewed_by, e.reviewed_at, e.created_at, e.signature IS NOT NULL AS signed,
-    e.investigation_id::text AS investigation_id,
-    (SELECT count(*) FROM integration_portal.waste_correction c WHERE c.entry_id = e.id)::int AS corrections"""
+    e.investigation_id::text AS investigation_id"""
+# how many times Cost Control corrected the entry (migration 087); a new entry (RETURNING) has none
+COLUMNS_NEW = COLUMNS.replace("e.", "") + ", 0 AS corrections"
+COLUMNS += ", (SELECT count(*) FROM integration_portal.waste_correction c WHERE c.entry_id = e.id)::int AS corrections"
 
 
 def _view(r: dict) -> dict:
@@ -460,7 +462,7 @@ def create(user: dict, body: dict, device: Optional[str], ip: Optional[str]) -> 
                 signature, signature_type)
             VALUES (%(u)s, %(un)s, %(fn)s, %(role)s, %(bc)s, %(bn)s, %(d)s, %(s)s, %(ic)s, %(in)s, %(unit)s, %(q)s, %(g)s, %(x)s::jsonb, %(c)s,
                 %(n)s, %(pd)s, %(ed)s, %(p)s, %(pt)s, %(ta)s, %(lat)s, %(lng)s, %(dev)s, %(ip)s, %(sg)s, %(sgt)s)
-            RETURNING {COLUMNS.replace('e.', '')}""",
+            RETURNING {COLUMNS_NEW}""",
         {"u": user["id"], "un": user["username"], "fn": user.get("full_name"), "role": user["role"], "bc": branch["code"],
          "bn": branch["name"], "d": day, "s": scope, "ic": item["code"], "in": item["name"], "unit": unit, "q": qty, "g": grams,
          "x": json.dumps(comps) if comps is not None else None,

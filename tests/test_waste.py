@@ -252,3 +252,9 @@ def test_cost_control_corrects_an_entry_and_the_change_is_logged(monkeypatch):
     assert done["update"]["qty"] == Decimal("3.000") and done["update"]["business_date"] == date(2026, 10, 30)
     assert [r[1:4] for r in done["log"]] == [("qty", "5 PCS", "3 PCS"), ("category", "Packaging Rusak", "Premix Expired/ Over Stock"),
                                              ("businessDate", "2026-10-31", "2026-10-30")]
+
+
+def test_a_new_entry_returns_no_correction_subquery():
+    # 2026-11-10: the count of corrections in RETURNING compared waste_correction.id (bigint) to the entry id (uuid)
+    assert "waste_correction" not in waste.COLUMNS_NEW and "0 AS corrections" in waste.COLUMNS_NEW
+    assert "c.entry_id = e.id" in waste.COLUMNS

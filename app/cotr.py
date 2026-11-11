@@ -225,7 +225,7 @@ def _iso(v: Any) -> Any:
 
 def menus(active_only: bool = False) -> list[dict]:
     where = "WHERE is_active" if active_only else ""
-    return db.fetch(f"SELECT code, name, category, price, bom_code, is_active, sort FROM {P}.cotr_menu {where} ORDER BY sort, name")
+    return db.fetch(f"SELECT code, name, category, price, bom_code, is_active, sort, shelf_life_days FROM {P}.cotr_menu {where} ORDER BY sort, name")
 
 
 def driver_of(user: dict) -> Optional[dict]:

@@ -478,3 +478,20 @@ def batch_codes(pool: Optional[str], d_from: date, d_to: date) -> dict:
         result.append(b)
     result.sort(key=lambda b: (b["producedOn"] or "", b["menuName"], b["batchNo"]), reverse=True)
     return {"pool": pool, "from": d_from.isoformat(), "to": d_to.isoformat(), "batches": result}
+
+
+def adjust_lot(user: dict, pool: str, day: date, menu: str, batch: str, qty: int) -> dict:
+    """The cups of one production / batch code in the physical leftover of a pool on a day, corrected (0 = none left):
+    the balance of that day and the opening of the next follow. Returns the old and the new quantity."""
+    if qty < 0:
+        raise CotrError("Jumlah tidak boleh minus")
+    with db.transaction() as conn:
+        rows = conn.execute(f"""SELECT id, qty FROM {P}.cotr_pool_count WHERE pool_code = %s AND day = %s AND menu_code = %s
+                                 AND batch_no = %s FOR UPDATE""", (pool, day, menu, batch)).fetchall()
+        if not rows:
+            raise CotrError("Kode batch tidak ada di hitungan pool hari itu")
+        old = sum(r["qty"] for r in rows)
+        conn.execute(f"DELETE FROM {P}.cotr_pool_count WHERE id = ANY(%s)", ([r["id"] for r in rows],))
+        conn.execute(f"""INSERT INTO {P}.cotr_pool_count (pool_code, day, menu_code, batch_no, qty, source, created_by)
+                         VALUES (%s, %s, %s, %s, %s, 'manual', %s)""", (pool, day, menu, batch, qty, user["id"]))
+    return {"pool": pool, "day": day.isoformat(), "menu": menu, "batchNo": batch, "old": old, "new": qty}

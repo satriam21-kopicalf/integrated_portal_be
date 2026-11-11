@@ -63,6 +63,7 @@ Portal (Monitoring COTR):
     POST /api/cotr/pool-ledger/import           page cotr.production: {"pool", "file" | "upload", "dateFrom", "dateTo", "apply"} the pool
                                                 workbook (sheets Product, Report Armada) saved as source 'sheet'
     GET  /api/cotr/batch-codes?pool=&dateFrom=&dateTo=   the production / batch codes counted at the pools (SSDD)
+    PUT  /api/cotr/batch-codes/qty              {"pool", "day", "menu", "batchNo", "qty", "reason"} correct the cups of a code
     GET  /api/cotr/report-armada?pool=&dateFrom=&dateTo=   B / S / C / W / T per driver, cash, QRIS, operational
     GET  /api/cotr/area-requests?dateFrom=&dateTo=&status=&pool=   page cotr.schedule / cotr.check-in (088)
     POST /api/cotr/area-requests/{id}/decide    page cotr.schedule: {"approve", "note", "code", "name", "address", "city"}
@@ -718,6 +719,23 @@ def pool_import(body: WorkbookIn, request: Request, user: dict = Depends(require
         if body.upload:
             shutil.rmtree(_upload_path(user, body.upload), ignore_errors=True)
         _log(request, user, "cotr.pool-import", f"COTR import workbook {body.pool} dari {body.dateFrom}", out)
+    return out
+
+
+class LotIn(BaseModel):
+    pool: str = Field(min_length=1, max_length=40)
+    day: date
+    menu: str = Field(min_length=1, max_length=40)
+    batchNo: str = Field(min_length=1, max_length=40)
+    qty: int = Field(ge=0, le=100_000)
+    reason: str = Field(min_length=3, max_length=300)
+
+
+@router.put("/batch-codes/qty")
+def batch_code_qty(body: LotIn, request: Request, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    out = _call(cotr_ledger.adjust_lot, user, body.pool, body.day, body.menu, body.batchNo, body.qty)
+    _log(request, user, "cotr.batch-code.adjust", f"COTR kode batch {body.batchNo} {body.pool} {body.day}: {out['old']} -> {out['new']} cup ({body.reason})",
+         out | {"reason": body.reason})
     return out
 
 

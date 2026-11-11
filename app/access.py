@@ -146,12 +146,6 @@ PER_USER_FORMS = ("form.surveyor-check-in", "form.wwwr")  # WW-WR: the SWAT team
 # the WW-WR team (2026-11-04): accounts assigned Form WW-WR or Monitoring WW-WR; a super admin opens every page anyway, so
 # for one these are kept as markers only (user_page rows) that put it in the team
 TEAM_PAGES = ("form.wwwr", "mon.wwwr")
-# the menu of the SWAT team in the Operations app (2026-11-10): Home, Dashboard, Sales, the Product / Outlet / WW-WR
-# forms, Fund Request and Aggregator only — display only, the portal and the rights stay as they are
-SWAT_OPERATIONS_PAGES = ("overview", "sales", "form.product", "form.outlet", "form.wwwr", "form.pengajuan",
-                         "rating.grabfood", "rating.google-maps", "rating.shopeefood", "rating.gofood")
-
-
 def in_swat_team(user: dict) -> bool:
     """In the WW-WR (SWAT) team: assigned Form or Monitoring WW-WR; a super admin by its marker only."""
     if user.get("role") == "superadmin":

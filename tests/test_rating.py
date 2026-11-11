@@ -41,8 +41,12 @@ def place(pid, name, lat, lng):
 
 def test_rating_pages_off_by_default():
     assert {f"rating.{s}" for s in SOURCES} <= set(access.PAGE_KEYS)
-    for pages in access.DEFAULT_ROLE_PAGES.values():
-        assert not any(p.startswith("rating.") for p in pages)
+    # migration 091 (2026-11-11): the outlet / HUB accounts open every Aggregator page; the other roles stay off
+    for role, pages in access.DEFAULT_ROLE_PAGES.items():
+        if role == "outlet":
+            assert {f"rating.{s}" for s in SOURCES} <= set(pages)
+        else:
+            assert not any(p.startswith("rating.") for p in pages)
 
 
 def test_rating_endpoints_follow_their_pages(anon, store, page_access, places):

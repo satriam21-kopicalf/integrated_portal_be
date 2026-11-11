@@ -311,14 +311,31 @@ def report_armada(pool: str, d_from: date, d_to: date) -> dict:
 
 # ---------------------------------------------------------------- the pool workbooks (sheets Product and Report Armada)
 
-def _driver_by_label(pool: str) -> dict[str, str]:
-    """The drivers of a pool by the names the sheets use ("BNI 10 DAHLAN" → the driver nicknamed Dahlan)."""
-    out: dict[str, str] = {}
-    for d in db.fetch(f"SELECT code, name, nickname FROM {P}.cotr_driver WHERE pool_code = %s", (pool,)):
-        for n in (d["nickname"], (d["name"] or "").split(" ")[0]):
-            if n:
-                out.setdefault(n.strip().lower(), d["code"])
-    return out
+def _key(text: str) -> str:
+    return re.sub(r"[^a-z]", "", (text or "").lower())
+
+
+def _driver_by_label(pool: str) -> list[tuple[str, str, str]]:
+    """The drivers of a pool as (nickname, full name, code), letters only, to find the names the sheets use."""
+    return [(_key(d["nickname"] or ""), _key(d["name"] or ""), d["code"])
+            for d in db.fetch(f"SELECT code, name, nickname FROM {P}.cotr_driver WHERE pool_code = %s", (pool,))]
+
+
+def _match(label: str, drivers: list[tuple[str, str, str]]) -> Optional[str]:
+    """"BNI 10 DAHLAN" → the driver nicknamed Dahlan; "BAHANUALI" → Bahanu Ali; "M.APRIZAL" → Muhammad Aprizal."""
+    words = label.split()
+    name = " ".join(w for w in words if not re.fullmatch(r"(BNI|BRI|BCA|MANDIRI|\d+)", w.upper()))
+    k = _key(name)
+    if len(k) < 3:
+        return None
+    first = _key(name.replace(".", " ").split()[-1] if "." in name else name.split()[0])
+    for test in (lambda n, f: k == n or k == f,                      # the nickname or the full name
+                 lambda n, f: bool(n) and (k.startswith(n) or n.startswith(k)),
+                 lambda n, f: k in f or (len(first) >= 4 and first in f)):
+        hit = [c for n, f, c in drivers if test(n, f)]
+        if len(hit) == 1:
+            return hit[0]
+    return None
 
 
 def import_workbook(user: dict, pool: str, data: bytes, d_from: date, d_to: Optional[date], apply: bool) -> dict:
@@ -358,8 +375,7 @@ def import_workbook(user: dict, pool: str, data: bytes, d_from: date, d_to: Opti
             continue
         if not d_from <= d <= d_to:
             continue
-        words = [w.lower() for w in r["label"].split()]
-        code = next((drivers[w] for w in words[2:] + words if w in drivers), None)
+        code = _match(r["label"], drivers)
         reports.append((d, r, code))
     summary = {"days": [d.isoformat() for d in sorted(days) if d >= d_from], "counts": len(counts), "figures": len(moves),
                "reports": len(reports), "unmatched": sorted({r["label"] for _, r, c in reports if not c})}

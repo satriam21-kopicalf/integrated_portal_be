@@ -117,6 +117,9 @@ def parse_report(rows: list[tuple], menus: dict[str, dict]) -> list[dict]:
     while i < len(rows):
         r = rows[i]
         label = r[1] if len(r) > 2 else None
+        if isinstance(label, str) and label.strip().upper().startswith("TOTAL"):  # the totals of the sheet, not an armada
+            i += 13
+            continue
         if isinstance(label, str) and label.strip() and isinstance(r[2], str) and menu_of(r[2], menus):
             block = rows[i:i + 13]
             by = {str(x[2] or "").strip().upper(): x for x in block}

@@ -36,3 +36,12 @@ def test_a_batch_code_is_the_sequence_and_the_day():
     assert L.batch_day("0210", date(2026, 11, 11)) == date(2026, 11, 10)
     assert L.batch_day("0128", date(2026, 11, 2)) == date(2026, 10, 28)
     assert L.batch_day("x", date(2026, 11, 2)) is None
+
+
+def test_the_names_of_the_report_armada_find_their_driver():
+    drivers = [("dahlan", "dahlanputra", "D1"), ("bahanuali", "bahanualinuhugraha", "D2"), ("", "muhammadaprizal", "D3"), ("adit", "aditfirmansyah", "D4"),
+               ("adit", "aditya", "D5")]
+    assert L._match("BNI 10 DAHLAN", drivers) == "D1"
+    assert L._match("BNI 147 BAHANUALI", drivers) == "D2"
+    assert L._match("BNI 37 M.APRIZAL", drivers) == "D3"
+    assert L._match("BNI 91 ADIT", drivers) is None  # two Adit: not guessed

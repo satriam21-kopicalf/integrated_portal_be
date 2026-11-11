@@ -8,7 +8,8 @@
     − waste    = of the drivers at check out + of the pool
     − cupping  = of the drivers at check out + of the pool
     = calculated; actual = the physical count (per production / batch code); balance = actual − calculated.
-A day taken from the sheets (source 'sheet') keeps the figures of the sheet instead of the app's.
+A day taken from the sheets (source 'sheet') keeps the figures of the sheet; else the ESB company COTR when it has
+documents that day (source 'esb': simple sales, transfers, cupping / waste journals, app/cotr_esb.py); else the app.
 The first count of a pool is its opening stock: the stock runs from the day after it.
 """
 import re
@@ -119,6 +120,8 @@ def run(pool: str, d_from: date, d_to: date) -> dict:
     counts = _counts(pool, start, d_to)
     system = _system(pool, start + timedelta(days=1), d_to)
     moves, sheet = _moves(pool, start + timedelta(days=1), d_to)
+    from app import cotr_esb  # migration 090: the ESB company COTR, where the workbooks have no day
+    esb = cotr_esb.figures(start + timedelta(days=1), d_to).get(pool, {})
     batches = {r["batch_no"]: r["expires_on"] for r in db.fetch(
         f"SELECT batch_no, expires_on FROM {P}.cotr_batch WHERE produced_on >= %s", (start - timedelta(days=30),))}
     codes = [m["code"] for m in listed]
@@ -142,7 +145,8 @@ def run(pool: str, d_from: date, d_to: date) -> dict:
         rows = {}
         for c in codes:
             f = {k: 0 for k in KINDS}
-            srcs = [moves.get(d) or {}] if d in sheet else [system.get(d) or {}, moves.get(d) or {}]
+            # one source a day, never two: the workbook, else ESB, else the app (the entered moves add to ESB / the app)
+            srcs = [moves.get(d) or {}] if d in sheet else [esb[d], moves.get(d) or {}] if d in esb else [system.get(d) or {}, moves.get(d) or {}]
             for src in srcs:
                 for k, v in src.get(c, {}).items():
                     f[k] += v
@@ -156,7 +160,7 @@ def run(pool: str, d_from: date, d_to: date) -> dict:
                        "balance": actual - calc if actual is not None else None, "expired": exp, "lots": lots}
             left[c], gone[c] = (actual if actual is not None else calc), exp
         if d >= d_from:
-            out_days.append({"day": d.isoformat(), "source": "sheet" if d in sheet else "app", "rows": rows})
+            out_days.append({"day": d.isoformat(), "source": "sheet" if d in sheet else "esb" if d in esb else "app", "rows": rows})
         d += timedelta(days=1)
     return base | {"days": out_days}
 
@@ -239,30 +243,40 @@ def save_moves(user: dict, pool: str, day: date, kind: str, lines: dict[str, int
     return run(pool, day, day)
 
 
-def available(pool: str, day: date, except_driver: Optional[str] = None) -> Optional[dict[str, int]]:
-    """Cups a pool can still give on `day`: opening + transfer + arrived − given to the drivers (assignments, reloads)
-    + brought back at check out − waste and cupping of the pool; None when the pool has no count before that day."""
+def availability(pool: str, day: date, except_driver: Optional[str] = None) -> Optional[dict[str, dict]]:
+    """Per menu what a pool can still give on `day`: opening (the physical leftover of the day before) + transfer +
+    arrived (the workbook, else ESB simple transfers, else the batches received) − given to the drivers (assignments,
+    reloads) + brought back at check out − waste and cupping of the pool = left. None when the pool has no count
+    before that day (not checked). The assignment of `except_driver` that is being changed is not counted."""
     start = first_count(pool)
     if not start or start >= day:
         return None
     rows = run(pool, day, day)["days"][-1]["rows"]
-    left = {c: x["opening"] + x["transfer"] + x["arrived"] for c, x in rows.items()}
+    out = {c: {"opening": x["opening"], "in": x["transfer"] + x["arrived"], "given": 0, "back": 0, "used": 0} for c, x in rows.items()}
 
-    def take(lines: Optional[dict], sign: int = -1) -> None:
+    def add(lines: Optional[dict], key: str) -> None:
         for k, v in (lines or {}).items():
-            left[k] = left.get(k, 0) + sign * int(v)
+            out.setdefault(k, {"opening": 0, "in": 0, "given": 0, "back": 0, "used": 0})[key] += int(v)
     for x in db.fetch(f"SELECT driver_code, status, lines, final_lines FROM {P}.cotr_dispatch WHERE pool_code = %s AND day = %s", (pool, day)):
         if x["driver_code"] != except_driver:
-            take(x["final_lines"] if x["status"] == "accepted" else x["lines"])
+            add(x["final_lines"] if x["status"] == "accepted" else x["lines"], "given")
     for x in db.fetch(f"""SELECT r.* FROM {P}.cotr_reload r JOIN {P}.cotr_shift s ON s.id = r.shift_id
                            WHERE s.pool_code = %s AND s.day = %s AND r.status IN ('approved', 'disputed', 'received')""", (pool, day)):
-        take(received(x) if x["status"] == "received" else (x["approved_lines"] or x["lines"]))
+        add(received(x) if x["status"] == "received" else (x["approved_lines"] or x["lines"]), "given")
     for x in db.fetch(f"SELECT end_stock FROM {P}.cotr_shift WHERE pool_code = %s AND day = %s AND status = 'closed'", (pool, day)):
-        take(x["end_stock"], +1)
+        add(x["end_stock"], "back")
     for x in db.fetch(f"""SELECT menu_code, sum(qty) AS qty FROM {P}.cotr_waste WHERE pool_code = %s AND day = %s
                            AND menu_code IS NOT NULL GROUP BY 1""", (pool, day)):
-        take({x["menu_code"]: x["qty"]})
-    return left
+        add({x["menu_code"]: x["qty"]}, "used")
+    for v in out.values():
+        v["left"] = v["opening"] + v["in"] - v["given"] + v["back"] - v["used"]
+    return out
+
+
+def available(pool: str, day: date, except_driver: Optional[str] = None) -> Optional[dict[str, int]]:
+    """Cups a pool can still give on `day` ({menu: cups}); None when it has no count yet (see availability)."""
+    a = availability(pool, day, except_driver)
+    return {k: v["left"] for k, v in a.items()} if a is not None else None
 
 
 def check_assignment(pool: Optional[str], day: date, driver: str, lines: dict) -> None:

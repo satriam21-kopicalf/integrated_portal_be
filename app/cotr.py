@@ -756,7 +756,7 @@ def handle_issue(user: dict, issue_id: str, data: dict) -> dict:
 MASTERS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
     "pools": ("cotr_pool", "code", ("code", "name", "kind", "parent_code", "city", "address", "storage", "is_active",
                                     "latitude", "longitude", "radius_m", "pic_name", "phone", "open_time", "close_time", "note",
-                                    "is_production"),
+                                    "is_production", "esb_branch_code"),
               "kind, name"),
     "fleet": ("cotr_fleet", "code", ("code", "name", "type", "plate", "pool_code", "capacity", "condition", "last_service",
                                      "is_active", "brand", "model", "frame_no", "acquired_on", "qris_bank", "qris_nmid",
@@ -1213,6 +1213,23 @@ def photo_owner(kind: str, row_id: str) -> Optional[str]:
     return r["driver_code"] if r else None
 
 
+def _esb_days(d0: date, d1: date, kinds: tuple[str, ...], pool: Optional[str] = None) -> list[dict]:
+    """The ESB company COTR per pool day where the workbooks have none (migration 090): rows {day, code, kind, qty}."""
+    from app import cotr_esb
+    sheet = {(r["pool_code"], r["day"]) for r in db.fetch(
+        f"SELECT DISTINCT pool_code, day FROM {P}.cotr_pool_move WHERE source = 'sheet' AND day BETWEEN %s AND %s", (d0, d1))}
+    out = []
+    for p, days in cotr_esb.figures(d0, d1).items():
+        if pool and p != pool:
+            continue
+        for d, menus_ in days.items():
+            if (p, d) in sheet:
+                continue
+            for code, f in menus_.items():
+                out += [{"day": d, "code": code, "kind": k, "qty": f[k]} for k in kinds if f.get(k)]
+    return out
+
+
 def production(days: int, buffer_pct: float) -> dict:
     """The production plan from the sales of the last `days` days (cups per menu and day, every driver)."""
     rows = db.fetch(
@@ -1224,6 +1241,7 @@ def production(days: int, buffer_pct: float) -> dict:
     rows = list(rows) + db.fetch(
         f"""SELECT day, menu_code AS code, sum(qty) AS qty FROM {P}.cotr_pool_move
              WHERE source = 'sheet' AND kind = 'sold' AND day >= current_date - %s AND day < current_date GROUP BY 1, 2""", (days,))
+    rows += [r for r in _esb_days(today() - timedelta(days=days), today() - timedelta(days=1), ("sold",))]
     merged: dict[tuple, int] = {}
     for r in rows:
         merged[(r["day"], r["code"])] = merged.get((r["day"], r["code"]), 0) + int(r["qty"])
@@ -1411,6 +1429,9 @@ def usage(d_from: date, d_to: date, pool: Optional[str]) -> dict:
                            WHERE source = 'sheet' AND kind IN ('sold', 'waste', 'cupping') AND day BETWEEN %s AND %s {sw} GROUP BY 1, 2""",
                       (d_from, d_to, *sa)):
         cups.setdefault(r["menu_code"], {"sold": 0, "waste": 0, "cupping": 0})[r["kind"]] += int(r["qty"])
+    # migration 090: the ESB company COTR (simple sales, cupping / waste journals) where the workbooks have no day
+    for r in _esb_days(d_from, d_to, ("sold", "waste", "cupping"), pool):
+        cups.setdefault(r["code"], {"sold": 0, "waste": 0, "cupping": 0})[r["kind"]] += r["qty"]
     # migration 088: the cups wasted or given for tasting at the pools / HUBs
     pw, pa = ("AND pool_code = %s", (pool,)) if pool else ("", ())
     for r in db.fetch(f"""SELECT menu_code, kind, sum(qty) AS qty FROM {P}.cotr_waste

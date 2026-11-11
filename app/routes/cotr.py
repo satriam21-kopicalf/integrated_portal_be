@@ -62,8 +62,11 @@ Portal (Monitoring COTR):
     POST /api/cotr/uploads                      page cotr.production: {"upload", "index", "data"} a part of a big file
     POST /api/cotr/pool-ledger/import           page cotr.production: {"pool", "file" | "upload", "dateFrom", "dateTo", "apply"} the pool
                                                 workbook (sheets Product, Report Armada) saved as source 'sheet'
+    GET  /api/cotr/pool-available?pool=&day=    what a pool can still assign today per menu
     GET  /api/cotr/batch-codes?pool=&dateFrom=&dateTo=   the production / batch codes counted at the pools (SSDD)
     PUT  /api/cotr/batch-codes/qty              {"pool", "day", "menu", "batchNo", "qty", "reason"} correct the cups of a code
+    GET  /api/cotr/esb/summary | /esb/documents?module=&dateFrom=&dateTo=&branch=&q= | /esb/documents/{module}/{num} |
+         /esb/lines?module=&...      the ESB company COTR (CALF5, integration_esb_cotr, migration 090)
     GET  /api/cotr/report-armada?pool=&dateFrom=&dateTo=   B / S / C / W / T per driver, cash, QRIS, operational
     GET  /api/cotr/area-requests?dateFrom=&dateTo=&status=&pool=   page cotr.schedule / cotr.check-in (088)
     POST /api/cotr/area-requests/{id}/decide    page cotr.schedule: {"approve", "note", "code", "name", "address", "city"}
@@ -81,7 +84,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from app import activity, cotr, cotr_ledger
+from app import activity, cotr, cotr_esb, cotr_ledger
 from app.access import deny, has_page, require_page
 from app.pic_checkin import CheckInError
 from app.routes.auth import current_user, require_roles
@@ -739,6 +742,16 @@ def batch_code_qty(body: LotIn, request: Request, user: dict = Depends(require_p
     return out
 
 
+@router.get("/pool-available")
+def pool_available(pool: str, day: Optional[date] = None, _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    """What the pool can still assign to its drivers today, per menu (opening + arrived / transfer − given …)."""
+    d = day or today()
+    a = _call(cotr_ledger.availability, pool, d)
+    menus = {m["code"]: m["name"] for m in cotr.menus(active_only=True)}
+    return {"pool": pool, "day": d.isoformat(), "counted": a is not None,
+            "rows": [{"menu": c, "name": menus.get(c, c), **v} for c, v in (a or {}).items() if c in menus]}
+
+
 @router.get("/batch-codes")
 def batch_codes(pool: Optional[str] = None, dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
                 _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
@@ -747,6 +760,38 @@ def batch_codes(pool: Optional[str] = None, dateFrom: Optional[date] = None, dat
     if (end - start).days > 92:
         raise HTTPException(422, detail="Periode paling lama 92 hari")
     return cotr_ledger.batch_codes(pool, start, end)
+
+
+# ---------------------------------------------------------------- the ESB company COTR (migration 090)
+
+@router.get("/esb/summary")
+def esb_summary(_: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    return cotr_esb.summary()
+
+
+@router.get("/esb/documents")
+def esb_documents(module: str, dateFrom: Optional[date] = None, dateTo: Optional[date] = None, branch: Optional[str] = None,
+                  q: Optional[str] = Query(None, max_length=80), _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    end = dateTo or today()
+    start = dateFrom or end.replace(day=1)
+    if (end - start).days > 400:
+        raise HTTPException(422, detail="Periode paling lama 400 hari")
+    return _call(cotr_esb.documents, module, start, end, branch, q)
+
+
+@router.get("/esb/lines")
+def esb_lines(module: str, dateFrom: Optional[date] = None, dateTo: Optional[date] = None, branch: Optional[str] = None,
+              _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    end = dateTo or today()
+    start = dateFrom or end.replace(day=1)
+    if (end - start).days > 400:
+        raise HTTPException(422, detail="Periode paling lama 400 hari")
+    return {"data": _call(cotr_esb.lines, module, start, end, branch)}
+
+
+@router.get("/esb/documents/{module}/{doc_num}")
+def esb_document(module: str, doc_num: str, _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    return _call(cotr_esb.document, module, doc_num)
 
 
 @router.get("/report-armada")

@@ -59,7 +59,8 @@ Portal (Monitoring COTR):
     GET  /api/cotr/pool-ledger?pool=&dateFrom=&dateTo=   page cotr.storage / cotr.production: the sheet "Product" (089)
     PUT  /api/cotr/pool-count                   {"pool", "day", "lines": [{"menu", "qty", "batchNo", "expiresOn"}]} the physical leftover
     PUT  /api/cotr/pool-moves                   {"pool", "day", "kind": transfer|arrived, "lines": {menu: cups}, "note"}
-    POST /api/cotr/pool-ledger/import           page cotr.production: {"pool", "file", "dateFrom", "dateTo", "apply"} the pool
+    POST /api/cotr/uploads                      page cotr.production: {"upload", "index", "data"} a part of a big file
+    POST /api/cotr/pool-ledger/import           page cotr.production: {"pool", "file" | "upload", "dateFrom", "dateTo", "apply"} the pool
                                                 workbook (sheets Product, Report Armada) saved as source 'sheet'
     GET  /api/cotr/report-armada?pool=&dateFrom=&dateTo=   B / S / C / W / T per driver, cash, QRIS, operational
     GET  /api/cotr/area-requests?dateFrom=&dateTo=&status=&pool=   page cotr.schedule / cotr.check-in (088)
@@ -69,7 +70,10 @@ Portal (Monitoring COTR):
 import base64
 import binascii
 import re
+import shutil
+import time
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -79,6 +83,7 @@ from app import activity, cotr, cotr_ledger
 from app.access import deny, has_page, require_page
 from app.pic_checkin import CheckInError
 from app.routes.auth import current_user, require_roles
+from app.config import get_settings
 from app.utils import today
 from app.thumbs import image_response
 
@@ -657,20 +662,60 @@ def pool_moves(body: MovesIn, request: Request, user: dict = Depends(require_pag
 
 class WorkbookIn(BaseModel):
     pool: str = Field(min_length=1, max_length=40)
-    file: str = Field(min_length=10, max_length=40_000_000)  # base64 xlsx
+    file: Optional[str] = Field(None, max_length=4_000_000)  # base64 xlsx (small files)
+    upload: Optional[str] = Field(None, pattern=r"^[a-f0-9]{32}$")  # or a file sent in parts (POST /uploads)
     dateFrom: date
     dateTo: Optional[date] = None
     apply: bool = False
 
 
-@router.post("/pool-ledger/import")
-def pool_import(body: WorkbookIn, request: Request, user: dict = Depends(require_page("cotr.production"))):
+class PartIn(BaseModel):
+    upload: str = Field(pattern=r"^[a-f0-9]{32}$")
+    index: int = Field(ge=0, le=40)
+    data: str = Field(min_length=1, max_length=3_500_000)  # base64 of one part
+
+
+_UPLOADS = Path(get_settings().media_dir) / "cotr-uploads"
+
+
+def _upload_path(user: dict, upload: str, index: Optional[int] = None) -> Path:
+    base = _UPLOADS / f"{user['id']}-{upload}"
+    return base / f"{index:03d}" if index is not None else base
+
+
+@router.post("/uploads")
+def upload_part(body: PartIn, user: dict = Depends(require_page("cotr.production"))):
+    """A part of a big file (a pool workbook is several MB, more than a request through the portal carries)."""
     try:
-        data = base64.b64decode(body.file.split(",")[-1])
+        data = base64.b64decode(body.data.split(",")[-1])
     except (binascii.Error, ValueError):
         raise HTTPException(422, detail="File tidak dapat dibaca") from None
+    folder = _upload_path(user, body.upload)
+    folder.mkdir(parents=True, exist_ok=True)
+    for old in _UPLOADS.glob("*"):  # parts older than a day are left over
+        if old.is_dir() and old.stat().st_mtime < time.time() - 86400:
+            shutil.rmtree(old, ignore_errors=True)
+    _upload_path(user, body.upload, body.index).write_bytes(data)
+    return {"ok": True}
+
+
+@router.post("/pool-ledger/import")
+def pool_import(body: WorkbookIn, request: Request, user: dict = Depends(require_page("cotr.production"))):
+    if body.upload:
+        folder = _upload_path(user, body.upload)
+        parts = sorted(folder.glob("[0-9][0-9][0-9]")) if folder.is_dir() else []
+        if not parts:
+            raise HTTPException(422, detail="File belum terkirim")
+        data = b"".join(p.read_bytes() for p in parts)
+    else:
+        try:
+            data = base64.b64decode((body.file or "").split(",")[-1])
+        except (binascii.Error, ValueError):
+            raise HTTPException(422, detail="File tidak dapat dibaca") from None
     out = _call(cotr_ledger.import_workbook, user, body.pool, data, body.dateFrom, body.dateTo, body.apply)
     if body.apply:
+        if body.upload:
+            shutil.rmtree(_upload_path(user, body.upload), ignore_errors=True)
         _log(request, user, "cotr.pool-import", f"COTR import workbook {body.pool} dari {body.dateFrom}", out)
     return out
 

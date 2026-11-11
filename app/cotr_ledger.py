@@ -438,3 +438,43 @@ def import_workbook(user: dict, pool: str, data: bytes, d_from: date, d_to: Opti
                                  operational_note = EXCLUDED.operational_note""",
                          (pool, d, r["label"], code, Jsonb(r["lines"]), r["qris"], r["cashActual"], r["operational"], r["operationalNote"]))
     return summary | {"saved": True}
+
+
+# ---------------------------------------------------------------- the production / batch codes counted at the pools
+
+def batch_codes(pool: Optional[str], d_from: date, d_to: date) -> dict:
+    """Every production / batch code (SSDD) counted in the physical leftover of the pools in the period, per menu: the
+    day it was made, its expiry, the days it was counted, and per pool the cups of its last count; active or expired."""
+    menus = _menu_map()
+    rows = db.fetch(f"""SELECT c.pool_code, c.day, c.menu_code, c.batch_no, c.qty, c.expires_on, p.name AS pool_name
+                          FROM {P}.cotr_pool_count c JOIN {P}.cotr_pool p ON p.code = c.pool_code
+                         WHERE c.batch_no IS NOT NULL AND c.day BETWEEN %s AND %s AND (%s::text IS NULL OR c.pool_code = %s)
+                         ORDER BY c.day""", (d_from, d_to, pool, pool))
+    batches = {r["batch_no"]: r["expires_on"] for r in db.fetch(
+        f"SELECT batch_no, expires_on FROM {P}.cotr_batch WHERE produced_on >= %s", (d_from - timedelta(days=30),))}
+    out: dict[tuple, dict] = {}
+    for r in rows:
+        made = batch_day(r["batch_no"], r["day"])
+        key = (r["menu_code"], r["batch_no"], made)
+        b = out.setdefault(key, {"menu": r["menu_code"], "menuName": (menus.get(r["menu_code"]) or {}).get("name", r["menu_code"]),
+                                 "batchNo": r["batch_no"], "sequence": int(r["batch_no"][:2]) if r["batch_no"][:2].isdigit() else None,
+                                 "producedOn": _iso(made), "expiresOn": None, "firstCounted": _iso(r["day"]), "lastCounted": None,
+                                 "pools": {}})
+        exp = r["expires_on"] or expiry(r["batch_no"], menus.get(r["menu_code"], {}), r["day"], batches)
+        b["expiresOn"] = _iso(exp) or b["expiresOn"]
+        b["lastCounted"] = _iso(r["day"])
+        p = b["pools"].setdefault(r["pool_code"], {"pool": r["pool_code"], "poolName": r["pool_name"], "day": None, "qty": 0, "counts": 0})
+        if p["day"] != _iso(r["day"]):
+            p["day"], p["qty"], p["counts"] = _iso(r["day"]), 0, p["counts"] + 1
+        p["qty"] += r["qty"]
+    today_iso = today().isoformat()
+    result = []
+    for b in out.values():
+        pools = sorted(b["pools"].values(), key=lambda x: x["poolName"])
+        last_left = sum(p["qty"] for p in pools if p["day"] == b["lastCounted"])
+        b["pools"] = pools
+        b["left"] = last_left
+        b["status"] = "expired" if b["expiresOn"] and b["expiresOn"] < today_iso else "active"
+        result.append(b)
+    result.sort(key=lambda b: (b["producedOn"] or "", b["menuName"], b["batchNo"]), reverse=True)
+    return {"pool": pool, "from": d_from.isoformat(), "to": d_to.isoformat(), "batches": result}

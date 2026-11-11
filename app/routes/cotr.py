@@ -62,6 +62,7 @@ Portal (Monitoring COTR):
     POST /api/cotr/uploads                      page cotr.production: {"upload", "index", "data"} a part of a big file
     POST /api/cotr/pool-ledger/import           page cotr.production: {"pool", "file" | "upload", "dateFrom", "dateTo", "apply"} the pool
                                                 workbook (sheets Product, Report Armada) saved as source 'sheet'
+    GET  /api/cotr/batch-codes?pool=&dateFrom=&dateTo=   the production / batch codes counted at the pools (SSDD)
     GET  /api/cotr/report-armada?pool=&dateFrom=&dateTo=   B / S / C / W / T per driver, cash, QRIS, operational
     GET  /api/cotr/area-requests?dateFrom=&dateTo=&status=&pool=   page cotr.schedule / cotr.check-in (088)
     POST /api/cotr/area-requests/{id}/decide    page cotr.schedule: {"approve", "note", "code", "name", "address", "city"}
@@ -718,6 +719,16 @@ def pool_import(body: WorkbookIn, request: Request, user: dict = Depends(require
             shutil.rmtree(_upload_path(user, body.upload), ignore_errors=True)
         _log(request, user, "cotr.pool-import", f"COTR import workbook {body.pool} dari {body.dateFrom}", out)
     return out
+
+
+@router.get("/batch-codes")
+def batch_codes(pool: Optional[str] = None, dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
+                _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    end = dateTo or today()
+    start = dateFrom or end.replace(day=1)
+    if (end - start).days > 92:
+        raise HTTPException(422, detail="Periode paling lama 92 hari")
+    return cotr_ledger.batch_codes(pool, start, end)
 
 
 @router.get("/report-armada")

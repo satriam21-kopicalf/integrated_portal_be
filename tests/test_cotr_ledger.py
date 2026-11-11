@@ -57,3 +57,15 @@ def test_every_pool_adds_up(monkeypatch):
     out = L.run_all(date(2026, 11, 8), date(2026, 11, 8))
     r = out["days"][0]["rows"]["PRM"]
     assert (r["opening"], r["calculated"], r["actual"], out["days"][0]["source"]) == (14, 15, 11, "mixed")
+
+
+def test_the_batch_codes_counted_at_the_pools(monkeypatch):
+    monkeypatch.setattr(L, "_menu_map", lambda: MENUS)
+    monkeypatch.setattr(L, "today", lambda: date(2026, 11, 11))
+    rows = [{"pool_code": "A", "pool_name": "Pool A", "day": date(2026, 11, 8), "menu_code": "PRM", "batch_no": "0808", "qty": 480, "expires_on": None},
+            {"pool_code": "A", "pool_name": "Pool A", "day": date(2026, 11, 9), "menu_code": "PRM", "batch_no": "0808", "qty": 136, "expires_on": None},
+            {"pool_code": "A", "pool_name": "Pool A", "day": date(2026, 11, 8), "menu_code": "PRM", "batch_no": "0407", "qty": 30, "expires_on": None}]
+    monkeypatch.setattr(L.db, "fetch", lambda q, p=None: rows if "cotr_pool_count" in q else [])
+    out = {b["batchNo"]: b for b in L.batch_codes(None, date(2026, 11, 1), date(2026, 11, 11))["batches"]}
+    assert (out["0808"]["sequence"], out["0808"]["producedOn"], out["0808"]["expiresOn"], out["0808"]["left"], out["0808"]["status"]) == (8, "2026-11-08", "2026-11-11", 136, "active")
+    assert (out["0407"]["producedOn"], out["0407"]["expiresOn"], out["0407"]["status"]) == ("2026-11-07", "2026-11-10", "expired")

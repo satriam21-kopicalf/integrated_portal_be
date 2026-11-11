@@ -1220,6 +1220,14 @@ def production(days: int, buffer_pct: float) -> dict:
               FROM {P}.cotr_sale s JOIN {P}.cotr_shift sh ON sh.id = s.shift_id, jsonb_array_elements(s.lines) l
              WHERE s.voided_at IS NULL AND sh.day >= current_date - %s AND sh.day < current_date
              GROUP BY 1, 2""", (days,))
+    # migration 089: a pool day taken from the workbooks counts its Product Terjual (the app has no sales there)
+    rows = list(rows) + db.fetch(
+        f"""SELECT day, menu_code AS code, sum(qty) AS qty FROM {P}.cotr_pool_move
+             WHERE source = 'sheet' AND kind = 'sold' AND day >= current_date - %s AND day < current_date GROUP BY 1, 2""", (days,))
+    merged: dict[tuple, int] = {}
+    for r in rows:
+        merged[(r["day"], r["code"])] = merged.get((r["day"], r["code"]), 0) + int(r["qty"])
+    rows = [{"day": d, "code": c, "qty": q} for (d, c), q in merged.items()]
     per: dict[str, list[int]] = {}
     seen_days = sorted({r["day"] for r in rows})
     for code in {r["code"] for r in rows}:
@@ -1397,6 +1405,12 @@ def usage(d_from: date, d_to: date, pool: Optional[str]) -> dict:
         for src, col in (("waste", "end_waste"), ("cupping", "end_cupping")):
             for code, n in (e[col] or {}).items():
                 cups.setdefault(code, {"sold": 0, "waste": 0, "cupping": 0})[src] += int(n)
+    # migration 089: the pool days imported from the workbooks (Product Terjual, Wasting, Cupping)
+    sw, sa = ("AND pool_code = %s", (pool,)) if pool else ("", ())
+    for r in db.fetch(f"""SELECT menu_code, kind, sum(qty) AS qty FROM {P}.cotr_pool_move
+                           WHERE source = 'sheet' AND kind IN ('sold', 'waste', 'cupping') AND day BETWEEN %s AND %s {sw} GROUP BY 1, 2""",
+                      (d_from, d_to, *sa)):
+        cups.setdefault(r["menu_code"], {"sold": 0, "waste": 0, "cupping": 0})[r["kind"]] += int(r["qty"])
     # migration 088: the cups wasted or given for tasting at the pools / HUBs
     pw, pa = ("AND pool_code = %s", (pool,)) if pool else ("", ())
     for r in db.fetch(f"""SELECT menu_code, kind, sum(qty) AS qty FROM {P}.cotr_waste
@@ -1817,6 +1831,22 @@ def suggestions(day: date, codes: list[str]) -> dict[str, dict]:
             waste.setdefault(c, {})[k] = waste.get(c, {}).get(k, 0) + float(n)
         for k, n in (sh["end_cupping"] or {}).items():
             taste.setdefault(c, {})[k] = taste.get(c, {}).get(k, 0) + float(n)
+    shift_days = {(r["driver_code"], r["day"]) for r in db.fetch(
+        f"SELECT driver_code, day FROM {P}.cotr_shift WHERE day >= %s AND day < %s", (since, day))}
+    for r in db.fetch(f"""SELECT r.driver_code, r.day, r.lines, d.pool_code FROM {P}.cotr_report_day r
+                            JOIN {P}.cotr_driver d ON d.code = r.driver_code
+                           WHERE r.day >= %s AND r.day < %s AND r.driver_code IS NOT NULL""", (since, day)):
+        c = r["driver_code"]
+        if (c, r["day"]) in shift_days or not r["lines"]:
+            continue  # migration 089: the workbook only where the app has no shift that day
+        days[c] = days.get(c, 0) + 1
+        pool_of[c] = r["pool_code"]
+        for k, x in r["lines"].items():
+            sold.setdefault(c, {})[k] = sold.get(c, {}).get(k, 0) + float(x.get("t") or 0)
+            if x.get("w"):
+                waste.setdefault(c, {})[k] = waste.get(c, {}).get(k, 0) + float(x["w"])
+            if x.get("c"):
+                taste.setdefault(c, {})[k] = taste.get(c, {}).get(k, 0) + float(x["c"])
     out = {c: {**advise(sold.get(c, {}), waste.get(c, {}), taste.get(c, {}), days[c]), "source": "driver"} for c in days}
     # the pool average for the drivers without history
     pools: dict[str, list[dict]] = {}

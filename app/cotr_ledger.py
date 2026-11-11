@@ -345,6 +345,9 @@ def import_workbook(user: dict, pool: str, data: bytes, d_from: date, d_to: Opti
                         moves.append((d, code, k, f[k]))
         if d >= d_from and not any(m[0] == d for m in moves):
             moves.append((d, next(iter(menus)), "sold", 0))  # the day is the sheet's even with nothing moved
+    first = d_from - timedelta(days=1)
+    if not any(c[0] == first for c in counts) and d_from in days:  # no count the day before: the sheet's opening of the first day
+        counts = [(first, code, None, f["opening"]) for code, f in days[d_from]["figures"].items() if "opening" in f] + counts
     drivers = _driver_by_label(pool)
     month = wb["month"] or d_from.replace(day=1)
     reports = []

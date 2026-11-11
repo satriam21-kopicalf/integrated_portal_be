@@ -156,7 +156,9 @@ FORM_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("form.") and k not in PE
 # is added to the role by its migration); role "outlet" = the shared outlet / HUB CK / HUB WH accounts (2026-10-28)
 DEFAULT_ROLE_PAGES = {
     "user": ["overview", "sales", "stock-opname", "waste", "guide", *FORM_PAGES],
-    "outlet": ["stock-opname", "waste", "form.pengajuan", "form.stock-transfer"],
+    # migration 091 (2026-11-11): exactly these in Operations, Kopi Calf and Wasgee alike
+    "outlet": ["stock-opname", "waste", "form.stock-transfer", "form.damaged-equipment", "form.pengajuan",
+               "rating.grabfood", "rating.google-maps", "rating.shopeefood", "rating.gofood", "guide"],
     "cost_control": ["overview", "sales", "stock-opname", "waste", "guide", *CC_PAGES],
 }
 

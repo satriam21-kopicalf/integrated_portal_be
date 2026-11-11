@@ -56,6 +56,8 @@ Portal (Monitoring COTR):
     POST /api/cotr/driver/issues                {"category", "severity", "title", "description", "photo", "latitude", "longitude"} (088)
     GET  /api/cotr/issues?status=&fleet=&pool=&days=, GET /api/cotr/issues/{id}   page cotr.fleet / cotr.check-in (088)
     POST /api/cotr/issues/{id}/step             page cotr.fleet: {"status", "note", "handler", "cost"} handle an issue
+    GET  /api/cotr/pool-ledger?pool=&day=&history=   page cotr.storage / cotr.production: cups per menu of a pool (089)
+    PUT  /api/cotr/pool-opening                 {"pool", "day", "lines": [{"menu", "qty", "expiresOn"}], "note"} the opening stock
     GET  /api/cotr/area-requests?dateFrom=&dateTo=&status=&pool=   page cotr.schedule / cotr.check-in (088)
     POST /api/cotr/area-requests/{id}/decide    page cotr.schedule: {"approve", "note", "code", "name", "address", "city"}
     GET  /api/cotr/photos/{check-in|signature|request}/{id}   the team (cotr.check-in) or the driver it belongs to
@@ -69,7 +71,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from app import activity, cotr
+from app import activity, cotr, cotr_ledger
 from app.access import deny, has_page, require_page
 from app.pic_checkin import CheckInError
 from app.routes.auth import current_user, require_roles
@@ -601,6 +603,34 @@ def receive_transfer(transfer_id: str, request: Request, user: dict = Depends(re
     _call(cotr.receive_transfer, user, transfer_id)
     _log(request, user, "cotr.transfer.receive", "Kiriman produksi diterima pool", {"id": transfer_id})
     return {"ok": True}
+
+
+class OpeningLine(BaseModel):
+    menu: str = Field(min_length=1, max_length=40)
+    qty: int = Field(ge=0, le=100_000)
+    expiresOn: Optional[date] = None
+    batchNo: Optional[str] = Field(None, max_length=40)  # the production / batch code of the cups
+
+
+class OpeningIn(BaseModel):
+    pool: str = Field(min_length=1, max_length=40)
+    day: date
+    lines: list[OpeningLine] = Field(max_length=200)
+    note: Optional[str] = Field(None, max_length=300)
+
+
+@router.get("/pool-ledger")
+def pool_ledger(pool: str, day: Optional[date] = None, history: int = Query(7, ge=1, le=62),
+                _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    return _call(cotr_ledger.run, pool, day or today(), history)
+
+
+@router.put("/pool-opening")
+def pool_opening(body: OpeningIn, request: Request, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    out = _call(cotr_ledger.save_opening, user, body.pool, body.day, [x.model_dump(mode="json") for x in body.lines], body.note)
+    _log(request, user, "cotr.pool-opening", f"COTR stock awal {body.pool} {body.day}: {sum(x.qty for x in body.lines)} cup",
+         {"pool": body.pool, "day": body.day.isoformat()})
+    return out
 
 
 @router.get("/pool-stock")

@@ -1154,6 +1154,8 @@ def assign(user: dict, day: date, driver_code: str, lines: dict, note: Optional[
     d = db.fetchrow(f"SELECT code, pool_code FROM {P}.cotr_driver WHERE code = %s", (driver_code,))
     if not d:
         raise CotrError("Driver tidak ditemukan")
+    from app import cotr_ledger  # migration 089: never more than the pool has, once it has an opening stock
+    cotr_ledger.check_assignment(d["pool_code"], day, driver_code, given)
     row = db.fetchrow(
         f"""INSERT INTO {P}.cotr_dispatch (day, driver_code, pool_code, lines, note, assigned_by, cupping)
             VALUES (%s, %s, %s, %s, %s, %s, %s)

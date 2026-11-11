@@ -328,6 +328,17 @@ def today_of(user: dict) -> dict:
         "accessories": [{"name": r["name"], "qty": r["qty"]} for r in db.fetch(
             f"""SELECT a.name, fa.qty FROM {P}.cotr_fleet_accessory fa JOIN {P}.cotr_accessory a ON a.code = fa.accessory_code
                  WHERE fa.fleet_code = %s AND fa.removed_on IS NULL ORDER BY a.name""", (d["fleet_code"],))] if d.get("fleet_code") else [],
+        # migration 088: the areas of Master → Area to ask for (of the driver's pool first) and the requests of 14 days
+        "areas": [{"code": r["code"], "name": r["name"], "address": r["address"], "city": r["city"], "pool": r["pool_code"],
+                   "lat": float(r["latitude"]) if r["latitude"] is not None else None, "lng": float(r["longitude"]) if r["longitude"] is not None else None,
+                   "radius": r["radius_m"]}
+                  for r in db.fetch(f"""SELECT * FROM {P}.cotr_area WHERE is_active
+                                         ORDER BY (pool_code IS NOT DISTINCT FROM %s) DESC, name""", (d["pool_code"],))],
+        "issues": [_issue_view(r) for r in db.fetch(
+            f"""{_ISSUES} WHERE i.driver_code = %s AND (i.status IN ('open', 'in_progress') OR i.created_at > now() - interval '30 days')
+                 ORDER BY i.created_at DESC""", (d["code"],))],
+        "areaRequests": [_area_request_view(r) for r in db.fetch(
+            f"{_AREA_REQUESTS} WHERE q.driver_code = %s AND q.created_at > now() - interval '14 days' ORDER BY q.created_at DESC", (d["code"],))],
     }
 
 
@@ -525,6 +536,218 @@ def send_request(user: dict, kind: str, amount: Any, note: str, photo: str) -> d
                     VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
                 (d["code"], s["id"] if s else None, kind, value, note.strip(), pdata, ptype))
     return today_of(user)
+
+
+# ---------------------------------------------------------------- area requests (migration 088)
+
+def _hm(v: Any) -> Optional[str]:
+    return v.strftime("%H:%M") if v else None
+
+
+def _area_request_view(r: dict) -> dict:
+    return {"id": str(r["id"]), "driver": r["driver_code"], "driverName": r.get("driver_name"), "pool": r.get("pool_code"),
+            "day": _iso(r["day"]), "area": r["area_code"], "areaName": r.get("area_name") or r["name"],
+            "areaAddress": r.get("area_address") or r["address"], "isNew": r["name"] is not None,
+            "name": r["name"], "address": r["address"], "city": r["city"],
+            "lat": float(r["latitude"]) if r["latitude"] is not None else None, "lng": float(r["longitude"]) if r["longitude"] is not None else None,
+            "accuracy": float(r["accuracy_m"]) if r["accuracy_m"] is not None else None,
+            "start": _hm(r["start_time"]), "end": _hm(r["end_time"]), "note": r["note"], "status": r["status"],
+            "decidedAt": _iso(r["decided_at"]), "decisionNote": r["decision_note"], "decidedBy": r.get("decided_name"), "at": _iso(r["created_at"])}
+
+
+_AREA_REQUESTS = f"""SELECT q.*, d.name AS driver_name, d.pool_code, a.name AS area_name, a.address AS area_address,
+                            u.full_name AS decided_name
+                       FROM {P}.cotr_area_request q JOIN {P}.cotr_driver d ON d.code = q.driver_code
+                       LEFT JOIN {P}.cotr_area a ON a.code = q.area_code LEFT JOIN {P}.user_account u ON u.id = q.decided_by"""
+
+
+def _clock(v: Any) -> Optional[str]:
+    v = (v or "").strip()
+    if not v:
+        return None
+    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v):
+        raise CotrError("Jam tidak valid (HH:MM)")
+    return v
+
+
+def send_area_request(user: dict, data: dict) -> dict:
+    """The driver asks to go to an area of the master, or to a new place (its name, the address and the GPS there)."""
+    d = require_driver(user)
+    area = (data.get("area") or "").strip() or None
+    name = (data.get("name") or "").strip() or None
+    start, end = _clock(data.get("start")), _clock(data.get("end"))
+    if start and end and end <= start:
+        raise CotrError("Jam selesai harus setelah jam mulai")
+    lat, lng = data.get("latitude"), data.get("longitude")
+    if area:
+        if not db.fetchrow(f"SELECT 1 FROM {P}.cotr_area WHERE code = %s AND is_active", (area,)):
+            raise CotrError("Area tidak ditemukan")
+        name = None
+    elif not name:
+        raise CotrError("Pilih area atau isi nama tempat baru")
+    elif lat is None or lng is None:
+        raise CotrError("Ambil lokasi saat ini untuk tempat baru")
+    with db.transaction() as conn:
+        pending = conn.execute(f"SELECT count(*) AS n FROM {P}.cotr_area_request WHERE driver_code = %s AND status = 'sent'",
+                               (d["code"],)).fetchone()["n"]
+        if pending >= 5:
+            raise CotrError("Masih ada 5 permintaan area menunggu keputusan")
+        conn.execute(f"""INSERT INTO {P}.cotr_area_request (driver_code, day, area_code, name, address, city, latitude, longitude,
+                             accuracy_m, start_time, end_time, note)
+                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                     (d["code"], data.get("day") or today(), area, name, (data.get("address") or "").strip() or None,
+                      (data.get("city") or "").strip() or None, lat, lng, data.get("accuracyM"), start, end,
+                      (data.get("note") or "").strip() or None))
+    return today_of(user)
+
+
+def area_requests(d_from: date, d_to: date, status: Optional[str] = None, pool: Optional[str] = None) -> list[dict]:
+    rows = db.fetch(f"""{_AREA_REQUESTS} WHERE q.day BETWEEN %s AND %s AND (%s::text IS NULL OR q.status = %s)
+                         AND (%s::text IS NULL OR d.pool_code = %s) ORDER BY (q.status = 'sent') DESC, q.created_at DESC""",
+                    (d_from, d_to, status, status, pool, pool))
+    return [_area_request_view(r) for r in rows]
+
+
+def decide_area_request(user: dict, request_id: str, approve: bool, data: dict) -> dict:
+    """Approved: a new place becomes an area of the master (the name / address / code as the team corrects them), and the
+    roster of that day sends the driver there — the slot running at the start time takes the area, else a slot is added
+    for the times asked. Rejected: a reason is needed."""
+    note = (data.get("note") or "").strip() or None
+    if not approve and not note:
+        raise CotrError("Tulis alasan penolakan")
+    with db.transaction() as conn:
+        q = conn.execute(f"SELECT * FROM {P}.cotr_area_request WHERE id::text = %s FOR UPDATE", (request_id,)).fetchone()
+        if not q:
+            raise CotrError("Permintaan area tidak ditemukan")
+        if q["status"] != "sent":
+            raise CotrError("Permintaan area sudah diputuskan")
+        area = q["area_code"]
+        if approve and not area:
+            d = conn.execute(f"SELECT pool_code FROM {P}.cotr_driver WHERE code = %s", (q["driver_code"],)).fetchone()
+            code = ((data.get("code") or "").strip() or f"AREA-R{str(q['id'])[:6]}").upper()
+            if conn.execute(f"SELECT 1 FROM {P}.cotr_area WHERE code = %s", (code,)).fetchone():
+                raise CotrError(f"Kode area {code} sudah dipakai")
+            conn.execute(f"""INSERT INTO {P}.cotr_area (code, name, address, city, latitude, longitude, pool_code, note, updated_by)
+                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                         (code, (data.get("name") or "").strip() or q["name"], (data.get("address") or "").strip() or q["address"] or "",
+                          (data.get("city") or "").strip() or q["city"] or "", q["latitude"], q["longitude"], d["pool_code"] if d else None,
+                          f"Dari permintaan driver {q['driver_code']}", user["id"]))
+            area = code
+        if approve and q["start_time"]:
+            slot = conn.execute(f"""SELECT id FROM {P}.cotr_schedule_slot WHERE driver_code = %s AND day = %s
+                                     AND start_time <= %s AND end_time > %s ORDER BY start_time LIMIT 1""",
+                                (q["driver_code"], q["day"], q["start_time"], q["start_time"])).fetchone()
+            if slot:
+                conn.execute(f"UPDATE {P}.cotr_schedule_slot SET area_code = %s, updated_at = now(), updated_by = %s WHERE id = %s",
+                             (area, user["id"], slot["id"]))
+            elif q["end_time"]:
+                conn.execute(f"""INSERT INTO {P}.cotr_schedule_slot (driver_code, day, start_time, end_time, area_code, fleet_code, note, updated_by)
+                                 SELECT code, %s, %s, %s, %s, fleet_code, %s, %s FROM {P}.cotr_driver WHERE code = %s""",
+                             (q["day"], q["start_time"], q["end_time"], area, "Permintaan driver", user["id"], q["driver_code"]))
+        conn.execute(f"""UPDATE {P}.cotr_area_request SET status = %s, area_code = %s, decided_by = %s, decided_at = now(),
+                             decision_note = %s WHERE id = %s""",
+                     ("approved" if approve else "rejected", area, user["id"], note, q["id"]))
+    return _area_request_view(db.fetchrow(f"{_AREA_REQUESTS} WHERE q.id = %s", (q["id"],)))
+
+
+# ---------------------------------------------------------------- fleet issues (migration 088)
+
+ISSUE_CATEGORIES = ("brake", "battery", "tyre", "engine", "electrical", "body", "cooler", "accessory", "other")
+ISSUE_STEPS = {"open": ("in_progress", "resolved", "rejected"), "in_progress": ("resolved", "rejected", "open"),
+               "resolved": ("in_progress",), "rejected": ("open",)}
+
+_ISSUES = f"""SELECT i.id, i.fleet_code, i.driver_code, i.category, i.severity, i.title, i.description, i.photo IS NOT NULL AS has_photo,
+                     i.latitude, i.longitude, i.status, i.handler, i.resolution_note, i.cost, i.resolved_at, i.updated_at, i.created_at,
+                     f.name AS fleet_name, f.plate, f.pool_code, d.name AS driver_name
+                FROM {P}.cotr_fleet_issue i JOIN {P}.cotr_fleet f ON f.code = i.fleet_code
+                LEFT JOIN {P}.cotr_driver d ON d.code = i.driver_code"""
+
+
+def _issue_view(r: dict, log: Optional[list] = None) -> dict:
+    out = {"id": str(r["id"]), "fleet": r["fleet_code"], "fleetName": r["fleet_name"], "plate": r["plate"], "pool": r["pool_code"],
+           "driver": r["driver_code"], "driverName": r["driver_name"], "category": r["category"], "severity": r["severity"],
+           "title": r["title"], "description": r["description"], "hasPhoto": r["has_photo"],
+           "lat": float(r["latitude"]) if r["latitude"] is not None else None, "lng": float(r["longitude"]) if r["longitude"] is not None else None,
+           "status": r["status"], "handler": r["handler"], "resolutionNote": r["resolution_note"],
+           "cost": float(r["cost"]) if r["cost"] is not None else None, "resolvedAt": _iso(r["resolved_at"]),
+           "updatedAt": _iso(r["updated_at"]), "at": _iso(r["created_at"])}
+    if log is not None:
+        out["log"] = [{"status": x["status"], "note": x["note"], "by": x["by_name"], "at": _iso(x["created_at"])} for x in log]
+    return out
+
+
+def report_issue(user: dict, data: dict) -> dict:
+    """The driver reports an issue of the armada it drives (its fleet in the master), with a photo and where it is."""
+    d = require_driver(user)
+    if not d.get("fleet_code"):
+        raise CotrError("Anda belum terhubung ke armada")
+    if data.get("category") not in ISSUE_CATEGORIES:
+        raise CotrError("Pilih jenis kendala")
+    if data.get("severity") not in ("low", "medium", "high"):
+        raise CotrError("Pilih tingkat kendala")
+    title = (data.get("title") or "").strip()
+    if len(title) < 3:
+        raise CotrError("Tulis kendalanya")
+    ptype, pdata = parse_photo(data["photo"]) if data.get("photo") else (None, None)
+    s = shift_of(d["code"], today())
+    with db.transaction() as conn:
+        n = conn.execute(f"SELECT count(*) AS n FROM {P}.cotr_fleet_issue WHERE driver_code = %s AND status = 'open'", (d["code"],)).fetchone()["n"]
+        if n >= 10:
+            raise CotrError("Masih ada 10 laporan armada yang belum ditangani")
+        r = conn.execute(f"""INSERT INTO {P}.cotr_fleet_issue (fleet_code, driver_code, shift_id, category, severity, title, description,
+                                 photo, photo_type, latitude, longitude, updated_by)
+                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                         (d["fleet_code"], d["code"], s["id"] if s else None, data["category"], data["severity"], title,
+                          (data.get("description") or "").strip(), pdata, ptype, data.get("latitude"), data.get("longitude"),
+                          user["id"])).fetchone()
+        conn.execute(f"INSERT INTO {P}.cotr_fleet_issue_log (issue_id, status, note, by_name, by_user) VALUES (%s, 'open', %s, %s, %s)",
+                     (r["id"], "Dilaporkan driver", d["name"], user["id"]))
+    return today_of(user)
+
+
+def issues(status: Optional[str] = None, fleet: Optional[str] = None, pool: Optional[str] = None, days: int = 90) -> list[dict]:
+    """The issues still open or in progress, and the ones closed in the last days; the urgent first."""
+    rows = db.fetch(f"""{_ISSUES} WHERE (%s::text IS NULL OR i.status = %s) AND (%s::text IS NULL OR i.fleet_code = %s)
+                          AND (%s::text IS NULL OR f.pool_code = %s)
+                          AND (i.status IN ('open', 'in_progress') OR i.created_at > now() - make_interval(days => %s))
+                        ORDER BY (i.status IN ('open', 'in_progress')) DESC, (i.severity = 'high') DESC, i.created_at DESC""",
+                    (status, status, fleet, fleet, pool, pool, days))
+    return [_issue_view(r) for r in rows]
+
+
+def issue_detail(issue_id: str) -> dict:
+    r = db.fetchrow(f"{_ISSUES} WHERE i.id::text = %s", (issue_id,))
+    if not r:
+        raise CotrError("Laporan tidak ditemukan")
+    return _issue_view(r, db.fetch(f"SELECT * FROM {P}.cotr_fleet_issue_log WHERE issue_id = %s ORDER BY created_at", (r["id"],)))
+
+
+def handle_issue(user: dict, issue_id: str, data: dict) -> dict:
+    """The management moves an issue: in progress (who handles it), resolved (what was done, the cost), rejected (why),
+    or opened again; every step is logged with its note."""
+    to, note = data.get("status"), (data.get("note") or "").strip() or None
+    with db.transaction() as conn:
+        i = conn.execute(f"SELECT * FROM {P}.cotr_fleet_issue WHERE id::text = %s FOR UPDATE", (issue_id,)).fetchone()
+        if not i:
+            raise CotrError("Laporan tidak ditemukan")
+        if to not in ISSUE_STEPS.get(i["status"], ()):
+            raise CotrError("Status tidak dapat diubah ke sana")
+        if to in ("resolved", "rejected") and not note:
+            raise CotrError("Tulis apa yang dilakukan" if to == "resolved" else "Tulis alasan penolakan")
+        handler = (data.get("handler") or "").strip() or i["handler"]
+        cost = data.get("cost") if data.get("cost") is not None else i["cost"]
+        if cost is not None and float(cost) < 0:
+            raise CotrError("Biaya tidak valid")
+        closed = to in ("resolved", "rejected")
+        conn.execute(f"""UPDATE {P}.cotr_fleet_issue SET status = %s, handler = %s, cost = %s,
+                             resolution_note = CASE WHEN %s THEN %s ELSE resolution_note END,
+                             resolved_at = CASE WHEN %s THEN now() END, updated_by = %s, updated_at = now() WHERE id = %s""",
+                     (to, handler, cost, closed, note, closed, user["id"], i["id"]))
+        parts = [note, f"Ditangani: {handler}" if handler and handler != i["handler"] else None]
+        conn.execute(f"INSERT INTO {P}.cotr_fleet_issue_log (issue_id, status, note, by_name, by_user) VALUES (%s, %s, %s, %s, %s)",
+                     (i["id"], to, " · ".join(x for x in parts if x) or None,
+                      user.get("full_name") or user.get("username"), user["id"]))
+    return issue_detail(issue_id)
 
 
 # ---------------------------------------------------------------- the portal: masters
@@ -746,19 +969,37 @@ def driver_accounts() -> list[dict]:
                                    WHERE u.role = 'driver' AND u.is_active ORDER BY u.username""")]
 
 
-def waste_list(day_from: date, day_to: date) -> list[dict]:
+def waste_list(day_from: date, day_to: date, pool: Optional[str] = None) -> list[dict]:
+    """Waste and cupping of the pools / HUBs (migration 088: per menu too), with who recorded it."""
     return [_plain(r) | {"id": str(r["id"])} for r in db.fetch(
-        f"SELECT * FROM {P}.cotr_waste WHERE day BETWEEN %s AND %s ORDER BY day DESC, created_at DESC", (day_from, day_to))]
+        f"""SELECT w.*, u.full_name AS by_name FROM {P}.cotr_waste w LEFT JOIN {P}.user_account u ON u.id = w.created_by
+             WHERE w.day BETWEEN %s AND %s AND (%s::text IS NULL OR w.pool_code = %s)
+             ORDER BY w.day DESC, w.created_at DESC""", (day_from, day_to, pool, pool))]
 
 
 def waste_add(user: dict, data: dict) -> dict:
+    """A waste (storage / production) or a cupping of a pool / HUB: a menu in cups (migration 088), a stock item (deducted
+    from the running stock) or another thing typed."""
+    kind = data.get("kind") or "storage"
+    menu = (data.get("menu_code") or "").strip() or None
+    code = None if menu else (data.get("item_code") or "").strip() or None
+    item, unit = (data.get("item") or code or "").strip(), data.get("unit")
+    if menu:
+        m = _menu_map().get(menu)
+        if not m:
+            raise CotrError("Menu tidak ditemukan")
+        item, unit = m["name"], "cup"
+    if not data.get("pool_code"):
+        raise CotrError("Pilih pool / HUB")
+    if not item:
+        raise CotrError("Pilih menu atau item")
+    if not (data.get("reason") or "").strip():
+        raise CotrError("Isi keterangan cupping" if kind == "cupping" else "Isi alasan waste")
     try:
-        code = (data.get("item_code") or "").strip() or None
-        r = db.fetchrow(f"""INSERT INTO {P}.cotr_waste (day, pool_code, item, qty, unit, reason, created_by, kind, batch_id, item_code)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-                        (data.get("day") or today(), data.get("pool_code"), (data.get("item") or code or "").strip(), data.get("qty"),
-                         data.get("unit"), (data.get("reason") or "").strip(), user["id"], data.get("kind") or "storage",
-                         data.get("batch_id") or None, code))
+        r = db.fetchrow(f"""INSERT INTO {P}.cotr_waste (day, pool_code, item, qty, unit, reason, created_by, kind, batch_id, item_code, menu_code)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+                        (data.get("day") or today(), data.get("pool_code"), item, data.get("qty"), unit,
+                         (data.get("reason") or "").strip(), user["id"], kind, data.get("batch_id") or None, code, menu))
     except Exception as e:
         raise CotrError(_db_message(e)) from None
     return _plain(r) | {"id": str(r["id"])}
@@ -955,14 +1196,15 @@ def photo(kind: str, row_id: str) -> Optional[dict]:
     """The photo of a check in or a request, or the signature of a check in."""
     if kind == "signature":
         return db.fetchrow(f"SELECT signature AS photo, signature_type AS photo_type FROM {P}.cotr_check_in WHERE id = %s", (row_id,))
-    table = {"check-in": "cotr_check_in", "request": "cotr_request"}[kind]
+    table = {"check-in": "cotr_check_in", "request": "cotr_request", "issue": "cotr_fleet_issue"}[kind]
     return db.fetchrow(f"SELECT photo, photo_type FROM {P}.{table} WHERE id = %s", (row_id,))
 
 
 def photo_owner(kind: str, row_id: str) -> Optional[str]:
     """The driver code a photo belongs to (a driver sees only its own)."""
-    if kind == "request":
-        r = db.fetchrow(f"SELECT driver_code FROM {P}.cotr_request WHERE id = %s", (row_id,))
+    if kind in ("request", "issue"):
+        table = "cotr_request" if kind == "request" else "cotr_fleet_issue"
+        r = db.fetchrow(f"SELECT driver_code FROM {P}.{table} WHERE id::text = %s", (row_id,))
     else:
         r = db.fetchrow(f"""SELECT s.driver_code FROM {P}.cotr_check_in c JOIN {P}.cotr_shift s ON s.id = c.shift_id
                              WHERE c.id = %s""", (row_id,))
@@ -1153,6 +1395,12 @@ def usage(d_from: date, d_to: date, pool: Optional[str]) -> dict:
         for src, col in (("waste", "end_waste"), ("cupping", "end_cupping")):
             for code, n in (e[col] or {}).items():
                 cups.setdefault(code, {"sold": 0, "waste": 0, "cupping": 0})[src] += int(n)
+    # migration 088: the cups wasted or given for tasting at the pools / HUBs
+    pw, pa = ("AND pool_code = %s", (pool,)) if pool else ("", ())
+    for r in db.fetch(f"""SELECT menu_code, kind, sum(qty) AS qty FROM {P}.cotr_waste
+                           WHERE menu_code IS NOT NULL AND day BETWEEN %s AND %s {pw} GROUP BY 1, 2""", (d_from, d_to, *pa)):
+        src = "cupping" if r["kind"] == "cupping" else "waste"
+        cups.setdefault(r["menu_code"], {"sold": 0, "waste": 0, "cupping": 0})[src] += float(r["qty"])
     menus_by = {m["code"]: m for m in menus()}
     boms = {b["code"]: b for b in db.fetch(f"SELECT * FROM {P}.cotr_bom")}
     items = {i["code"]: i for i in db.fetch(f"SELECT * FROM {P}.cotr_item")}

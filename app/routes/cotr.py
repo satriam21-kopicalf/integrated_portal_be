@@ -12,6 +12,8 @@ Driver app (fe-calfontheroad), accounts of role driver tied to a Master Driver r
     POST /api/cotr/driver/reloads               {"lines": {code: cups}, "note"}
     POST /api/cotr/driver/reloads/{id}/receive  {"counts", "note"}: the check of an approved reload (as the assignment)
     POST /api/cotr/driver/requests              {"kind": a code of Master → Pengajuan, "amount", "note", "photo"}
+    POST /api/cotr/driver/area-requests         {"area"} or {"name", "address", "city", "latitude", "longitude"} + {"start",
+                                                "end", "note"}: go to an area of the master or a new place (088)
     POST /api/cotr/driver/locations             {"points": [{"at", "lat", "lng", "accuracy", "speed", "heading", "battery"}]}
                                                 the GPS of the phone while the shift is open (migration 048)
 Every driver action answers the new state of the day (as GET today).
@@ -49,7 +51,13 @@ Portal (Monitoring COTR):
     GET  /api/public/fleet/{token}[/photo|/driver/{code}/photo]   no sign-in: the label QR of an armada, without the
                                                 papers, the QRIS and the phone numbers
     GET  /api/cotr/incentives?month=YYYY-MM&scheme=&pool=   page cotr.incentive: incentive per driver (053)
-    GET/POST /api/cotr/waste, DELETE /api/cotr/waste/{id}   page cotr.production
+    GET/POST /api/cotr/waste, DELETE /api/cotr/waste/{id}   page cotr.production / cotr.storage: waste and cupping of the
+                                                pools / HUBs, per menu (cups) or item (088)
+    POST /api/cotr/driver/issues                {"category", "severity", "title", "description", "photo", "latitude", "longitude"} (088)
+    GET  /api/cotr/issues?status=&fleet=&pool=&days=, GET /api/cotr/issues/{id}   page cotr.fleet / cotr.check-in (088)
+    POST /api/cotr/issues/{id}/step             page cotr.fleet: {"status", "note", "handler", "cost"} handle an issue
+    GET  /api/cotr/area-requests?dateFrom=&dateTo=&status=&pool=   page cotr.schedule / cotr.check-in (088)
+    POST /api/cotr/area-requests/{id}/decide    page cotr.schedule: {"approve", "note", "code", "name", "address", "city"}
     GET  /api/cotr/photos/{check-in|signature|request}/{id}   the team (cotr.check-in) or the driver it belongs to
 """
 import base64
@@ -212,12 +220,101 @@ def driver_locations(body: PointsIn, user: dict = Depends(driver_only)):
     return _call(cotr.record_locations, user, [p.model_dump() for p in body.points])
 
 
+class AreaRequestIn(BaseModel):
+    """migration 088: an area of the master (`area`), or a new place (`name` + the GPS there)"""
+    area: Optional[str] = Field(None, max_length=40)
+    name: Optional[str] = Field(None, max_length=120)
+    address: Optional[str] = Field(None, max_length=300)
+    city: Optional[str] = Field(None, max_length=80)
+    latitude: Optional[float] = Field(None, ge=-90, le=90)
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+    accuracyM: Optional[float] = Field(None, ge=0, le=100_000)
+    start: Optional[str] = Field(None, max_length=5)
+    end: Optional[str] = Field(None, max_length=5)
+    note: Optional[str] = Field(None, max_length=300)
+
+
+@router.post("/driver/area-requests")
+def driver_area_request(body: AreaRequestIn, request: Request, user: dict = Depends(driver_only)):
+    out = _call(cotr.send_area_request, user, body.model_dump())
+    _log(request, user, "cotr.area-request", f"COTR permintaan area {body.area or body.name}")
+    return out
+
+
 # ---------------------------------------------------------------- portal
 
 class DecisionIn(BaseModel):
     approve: bool
     note: Optional[str] = Field(None, max_length=300)
     lines: Optional[dict[str, int]] = None  # a reload: the cups sent (the ones asked when not given)
+
+
+class IssueIn(BaseModel):
+    """migration 088: an issue of the armada reported by its driver"""
+    category: str = Field(min_length=1, max_length=20)
+    severity: Literal["low", "medium", "high"] = "medium"
+    title: str = Field(min_length=3, max_length=120)
+    description: Optional[str] = Field(None, max_length=1000)
+    photo: Optional[str] = Field(None, max_length=5_000_000)
+    latitude: Optional[float] = Field(None, ge=-90, le=90)
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+
+
+@router.post("/driver/issues")
+def driver_issue(body: IssueIn, request: Request, user: dict = Depends(driver_only)):
+    out = _call(cotr.report_issue, user, body.model_dump())
+    _log(request, user, "cotr.issue", f"COTR laporan armada ({body.severity}): {body.title}")
+    return out
+
+
+class IssueStepIn(BaseModel):
+    status: Literal["open", "in_progress", "resolved", "rejected"]
+    note: Optional[str] = Field(None, max_length=1000)
+    handler: Optional[str] = Field(None, max_length=120)
+    cost: Optional[float] = Field(None, ge=0, le=1_000_000_000)
+
+
+@router.get("/issues")
+def issues(status: Optional[Literal["open", "in_progress", "resolved", "rejected"]] = None, fleet: Optional[str] = None,
+           pool: Optional[str] = None, days: int = Query(90, ge=1, le=730), _: dict = Depends(require_page("cotr.fleet", "cotr.check-in"))):
+    return cotr.issues(status, fleet, pool, days)
+
+
+@router.get("/issues/{issue_id}")
+def issue_detail(issue_id: str, _: dict = Depends(require_page("cotr.fleet", "cotr.check-in"))):
+    return _call(cotr.issue_detail, issue_id)
+
+
+@router.post("/issues/{issue_id}/step")
+def issue_step(issue_id: str, body: IssueStepIn, request: Request, user: dict = Depends(require_page("cotr.fleet"))):
+    out = _call(cotr.handle_issue, user, issue_id, body.model_dump())
+    _log(request, user, "cotr.issue.step", f"COTR laporan armada {out['fleet']} -> {body.status}: {out['title']}", {"id": issue_id})
+    return out
+
+
+class AreaDecisionIn(BaseModel):
+    approve: bool
+    note: Optional[str] = Field(None, max_length=300)
+    # a new place, as the team corrects it before it becomes an area of the master
+    code: Optional[str] = Field(None, max_length=40)
+    name: Optional[str] = Field(None, max_length=120)
+    address: Optional[str] = Field(None, max_length=300)
+    city: Optional[str] = Field(None, max_length=80)
+
+
+@router.get("/area-requests")
+def area_requests(dateFrom: Optional[date] = None, dateTo: Optional[date] = None, status: Optional[Literal["sent", "approved", "rejected"]] = None,
+                  pool: Optional[str] = None, _: dict = Depends(require_page("cotr.schedule", "cotr.check-in"))):
+    end = dateTo or today() + timedelta(days=7)
+    return cotr.area_requests(dateFrom or today() - timedelta(days=14), end, status, pool)
+
+
+@router.post("/area-requests/{request_id}/decide")
+def decide_area_request(request_id: str, body: AreaDecisionIn, request: Request, user: dict = Depends(require_page("cotr.schedule"))):
+    out = _call(cotr.decide_area_request, user, request_id, body.approve, body.model_dump())
+    _log(request, user, "cotr.area-request.decide", f"COTR permintaan area {'disetujui' if body.approve else 'ditolak'}: {out['areaName']}",
+         {"id": request_id, "area": out["area"]})
+    return out
 
 
 class LinesIn(BaseModel):
@@ -537,36 +634,38 @@ def production(days: int = Query(7, ge=1, le=60), buffer: float = Query(10, ge=0
 class WasteIn(BaseModel):
     day: Optional[date] = None
     pool_code: str = Field(min_length=1, max_length=40)
-    item: str = Field(min_length=1, max_length=120)
+    item: str = Field("", max_length=120)  # a menu (menu_code) names itself
     qty: float = Field(gt=0)
-    unit: str = Field(min_length=1, max_length=10)
+    unit: str = Field("cup", min_length=1, max_length=10)
     reason: str = Field(min_length=1, max_length=300)
     # migration 081: a waste of the production (with its batch) and the item of the master it deducts
-    kind: Literal["storage", "production"] = "storage"
+    kind: Literal["storage", "production", "cupping"] = "storage"  # migration 088: cupping at the pool / HUB
+    menu_code: Optional[str] = Field(None, max_length=40)  # migration 088: cups of a menu
     batch_id: Optional[str] = Field(None, max_length=40)
     item_code: Optional[str] = Field(None, max_length=40)
 
 
 @router.get("/waste")
-def waste_list(dateFrom: Optional[date] = None, dateTo: Optional[date] = None, _: dict = Depends(require_page("cotr.production"))):
+def waste_list(dateFrom: Optional[date] = None, dateTo: Optional[date] = None, pool: Optional[str] = None,
+               _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
     end = dateTo or today()
-    return cotr.waste_list(dateFrom or end - timedelta(days=30), end)
+    return cotr.waste_list(dateFrom or end - timedelta(days=30), end, pool)
 
 
 @router.post("/waste", status_code=201)
-def waste_add(body: WasteIn, user: dict = Depends(require_page("cotr.production"))):
+def waste_add(body: WasteIn, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
     return _call(cotr.waste_add, user, body.model_dump())
 
 
 @router.delete("/waste/{waste_id}")
-def waste_delete(waste_id: str, _: dict = Depends(require_page("cotr.production"))):
+def waste_delete(waste_id: str, _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
     cotr.waste_delete(waste_id)
     return {"ok": True}
 
 
 @router.get("/photos/{kind}/{row_id}")
-def photo(kind: Literal["check-in", "signature", "request"], row_id: str, request: Request, w: Optional[int] = Query(None, ge=48, le=1600), user: dict = Depends(current_user)):
-    if not has_page(user, "cotr.check-in"):
+def photo(kind: Literal["check-in", "signature", "request", "issue"], row_id: str, request: Request, w: Optional[int] = Query(None, ge=48, le=1600), user: dict = Depends(current_user)):
+    if not has_page(user, "cotr.check-in") and not (kind == "issue" and has_page(user, "cotr.fleet")):
         d = cotr.driver_of(user) if user["role"] == "driver" else None
         if not d or cotr.photo_owner(kind, row_id) != d["code"]:
             deny(request, user)

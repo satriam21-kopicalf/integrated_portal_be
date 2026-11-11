@@ -35,3 +35,58 @@ def test_an_empty_text_field_is_saved_empty_not_null(monkeypatch):
     monkeypatch.setattr(cotr.db, "fetchrow", fetchrow)
     cotr.master_save({"id": "u"}, "pools", None, {"code": "p1", "name": "Pool", "kind": "parent", "city": "Jakarta", "address": ""})
     assert "" in seen["p"] and None not in seen["p"][:5]
+
+
+def test_a_pool_cupping_of_a_menu_is_named_by_the_menu(monkeypatch):
+    """migration 088: waste / cupping of a pool per menu: the menu names it, in cups; a reason stays required."""
+    seen = {}
+    monkeypatch.setattr(cotr, "_menu_map", lambda: {"LATTE": {"code": "LATTE", "name": "Es Kopi Latte"}})
+    def fetchrow(q, p=None):
+        seen["p"] = p
+        return {"id": "w1", "item": p[2], "unit": p[4], "kind": p[7], "menu_code": p[10]}
+    monkeypatch.setattr(cotr.db, "fetchrow", fetchrow)
+    out = cotr.waste_add({"id": "u"}, {"pool_code": "POOL", "kind": "cupping", "menu_code": "LATTE", "qty": 4, "reason": "tasting CFD"})
+    assert (out["item"], out["unit"], out["kind"], out["menu_code"]) == ("Es Kopi Latte", "cup", "cupping", "LATTE")
+    assert seen["p"][9] is None  # not an item of the stock
+    import pytest
+    with pytest.raises(cotr.CotrError):
+        cotr.waste_add({"id": "u"}, {"pool_code": "POOL", "kind": "cupping", "menu_code": "LATTE", "qty": 4, "reason": " "})
+
+
+def test_an_area_request_needs_an_area_or_a_located_new_place(monkeypatch):
+    import pytest
+    monkeypatch.setattr(cotr, "require_driver", lambda u: {"code": "D1", "pool_code": "POOL"})
+    with pytest.raises(cotr.CotrError, match="Pilih area"):
+        cotr.send_area_request({"id": "u"}, {})
+    with pytest.raises(cotr.CotrError, match="lokasi"):
+        cotr.send_area_request({"id": "u"}, {"name": "Taman Baru"})
+    with pytest.raises(cotr.CotrError, match="Jam selesai"):
+        cotr.send_area_request({"id": "u"}, {"area": "A1", "start": "10:00", "end": "09:00"})
+    with pytest.raises(cotr.CotrError, match="Jam tidak valid"):
+        cotr.send_area_request({"id": "u"}, {"area": "A1", "start": "25:00"})
+
+
+def test_a_rejected_area_request_needs_a_reason():
+    import pytest
+    with pytest.raises(cotr.CotrError, match="alasan"):
+        cotr.decide_area_request({"id": "u"}, "x", False, {})
+
+
+def test_a_fleet_issue_moves_by_steps_and_closing_needs_a_note(monkeypatch):
+    import pytest
+    class Conn:
+        def execute(self, q, p=None):
+            class R:
+                def fetchone(_s): return {"id": "i1", "status": "open", "handler": None, "cost": None}
+            return R()
+    class Tx:
+        def __enter__(self): return Conn()
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(cotr.db, "transaction", lambda: Tx())
+    with pytest.raises(cotr.CotrError, match="Tulis apa"):
+        cotr.handle_issue({"id": "u"}, "i1", {"status": "resolved"})
+    with pytest.raises(cotr.CotrError, match="tidak dapat"):
+        cotr.handle_issue({"id": "u"}, "i1", {"status": "open"})
+    monkeypatch.setattr(cotr, "require_driver", lambda u: {"code": "D1", "fleet_code": None})
+    with pytest.raises(cotr.CotrError, match="armada"):
+        cotr.report_issue({"id": "u"}, {"category": "brake", "severity": "high", "title": "Rem blong"})

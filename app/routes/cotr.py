@@ -56,8 +56,12 @@ Portal (Monitoring COTR):
     POST /api/cotr/driver/issues                {"category", "severity", "title", "description", "photo", "latitude", "longitude"} (088)
     GET  /api/cotr/issues?status=&fleet=&pool=&days=, GET /api/cotr/issues/{id}   page cotr.fleet / cotr.check-in (088)
     POST /api/cotr/issues/{id}/step             page cotr.fleet: {"status", "note", "handler", "cost"} handle an issue
-    GET  /api/cotr/pool-ledger?pool=&day=&history=   page cotr.storage / cotr.production: cups per menu of a pool (089)
-    PUT  /api/cotr/pool-opening                 {"pool", "day", "lines": [{"menu", "qty", "expiresOn"}], "note"} the opening stock
+    GET  /api/cotr/pool-ledger?pool=&dateFrom=&dateTo=   page cotr.storage / cotr.production: the sheet "Product" (089)
+    PUT  /api/cotr/pool-count                   {"pool", "day", "lines": [{"menu", "qty", "batchNo", "expiresOn"}]} the physical leftover
+    PUT  /api/cotr/pool-moves                   {"pool", "day", "kind": transfer|arrived, "lines": {menu: cups}, "note"}
+    POST /api/cotr/pool-ledger/import           page cotr.production: {"pool", "file", "dateFrom", "dateTo", "apply"} the pool
+                                                workbook (sheets Product, Report Armada) saved as source 'sheet'
+    GET  /api/cotr/report-armada?pool=&dateFrom=&dateTo=   B / S / C / W / T per driver, cash, QRIS, operational
     GET  /api/cotr/area-requests?dateFrom=&dateTo=&status=&pool=   page cotr.schedule / cotr.check-in (088)
     POST /api/cotr/area-requests/{id}/decide    page cotr.schedule: {"approve", "note", "code", "name", "address", "city"}
     GET  /api/cotr/photos/{check-in|signature|request}/{id}   the team (cotr.check-in) or the driver it belongs to
@@ -605,32 +609,80 @@ def receive_transfer(transfer_id: str, request: Request, user: dict = Depends(re
     return {"ok": True}
 
 
-class OpeningLine(BaseModel):
+class CountLine(BaseModel):
     menu: str = Field(min_length=1, max_length=40)
     qty: int = Field(ge=0, le=100_000)
+    batchNo: Optional[str] = Field(None, max_length=40)  # the production / batch code (SSDD)
     expiresOn: Optional[date] = None
-    batchNo: Optional[str] = Field(None, max_length=40)  # the production / batch code of the cups
 
 
-class OpeningIn(BaseModel):
+class CountIn(BaseModel):
     pool: str = Field(min_length=1, max_length=40)
     day: date
-    lines: list[OpeningLine] = Field(max_length=200)
+    lines: list[CountLine] = Field(max_length=500)
+
+
+class MovesIn(BaseModel):
+    pool: str = Field(min_length=1, max_length=40)
+    day: date
+    kind: Literal["transfer", "arrived"]
+    lines: dict[str, int]
     note: Optional[str] = Field(None, max_length=300)
 
 
 @router.get("/pool-ledger")
-def pool_ledger(pool: str, day: Optional[date] = None, history: int = Query(7, ge=1, le=62),
+def pool_ledger(pool: str, dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
                 _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
-    return _call(cotr_ledger.run, pool, day or today(), history)
+    end = dateTo or today()
+    start = dateFrom or end - timedelta(days=6)
+    if (end - start).days > 62:
+        raise HTTPException(422, detail="Periode paling lama 62 hari")
+    return _call(cotr_ledger.run, pool, start, end)
 
 
-@router.put("/pool-opening")
-def pool_opening(body: OpeningIn, request: Request, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
-    out = _call(cotr_ledger.save_opening, user, body.pool, body.day, [x.model_dump(mode="json") for x in body.lines], body.note)
-    _log(request, user, "cotr.pool-opening", f"COTR stock awal {body.pool} {body.day}: {sum(x.qty for x in body.lines)} cup",
+@router.put("/pool-count")
+def pool_count(body: CountIn, request: Request, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    out = _call(cotr_ledger.save_count, user, body.pool, body.day, [x.model_dump(mode="json") for x in body.lines])
+    _log(request, user, "cotr.pool-count", f"COTR sisa aktual {body.pool} {body.day}: {sum(x.qty for x in body.lines)} cup",
          {"pool": body.pool, "day": body.day.isoformat()})
     return out
+
+
+@router.put("/pool-moves")
+def pool_moves(body: MovesIn, request: Request, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    out = _call(cotr_ledger.save_moves, user, body.pool, body.day, body.kind, body.lines, body.note)
+    _log(request, user, "cotr.pool-moves", f"COTR product {body.kind} {body.pool} {body.day}", {"lines": body.lines})
+    return out
+
+
+class WorkbookIn(BaseModel):
+    pool: str = Field(min_length=1, max_length=40)
+    file: str = Field(min_length=10, max_length=40_000_000)  # base64 xlsx
+    dateFrom: date
+    dateTo: Optional[date] = None
+    apply: bool = False
+
+
+@router.post("/pool-ledger/import")
+def pool_import(body: WorkbookIn, request: Request, user: dict = Depends(require_page("cotr.production"))):
+    try:
+        data = base64.b64decode(body.file.split(",")[-1])
+    except (binascii.Error, ValueError):
+        raise HTTPException(422, detail="File tidak dapat dibaca") from None
+    out = _call(cotr_ledger.import_workbook, user, body.pool, data, body.dateFrom, body.dateTo, body.apply)
+    if body.apply:
+        _log(request, user, "cotr.pool-import", f"COTR import workbook {body.pool} dari {body.dateFrom}", out)
+    return out
+
+
+@router.get("/report-armada")
+def report_armada(pool: str, dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
+                  _: dict = Depends(require_page("cotr.storage", "cotr.production", "cotr.check-in"))):
+    end = dateTo or today()
+    start = dateFrom or end.replace(day=1)
+    if (end - start).days > 62:
+        raise HTTPException(422, detail="Periode paling lama 62 hari")
+    return cotr_ledger.report_armada(pool, start, end)
 
 
 @router.get("/pool-stock")

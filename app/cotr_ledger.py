@@ -161,6 +161,39 @@ def run(pool: str, d_from: date, d_to: date) -> dict:
     return base | {"days": out_days}
 
 
+def run_all(d_from: date, d_to: date) -> dict:
+    """Every pool / HUB together (the HUBs with a count): each figure and lot added up per day and menu."""
+    pools = [r["code"] for r in db.fetch(f"SELECT DISTINCT pool_code AS code FROM {P}.cotr_pool_count ORDER BY 1")]
+    runs = [run(p, d_from, d_to) for p in pools]
+    menus = runs[0]["menus"] if runs else run("", d_from, d_to)["menus"]
+    days: dict[str, dict] = {}
+    for r in runs:
+        for d in r["days"]:
+            if d["source"] == "opening":
+                continue
+            day = days.setdefault(d["day"], {"day": d["day"], "source": d["source"], "rows": {}, "pools": 0})
+            day["pools"] += 1
+            if d["source"] != day["source"]:
+                day["source"] = "mixed"
+            for code, c in d["rows"].items():
+                t = day["rows"].setdefault(code, {"actual": 0, "balance": 0, "expired": 0, "lots": [], "uncounted": 0})
+                for k in ("opening", *KINDS, "calculated", "expired"):
+                    t[k] = t.get(k, 0) + (c.get(k) or 0)
+                if c.get("actual") is None:
+                    t["uncounted"] += 1
+                else:
+                    t["actual"] += c["actual"]
+                    t["balance"] += c["balance"] or 0
+                t["lots"] += [l | {"pool": r["pool"]} for l in c.get("lots", [])]
+    for day in days.values():
+        for t in day["rows"].values():
+            if t.pop("uncounted") == day["pools"]:
+                t["actual"] = t["balance"] = None  # no pool counted it yet
+    starts = [r["start"] for r in runs if r["start"]]
+    return {"pool": None, "from": d_from.isoformat(), "to": d_to.isoformat(), "start": min(starts) if starts else None, "pools": pools,
+            "menus": menus, "days": sorted(days.values(), key=lambda x: x["day"])}
+
+
 def save_count(user: dict, pool: str, day: date, lines: list[dict]) -> dict:
     """The physical leftover of a pool at the end of a day (Sisa Aktual Fisik) per menu and batch code; replaces the
     count of that day. The first count of a pool is its opening stock."""
@@ -252,7 +285,8 @@ def report_armada(pool: str, d_from: date, d_to: date) -> dict:
     T (sold) and its total at the menu price; the cash and QRIS, and the operational costs asked (requests)."""
     menus = _menu_map()
     shifts = db.fetch(f"""SELECT s.*, d.name AS driver_name, d.nickname FROM {P}.cotr_shift s JOIN {P}.cotr_driver d ON d.code = s.driver_code
-                           WHERE s.pool_code = %s AND s.day BETWEEN %s AND %s ORDER BY d.name, s.day""", (pool, d_from, d_to))
+                           WHERE (%s::text IS NULL OR s.pool_code = %s) AND s.day BETWEEN %s AND %s ORDER BY d.name, s.day""",
+                      (pool, pool, d_from, d_to))
     ids = [s["id"] for s in shifts]
     reloads = db.fetch(f"SELECT * FROM {P}.cotr_reload WHERE shift_id = ANY(%s) AND status = 'received'", (ids,)) if ids else []
     sales = db.fetch(f"SELECT shift_id, lines, payment, total FROM {P}.cotr_sale WHERE shift_id = ANY(%s) AND voided_at IS NULL", (ids,)) if ids else []
@@ -282,7 +316,7 @@ def report_armada(pool: str, d_from: date, d_to: date) -> dict:
             t = sold.get(code, 0)
             lines[code] = {"b": brought.get(code, 0), "s": end.get(code) if s["status"] == "closed" else None, "c": tasted.get(code, 0),
                            "w": waste.get(code, 0), "t": t, "total": t * float((menus.get(code) or {}).get("price") or 0)}
-        d = drivers.setdefault(s["driver_code"], {"code": s["driver_code"], "name": s["driver_name"], "nickname": s["nickname"], "days": []})
+        d = drivers.setdefault(s["driver_code"], {"code": s["driver_code"], "name": s["driver_name"], "nickname": s["nickname"], "pool": s["pool_code"], "days": []})
         d["days"].append({"day": _iso(s["day"]), "status": s["status"], "lines": lines, "total": sum(x["total"] for x in lines.values()),
                           "cash": cash, "qris": qris, "operational": sum(float(r["amount"]) for r in reqs if r["shift_id"] == s["id"]),
                           "cashActual": float(s["cash_actual"]) if s.get("cash_actual") is not None else None})
@@ -290,14 +324,15 @@ def report_armada(pool: str, d_from: date, d_to: date) -> dict:
     have = {(d["code"], x["day"]) for d in drivers.values() for x in d["days"]}
     for r in db.fetch(f"""SELECT r.*, d.name AS driver_name, d.nickname FROM {P}.cotr_report_day r
                            LEFT JOIN {P}.cotr_driver d ON d.code = r.driver_code
-                          WHERE r.pool_code = %s AND r.day BETWEEN %s AND %s ORDER BY r.label, r.day""", (pool, d_from, d_to)):
+                          WHERE (%s::text IS NULL OR r.pool_code = %s) AND r.day BETWEEN %s AND %s ORDER BY r.label, r.day""",
+                      (pool, pool, d_from, d_to)):
         key = r["driver_code"] or r["label"]
         if (key, _iso(r["day"])) in have:
             continue
         lines = {k: v | {"total": int(v.get("t") or 0) * float((menus.get(k) or {}).get("price") or 0)} for k, v in (r["lines"] or {}).items()}
         total = sum(x["total"] for x in lines.values())
         qris = float(r["qris"]) if r["qris"] is not None else 0.0
-        d = drivers.setdefault(key, {"code": r["driver_code"], "name": r["driver_name"] or r["label"], "nickname": r["nickname"], "days": []})
+        d = drivers.setdefault(key, {"code": r["driver_code"], "name": r["driver_name"] or r["label"], "nickname": r["nickname"], "pool": r["pool_code"], "days": []})
         d.setdefault("label", r["label"])
         d["days"].append({"day": _iso(r["day"]), "status": "sheet", "lines": lines, "total": total, "qris": qris, "cash": total - qris,
                           "operational": float(r["operational"]) if r["operational"] is not None else 0.0, "operationalNote": r["operational_note"],

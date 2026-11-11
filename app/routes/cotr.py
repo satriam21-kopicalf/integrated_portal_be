@@ -636,13 +636,13 @@ class MovesIn(BaseModel):
 
 
 @router.get("/pool-ledger")
-def pool_ledger(pool: str, dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
+def pool_ledger(pool: Optional[str] = None, dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
                 _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
     end = dateTo or today()
     start = dateFrom or end - timedelta(days=6)
     if (end - start).days > 62:
         raise HTTPException(422, detail="Periode paling lama 62 hari")
-    return _call(cotr_ledger.run, pool, start, end)
+    return _call(cotr_ledger.run, pool, start, end) if pool else _call(cotr_ledger.run_all, start, end)
 
 
 @router.put("/pool-count")
@@ -721,7 +721,7 @@ def pool_import(body: WorkbookIn, request: Request, user: dict = Depends(require
 
 
 @router.get("/report-armada")
-def report_armada(pool: str, dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
+def report_armada(pool: Optional[str] = None, dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
                   _: dict = Depends(require_page("cotr.storage", "cotr.production", "cotr.check-in"))):
     end = dateTo or today()
     start = dateFrom or end.replace(day=1)
@@ -731,7 +731,7 @@ def report_armada(pool: str, dateFrom: Optional[date] = None, dateTo: Optional[d
 
 
 @router.get("/pool-stock")
-def pool_stock(pool: str, day: Optional[date] = None, _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+def pool_stock(pool: Optional[str] = None, day: Optional[date] = None, _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
     return cotr.pool_stock(pool, day or today())
 
 
@@ -904,8 +904,8 @@ def batch_waste(batch_id: str, body: BatchWasteIn, request: Request, user: dict 
 
 
 @router.get("/stock")
-def stock(pool: str, day: Optional[date] = None, _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
-    return _call(cotr.stock, pool, day)
+def stock(pool: Optional[str] = None, day: Optional[date] = None, _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    return _call(cotr.stock, pool, day) if pool else _call(cotr.stock_all, day)
 
 
 @router.get("/receipts")

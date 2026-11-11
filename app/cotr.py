@@ -1948,12 +1948,13 @@ def receive_transfer(user: dict, transfer_id: str, pools: Optional[tuple] = None
         raise CotrError("Kiriman tidak ditemukan atau sudah diterima")
 
 
-def pool_stock(pool: str, day: date) -> dict:
+def pool_stock(pool: Optional[str], day: date) -> dict:
     """What a pool received from the hubs, per batch (first expired first) with the days left; and what is on the way."""
     rows = db.fetch(f"""SELECT t.id::text AS transfer, t.qty, t.status, t.sent_at, t.received_at, b.batch_no, b.menu_code, b.produced_on, b.expires_on,
                                m.name AS menu_name
                           FROM {P}.cotr_transfer t JOIN {P}.cotr_batch b ON b.id = t.batch_id JOIN {P}.cotr_menu m ON m.code = b.menu_code
-                         WHERE t.pool_code = %s AND b.expires_on >= %s - 3 ORDER BY b.expires_on, b.produced_on""", (pool, day))
+                         WHERE (%s::text IS NULL OR t.pool_code = %s) AND b.expires_on >= %s - 3 ORDER BY b.expires_on, b.produced_on""",
+                    (pool, pool, day))
     items = [{"transfer": r["transfer"], "batchNo": r["batch_no"], "menu": r["menu_code"], "menuName": r["menu_name"], "qty": r["qty"],
               "status": r["status"], "producedOn": _iso(r["produced_on"]), "expiresOn": _iso(r["expires_on"]),
               "daysLeft": (r["expires_on"] - day).days, "sentAt": _iso(r["sent_at"]), "receivedAt": _iso(r["received_at"])} for r in rows]
@@ -2167,6 +2168,24 @@ def stock(pool: str, day: Optional[date] = None) -> dict:
                      "estimate": round(est, 3), "cost": cost, "value": round(est * cost, 2) if cost is not None else None})
     return {"pool": pool, "day": day.isoformat(), "soDay": _iso(last["day"]) if last else None, "rows": rows,
             "value": round(sum(r["value"] or 0 for r in rows), 2), "negative": sum(1 for r in rows if r["estimate"] < -1e-6)}
+
+
+def stock_all(day: Optional[date] = None) -> dict:
+    """The running stock of every pool / HUB with stock, added up per item."""
+    pools = [r["code"] for r in db.fetch(f"""SELECT code FROM {P}.cotr_pool WHERE is_active AND code IN (
+                SELECT pool_code FROM {P}.cotr_receipt UNION SELECT pool_code FROM {P}.cotr_stock_count UNION SELECT hub_code FROM {P}.cotr_batch
+                UNION SELECT pool_code FROM {P}.cotr_waste WHERE item_code IS NOT NULL)""")]
+    rows: dict[str, dict] = {}
+    for p in pools:
+        for r in stock(p, day)["rows"]:
+            t = rows.setdefault(r["code"], {**r, "so": 0.0, "received": 0.0, "used": 0.0, "waste": 0.0, "estimate": 0.0, "value": None})
+            for k in ("so", "received", "used", "waste", "estimate"):
+                t[k] = round(t[k] + r[k], 3)
+            if r["value"] is not None:
+                t["value"] = round((t["value"] or 0) + r["value"], 2)
+    out = sorted(rows.values(), key=lambda r: (r["category"] or "", r["name"]))
+    return {"pool": None, "day": (day or today()).isoformat(), "soDay": None, "rows": out, "pools": pools,
+            "value": round(sum(r["value"] or 0 for r in out), 2), "negative": sum(1 for r in out if r["estimate"] < -1e-6)}
 
 
 def counts(pool: Optional[str]) -> list[dict]:

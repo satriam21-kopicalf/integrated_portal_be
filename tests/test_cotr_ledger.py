@@ -45,3 +45,15 @@ def test_the_names_of_the_report_armada_find_their_driver():
     assert L._match("BNI 147 BAHANUALI", drivers) == "D2"
     assert L._match("BNI 37 M.APRIZAL", drivers) == "D3"
     assert L._match("BNI 91 ADIT", drivers) is None  # two Adit: not guessed
+
+
+def test_every_pool_adds_up(monkeypatch):
+    day = {"day": "2026-11-08", "source": "sheet", "rows": {"PRM": {"opening": 10, "arrived": 5, "sold": 3, "calculated": 12, "actual": 11, "balance": -1, "expired": 0, "lots": []}}}
+    other = {"day": "2026-11-08", "source": "app", "rows": {"PRM": {"opening": 4, "arrived": 0, "sold": 1, "calculated": 3, "actual": None, "balance": None, "expired": 0, "lots": []}}}
+    runs = {"A": {"pool": "A", "start": "2026-11-07", "menus": [{"code": "PRM", "name": "Premium"}], "days": [day]},
+            "B": {"pool": "B", "start": "2026-11-07", "menus": [{"code": "PRM", "name": "Premium"}], "days": [other]}}
+    monkeypatch.setattr(L.db, "fetch", lambda q, p=None: [{"code": "A"}, {"code": "B"}])
+    monkeypatch.setattr(L, "run", lambda pool, a, b: runs[pool])
+    out = L.run_all(date(2026, 11, 8), date(2026, 11, 8))
+    r = out["days"][0]["rows"]["PRM"]
+    assert (r["opening"], r["calculated"], r["actual"], out["days"][0]["source"]) == (14, 15, 11, "mixed")

@@ -57,6 +57,7 @@ Portal (Monitoring COTR):
     GET  /api/cotr/issues?status=&fleet=&pool=&days=, GET /api/cotr/issues/{id}   page cotr.fleet / cotr.check-in (088)
     POST /api/cotr/issues/{id}/step             page cotr.fleet: {"status", "note", "handler", "cost"} handle an issue
     GET  /api/cotr/reconcile?pool=&dateFrom=&dateTo=     page cotr.storage / cotr.production: workbook vs ESB vs app per pool-day
+    GET  /api/cotr/dashboard?day=                 the daily dashboard of every pool (recommendation #7)
     GET/PUT/DELETE /api/cotr/driver-labels       the names of Report Armada without a driver, tied by hand (migration 093)
     GET  /api/cotr/pool-ledger?pool=&dateFrom=&dateTo=   page cotr.storage / cotr.production: the sheet "Product" (089)
     PUT  /api/cotr/pool-count                   {"pool", "day", "lines": [{"menu", "qty", "batchNo", "expiresOn"}]} the physical leftover
@@ -785,6 +786,12 @@ def untie_driver_label(pool: str, label: str, request: Request, user: dict = Dep
     out = cotr_ledger.untie_label(pool, label)
     _log(request, user, "cotr.label.untie", f"Tautan nama workbook {label} ({pool}) dihapus", out)
     return out
+
+
+@router.get("/dashboard")
+def dashboard(day: Optional[date] = None, _: dict = Depends(require_page("cotr.check-in", "cotr.storage", "cotr.production"))):
+    from app import cotr_dashboard
+    return cotr_dashboard.dashboard(day)
 
 
 @router.get("/reconcile")

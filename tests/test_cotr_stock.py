@@ -137,3 +137,21 @@ def test_label_alias_wins_and_ignored():
     assert cotr_ledger._match("BRI 55 BAKRI", drivers) == "D1"
     assert cotr_ledger._match("BRI 55 BAKRI", drivers, {"bakri": "D2"}) == "D2"
     assert cotr_ledger._match("BNI 47 PESENAN POOL", drivers, {"pesenanpool": None}) is None
+
+
+def test_dashboard_adds_up_the_pools(monkeypatch):
+    from datetime import date
+    from app import cotr_dashboard, cotr_ledger
+    day = date(2026, 11, 11)
+    monkeypatch.setattr(cotr_dashboard.db, "fetch", lambda q, p=None: [{"code": "HUB-A", "name": "Hub A"}] if "cotr_pool" in q and "menu" not in q
+                        else [{"code": "M1", "name": "Premium", "price": 10000}] if "cotr_menu" in q else [])
+    monkeypatch.setattr(cotr_dashboard.db, "fetchrow", lambda q, p=None: {"n": 2})
+    monkeypatch.setattr(cotr_ledger, "run", lambda code, a, b: {"days": [
+        {"day": "2026-11-11", "source": "sheet", "rows": {"M1": {"sold": 5, "waste": 1, "cupping": 0, "arrived": 0, "transfer": 0, "actual": 7, "balance": 1, "expired": 0}}}]})
+    monkeypatch.setattr(cotr_ledger, "report_armada", lambda *a: {"drivers": [{"code": "D1", "name": "Budi", "pool": "HUB-A",
+                        "days": [{"status": "sheet", "total": 50000, "lines": {"M1": {"t": 5}}}]}]})
+    monkeypatch.setattr(cotr_ledger, "reconcile", lambda *a: {"summary": {"diff": 3}})
+    monkeypatch.setattr(cotr_ledger, "unmatched_labels", lambda p: {"unmatched": [1]})
+    r = cotr_dashboard.dashboard(day)
+    assert r["summary"]["sold"] == 5 and r["summary"]["revenue"] == 50000 and r["summary"]["balance"] == 1
+    assert r["drivers"][0]["cups"] == 5 and r["todo"]["reconcileDiff"] == 3 and r["todo"]["unmatchedNames"] == 1

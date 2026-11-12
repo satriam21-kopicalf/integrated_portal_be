@@ -89,7 +89,8 @@ def mdr(month: date, codes: Optional[list[str]]) -> dict[str, dict]:
 
 def ratio(start: date, end: date, codes: Optional[list[str]] = None) -> dict:
     """Per outlet (with POS sales in the period) and in total, the columns of the workbook."""
-    p = {"s": start, "e": end, "codes": codes}
+    # 2026-11-12: rejected / cancelled / void invoices and item journals are left out, as the stock opname documents
+    p = {"s": start, "e": end, "codes": codes, "skip": list(SKIP_STATUSES)}
     scope = "AND (%(codes)s::text[] IS NULL OR branch_code = ANY(%(codes)s))"
     sales = {r["branch_code"]: r for r in db.fetch(
         f"""SELECT branch_code,
@@ -103,6 +104,7 @@ def ratio(start: date, end: date, codes: Optional[list[str]] = None) -> dict:
         f"""SELECT b.branch_code, d.counterparty_name, sum(d.total) AS total, count(*) AS docs
             FROM {SCHEMA}.erp_documents d JOIN {SCHEMA}.master_branches b ON b.branch_id::text = d.branch_id::text
             WHERE d.module = 'purchase_invoice' AND d.doc_date BETWEEN %(s)s AND %(e)s AND d.deleted_at IS NULL
+              AND coalesce(d.status_name, '') <> ALL(%(skip)s)
               AND (%(codes)s::text[] IS NULL OR b.branch_code = ANY(%(codes)s))
             GROUP BY 1, 2""", p):
         key = SUPPLIERS.get(r["counterparty_name"], "other")
@@ -122,6 +124,7 @@ def ratio(start: date, end: date, codes: Optional[list[str]] = None) -> dict:
             JOIN {SCHEMA}.erp_document_lines l ON l.module = d.module AND l.doc_num = d.doc_num AND l.line_type = 'detail'
             JOIN {SCHEMA}.master_branches b ON b.branch_id::text = d.branch_id::text
             WHERE d.module = 'item_journal' AND d.doc_date BETWEEN %(s)s AND %(e)s AND d.deleted_at IS NULL
+              AND coalesce(d.status_name, '') <> ALL(%(skip)s)
               AND (%(codes)s::text[] IS NULL OR b.branch_code = ANY(%(codes)s))
             GROUP BY 1""", p)}
     day_a, day_b = start - timedelta(days=1), end

@@ -183,11 +183,14 @@ def set_prices(rows: list[dict], user: dict) -> int:
     return n
 
 
-def prices_on(day: date, codes: Optional[list[str]] = None) -> dict[str, float]:
+def prices_on(day: date, codes: Optional[list[str]] = None, later: bool = True) -> dict[str, float]:
+    """{item: Pricelist price valid on `day`}. 2026-11-12: an item whose first price was set after `day` takes that first
+    price (`later`): AIR NEW got its price on 12 Nov and every menu with water lost its HPP for the days before."""
     return {r["item_code"]: _f(r["price"]) for r in db.fetch(
         f"""SELECT DISTINCT ON (item_code) item_code, price FROM {P}.cc_item_price
-             WHERE valid_from <= %s AND (%s::text[] IS NULL OR item_code = ANY(%s))
-             ORDER BY item_code, valid_from DESC""", (day, codes, codes))}
+             WHERE (%s OR valid_from <= %s) AND (%s::text[] IS NULL OR item_code = ANY(%s))
+             ORDER BY item_code, (valid_from <= %s) DESC, CASE WHEN valid_from <= %s THEN valid_from END DESC NULLS LAST,
+                      valid_from""", (later, day, codes, codes, day, day))}
 
 
 # ---------------------------------------------------------------- WIP and menu cards

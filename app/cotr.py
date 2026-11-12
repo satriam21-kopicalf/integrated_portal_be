@@ -974,6 +974,16 @@ def link_account(user_id: str, driver_code: Optional[str]) -> None:
             conn.execute(f"UPDATE {P}.cotr_driver SET user_id = %s WHERE code = %s", (user_id, driver_code))
 
 
+def own_pool(user: dict) -> Optional[str]:
+    """#16 (2026-11-12): the pool / HUB a COTR account is bound to — its employee's pool when it is not a superadmin
+    and has no Storage & Production (the COTR management chooses any pool); None = free to choose."""
+    from app.access import has_page
+    if not user.get("id") or user.get("role") == "superadmin" or has_page(user, "cotr.production"):
+        return None
+    d = driver_of_account(str(user["id"]))
+    return d["pool"] if d and d.get("pool") else None
+
+
 def driver_of_account(user_id: str) -> Optional[dict]:
     r = db.fetchrow(f"""SELECT d.code, d.name, d.nickname, d.pool_code, d.department, p.name AS pool_name FROM {P}.cotr_driver d
                          LEFT JOIN {P}.cotr_pool p ON p.code = d.pool_code WHERE d.user_id = %s""", (user_id,))

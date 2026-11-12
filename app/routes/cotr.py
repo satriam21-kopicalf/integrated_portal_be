@@ -115,6 +115,18 @@ def _call(fn, *args):
         raise HTTPException(422, detail=str(e)) from None
 
 
+def _own_pool(user: dict, pool: Optional[str]) -> Optional[str]:
+    """#16: an account bound to its pool / HUB (cotr.own_pool) sees that pool only, whatever pool is asked."""
+    return cotr.own_pool(user) or pool
+
+
+def _check_pool(user: dict, pool: Optional[str]) -> None:
+    """A write to a pool that is not the account's own (see _own_pool) is refused."""
+    own = _own_pool(user, pool)
+    if pool and own and own != pool:
+        raise HTTPException(403, detail="Akun ini hanya untuk pool / HUB-nya sendiri")
+
+
 def _log(request: Request, user: dict, action: str, summary: str, details: Optional[dict] = None) -> None:
     activity.record(action, user=user, request=request, summary=summary, details=details or {})
 
@@ -370,7 +382,8 @@ def resolve_reload(reload_id: str, body: LinesIn, request: Request, user: dict =
 
 
 @router.get("/storage")
-def storage(day: Optional[date] = None, pool: Optional[str] = None, _: dict = Depends(require_page("cotr.storage"))):
+def storage(day: Optional[date] = None, pool: Optional[str] = None, user: dict = Depends(require_page("cotr.storage"))):
+    pool = _own_pool(user, pool)
     return cotr.storage_day(day or today(), pool)
 
 
@@ -656,7 +669,8 @@ class MovesIn(BaseModel):
 
 @router.get("/pool-ledger")
 def pool_ledger(pool: Optional[str] = None, dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
-                _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+                user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    pool = _own_pool(user, pool)
     end = dateTo or today()
     start = dateFrom or end - timedelta(days=6)
     if (end - start).days > 62:
@@ -666,6 +680,7 @@ def pool_ledger(pool: Optional[str] = None, dateFrom: Optional[date] = None, dat
 
 @router.put("/pool-count")
 def pool_count(body: CountIn, request: Request, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    _check_pool(user, body.pool)
     out = _call(cotr_ledger.save_count, user, body.pool, body.day, [x.model_dump(mode="json") for x in body.lines])
     _log(request, user, "cotr.pool-count", f"COTR sisa aktual {body.pool} {body.day}: {sum(x.qty for x in body.lines)} cup",
          {"pool": body.pool, "day": body.day.isoformat()})
@@ -674,6 +689,7 @@ def pool_count(body: CountIn, request: Request, user: dict = Depends(require_pag
 
 @router.put("/pool-moves")
 def pool_moves(body: MovesIn, request: Request, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    _check_pool(user, body.pool)
     out = _call(cotr_ledger.save_moves, user, body.pool, body.day, body.kind, body.lines, body.note)
     _log(request, user, "cotr.pool-moves", f"COTR product {body.kind} {body.pool} {body.day}", {"lines": body.lines})
     return out
@@ -757,7 +773,8 @@ def batch_code_qty(body: LotIn, request: Request, user: dict = Depends(require_p
 
 
 @router.get("/pool-available")
-def pool_available(pool: str, day: Optional[date] = None, _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+def pool_available(pool: str, day: Optional[date] = None, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    pool = _own_pool(user, pool)
     """What the pool can still assign to its drivers today, per menu (opening + arrived / transfer − given …)."""
     d = day or today()
     a = _call(cotr_ledger.availability, pool, d)
@@ -773,7 +790,8 @@ class LabelTieIn(BaseModel):
 
 
 @router.get("/driver-labels")
-def driver_labels(pool: Optional[str] = None, _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+def driver_labels(pool: Optional[str] = None, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    pool = _own_pool(user, pool)
     return cotr_ledger.unmatched_labels(pool or None)
 
 
@@ -804,17 +822,20 @@ def shipment_plan(day: Optional[date] = None, days: int = Query(7, ge=1, le=28),
 
 
 @router.get("/fifo")
-def pool_fifo(pool: str, day: Optional[date] = None, _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+def pool_fifo(pool: str, day: Optional[date] = None, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    pool = _own_pool(user, pool)
     return cotr_ledger.fifo(pool, day or today())
 
 
 @router.get("/pool-close")
-def pool_close(pool: str, day: Optional[date] = None, _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+def pool_close(pool: str, day: Optional[date] = None, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    pool = _own_pool(user, pool)
     return cotr_ledger.closing(pool, day or today())
 
 
 @router.post("/pool-close")
 def pool_close_day(body: CloseIn, request: Request, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    _check_pool(user, body.pool)
     out = _call(cotr_ledger.close_day, user, body.pool, body.day, body.note)
     _log(request, user, "cotr.pool.close", f"Closing {body.pool} {body.day.isoformat()} (balance {out['balance']})", {"pool": body.pool, "day": body.day.isoformat(), "note": body.note})
     return out
@@ -835,7 +856,8 @@ def dashboard(day: Optional[date] = None, _: dict = Depends(require_page("cotr.c
 
 @router.get("/reconcile")
 def reconcile(pool: Optional[str] = None, dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
-              _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+              user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    pool = _own_pool(user, pool)
     end = dateTo or today()
     start = dateFrom or end.replace(day=1)
     if start > end or (end - start).days > 62:
@@ -845,7 +867,8 @@ def reconcile(pool: Optional[str] = None, dateFrom: Optional[date] = None, dateT
 
 @router.get("/batch-codes")
 def batch_codes(pool: Optional[str] = None, dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
-                _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+                user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    pool = _own_pool(user, pool)
     end = dateTo or today()
     start = dateFrom or end.replace(day=1)
     if (end - start).days > 92:
@@ -900,7 +923,8 @@ def esb_document(module: str, doc_num: str, _: dict = Depends(require_page("cotr
 
 @router.get("/report-armada")
 def report_armada(pool: Optional[str] = None, dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
-                  _: dict = Depends(require_page("cotr.storage", "cotr.production", "cotr.check-in"))):
+                  user: dict = Depends(require_page("cotr.storage", "cotr.production", "cotr.check-in"))):
+    pool = _own_pool(user, pool)
     end = dateTo or today()
     start = dateFrom or end.replace(day=1)
     if (end - start).days > 62:
@@ -909,7 +933,8 @@ def report_armada(pool: Optional[str] = None, dateFrom: Optional[date] = None, d
 
 
 @router.get("/pool-stock")
-def pool_stock(pool: Optional[str] = None, day: Optional[date] = None, _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+def pool_stock(pool: Optional[str] = None, day: Optional[date] = None, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    pool = _own_pool(user, pool)
     return cotr.pool_stock(pool, day or today())
 
 
@@ -1011,13 +1036,15 @@ class WasteIn(BaseModel):
 
 @router.get("/waste")
 def waste_list(dateFrom: Optional[date] = None, dateTo: Optional[date] = None, pool: Optional[str] = None,
-               _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+               user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    pool = _own_pool(user, pool)
     end = dateTo or today()
     return cotr.waste_list(dateFrom or end - timedelta(days=30), end, pool)
 
 
 @router.post("/waste", status_code=201)
 def waste_add(body: WasteIn, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    _check_pool(user, body.pool_code)
     return _call(cotr.waste_add, user, body.model_dump())
 
 
@@ -1141,13 +1168,15 @@ def batch_waste(batch_id: str, body: BatchWasteIn, request: Request, user: dict 
 
 
 @router.get("/stock")
-def stock(pool: Optional[str] = None, day: Optional[date] = None, _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+def stock(pool: Optional[str] = None, day: Optional[date] = None, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    pool = _own_pool(user, pool)
     return _call(cotr.stock, pool, day) if pool else _call(cotr.stock_all, day)
 
 
 @router.get("/receipts")
 def receipts(pool: Optional[str] = None, dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
-             _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+             user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    pool = _own_pool(user, pool)
     end = dateTo or today()
     return {"data": _call(cotr.receipts, pool, dateFrom or end - timedelta(days=30), end)}
 
@@ -1167,7 +1196,8 @@ def receipt_delete(receipt_id: str, request: Request, user: dict = Depends(requi
 
 
 @router.get("/counts")
-def counts(pool: Optional[str] = None, _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+def counts(pool: Optional[str] = None, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    pool = _own_pool(user, pool)
     return {"data": _call(cotr.counts, pool)}
 
 

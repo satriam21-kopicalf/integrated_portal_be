@@ -112,6 +112,12 @@ def signed_in_user(row: dict) -> dict:
     """The user as the app keeps it after sign-in: the account plus the pages it opens."""
     # platforms: {page: [portal | operations | cotr]} where the superadmins set the menus (display only, 054)
     out = {**accounts.public_user(row), "pages": access.pages_for(row), "platforms": access.page_platforms()}
+    # 2026-11-12 (#16): the pool / HUB a COTR storage or pool leader account is bound to (the pool filters lock on it)
+    try:
+        from app import cotr
+        out["hubPool"] = cotr.own_pool(row)
+    except Exception:  # noqa: BLE001 - never block the sign-in on it
+        out["hubPool"] = None
     # 2026-11-11: no SWAT menu of its own any more; every app shows the pages given to the account (User Accounts)
     return out
 

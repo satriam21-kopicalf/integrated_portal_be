@@ -227,3 +227,13 @@ def test_shipment_plan_needs_less_what_is_good(monkeypatch):
     # (90 sold + 10 used) × 1.1 = 110 needed; 30 good (5 expired) → send 80
     assert (row["need"], row["have"], row["expiring"], row["send"]) == (110, 30, 5, 80)
     assert r["totals"] == [{"menu": "M1", "name": "Premium", "send": 80}]
+
+
+def test_own_pool_binds_storage_accounts(monkeypatch):
+    from app import cotr
+    import app.access as acc
+    monkeypatch.setattr(cotr, "driver_of_account", lambda uid: {"pool": "HUB-TBT"})
+    monkeypatch.setattr(acc, "has_page", lambda u, p: u.get("mgmt", False))
+    assert cotr.own_pool({"id": "u1", "role": "user"}) == "HUB-TBT"
+    assert cotr.own_pool({"id": "u2", "role": "user", "mgmt": True}) is None
+    assert cotr.own_pool({"id": "u3", "role": "superadmin"}) is None

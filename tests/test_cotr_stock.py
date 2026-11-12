@@ -200,3 +200,30 @@ def test_fifo_gives_the_oldest_lots_first(monkeypatch):
     assert [(l["batchNo"], l["qty"]) for l in r["drivers"][0]["lines"]] == [("0108", 3), ("0210", 2)]
     b = r["drivers"][1]["lines"]
     assert [(l["batchNo"], l["qty"], l.get("short", False)) for l in b] == [("0210", 2, False), (None, 10, False), (None, 3, True)]
+
+
+def test_shipment_plan_needs_less_what_is_good(monkeypatch):
+    from datetime import date
+    from app import cotr_ledger
+    day = date(2026, 11, 12)
+    monkeypatch.setattr(cotr_ledger, "_menu_map", lambda: {"M1": {"code": "M1", "name": "Premium", "sort": 1, "shelf_life_days": 3}})
+    monkeypatch.setattr(cotr_ledger, "run", lambda *a: {"days": [
+        {"source": "sheet", "rows": {"M1": {"sold": 100, "waste": 4, "cupping": 6}}},
+        {"source": "sheet", "rows": {"M1": {"sold": 80, "waste": 0, "cupping": 10}}}]})
+
+    def fetch(q, p=None):
+        if "DISTINCT pool_code" in q:
+            return [{"code": "HUB-A"}]
+        if "SELECT code, name" in q:
+            return [{"code": "HUB-A", "name": "Hub A"}]
+        if "cotr_pool_count" in q:
+            return [{"menu_code": "M1", "batch_no": "0110", "qty": 30, "expires_on": date(2026, 11, 13)},
+                    {"menu_code": "M1", "batch_no": "0108", "qty": 5, "expires_on": date(2026, 11, 11)}]
+        return []
+    monkeypatch.setattr(cotr_ledger.db, "fetch", fetch)
+    monkeypatch.setattr(cotr_ledger.db, "fetchrow", lambda q, p=None: {"day": date(2026, 11, 11)})
+    r = cotr_ledger.shipment_plan(day, 7, 10)
+    row = r["pools"][0]["rows"][0]
+    # (90 sold + 10 used) × 1.1 = 110 needed; 30 good (5 expired) → send 80
+    assert (row["need"], row["have"], row["expiring"], row["send"]) == (110, 30, 5, 80)
+    assert r["totals"] == [{"menu": "M1", "name": "Premium", "send": 80}]

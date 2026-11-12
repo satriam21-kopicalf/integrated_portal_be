@@ -758,3 +758,49 @@ def fifo(pool: str, day: date) -> dict:
             "menus": [{"menu": c, "name": (menus.get(c) or {}).get("name", c), "lots": lots.get(c, []), "expired": gone.get(c, []),
                        "left": [l for l in left.get(c, []) if l["qty"] > 0]} for c in listed],
             "drivers": drivers}
+
+
+# ---------------------------------------------------------------- what to send each HUB (#8)
+def shipment_plan(day: date, days: int = 7, buffer: int = 10) -> dict:
+    """The cups to send each pool / HUB for `day` (recommendation #8): per menu the average sold and used (waste +
+    cupping) over the last `days` days with figures, plus `buffer` %, less what the pool still has that is good on
+    `day` (its last leftover, without the lots expiring before it). Never below 0."""
+    import math
+    menus = _menu_map()
+    names = {r["code"]: r["name"] for r in db.fetch(f"SELECT code, name FROM {P}.cotr_pool")}
+    pools = [r["code"] for r in db.fetch(f"SELECT DISTINCT pool_code AS code FROM {P}.cotr_pool_count ORDER BY 1")]
+    batches = {r["batch_no"]: r["expires_on"] for r in db.fetch(
+        f"SELECT batch_no, expires_on FROM {P}.cotr_batch WHERE produced_on >= %s", (day - timedelta(days=60),))}
+    out, totals = [], {}
+    for pool in pools:
+        hist = [d for d in run(pool, day - timedelta(days=days + 1), day - timedelta(days=1))["days"] if d["source"] != "opening"]
+        with_sales = [d for d in hist if sum(r.get("sold") or 0 for r in d["rows"].values())]
+        n = len(with_sales[-days:]) or 1
+        recent = with_sales[-days:]
+        last = db.fetchrow(f"SELECT max(day) AS day FROM {P}.cotr_pool_count WHERE pool_code = %s AND day < %s", (pool, day))
+        counted = (last or {}).get("day")
+        good: dict[str, int] = {}
+        expiring: dict[str, int] = {}
+        for r in (db.fetch(f"""SELECT menu_code, batch_no, sum(qty)::int AS qty, max(expires_on) AS expires_on FROM {P}.cotr_pool_count
+                                WHERE pool_code = %s AND day = %s GROUP BY 1, 2""", (pool, counted)) if counted else []):
+            exp = r["expires_on"] or expiry(r["batch_no"], menus.get(r["menu_code"], {}), counted, batches)
+            bucket = expiring if exp and exp < day else good
+            bucket[r["menu_code"]] = bucket.get(r["menu_code"], 0) + r["qty"]
+        rows = []
+        for c in sorted(menus, key=lambda c: (menus[c].get("sort") or 0, c)):
+            if not menus[c].get("is_active", True):
+                continue
+            sold = sum((d["rows"].get(c) or {}).get("sold") or 0 for d in recent) / n
+            used = sum(((d["rows"].get(c) or {}).get("waste") or 0) + ((d["rows"].get(c) or {}).get("cupping") or 0) for d in recent) / n
+            need = math.ceil(round((sold + used) * (100 + buffer) / 100, 6))
+            have = good.get(c, 0)
+            send = max(0, need - have)
+            if not (sold or used or have or expiring.get(c)):
+                continue
+            rows.append({"menu": c, "name": menus[c]["name"], "avgSold": round(sold, 1), "avgUsed": round(used, 1), "need": need,
+                         "have": have, "expiring": expiring.get(c, 0), "send": send})
+            totals[c] = totals.get(c, 0) + send
+        out.append({"pool": pool, "name": names.get(pool, pool), "counted": _iso(counted), "days": len(recent), "rows": rows,
+                    "send": sum(r["send"] for r in rows)})
+    return {"day": day.isoformat(), "days": days, "buffer": buffer, "pools": out,
+            "totals": [{"menu": c, "name": menus[c]["name"], "send": v} for c, v in totals.items()]}

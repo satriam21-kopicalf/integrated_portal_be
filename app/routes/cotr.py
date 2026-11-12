@@ -58,6 +58,7 @@ Portal (Monitoring COTR):
     POST /api/cotr/issues/{id}/step             page cotr.fleet: {"status", "note", "handler", "cost"} handle an issue
     GET  /api/cotr/reconcile?pool=&dateFrom=&dateTo=     page cotr.storage / cotr.production: workbook vs ESB vs app per pool-day
     GET  /api/cotr/dashboard?day=                 the daily dashboard of every pool (recommendation #7)
+    GET  /api/cotr/shipment-plan?day=&days=&buffer=   cups to send each HUB: average sold + used + buffer − good leftover (#8)
     GET  /api/cotr/fifo?pool=&day=              the batch codes per driver of the day's assignments, first expiring first (#13)
     GET/POST/DELETE /api/cotr/pool-close        the night closing of a pool: steps, close (note when balance is not 0), reopen (094)
     GET/PUT/DELETE /api/cotr/driver-labels       the names of Report Armada without a driver, tied by hand (migration 093)
@@ -794,6 +795,12 @@ class CloseIn(BaseModel):
     pool: str = Field(min_length=1, max_length=40)
     day: date
     note: Optional[str] = Field(None, max_length=500)
+
+
+@router.get("/shipment-plan")
+def shipment_plan(day: Optional[date] = None, days: int = Query(7, ge=1, le=28), buffer: int = Query(10, ge=0, le=100),
+                  _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    return cotr_ledger.shipment_plan(day or today() + timedelta(days=1), days, buffer)
 
 
 @router.get("/fifo")

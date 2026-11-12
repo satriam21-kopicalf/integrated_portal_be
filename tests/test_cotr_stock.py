@@ -264,3 +264,20 @@ def test_sale_api_takes_client_id_and_time():
     from app.routes.cotr import SaleIn
     s = SaleIn(lines=[{"code": "M1", "qty": 2}], payment="cash", clientId="abc-1", at="2026-11-12T09:15:00+07:00")
     assert s.clientId == "abc-1" and s.at.hour == 9
+
+
+def test_arrived_and_transfer_come_from_esb_on_a_workbook_day():
+    """2026-11-13: Product Datang is read from the ESB simple transfers whenever ESB has the day, a workbook day too."""
+    from datetime import date as D
+    from app.cotr_ledger import day_figures
+    d1, d2, d3 = D(2026, 11, 5), D(2026, 11, 6), D(2026, 11, 7)
+    sheets = {d1: {"M": {"sold": 100, "arrived": 140, "transfer": 3}}, d2: {"M": {"sold": 90, "arrived": 50}}}
+    esb = {d1: {"M": {"sold": 99, "arrived": 135}}, d3: {"M": {"sold": 10, "arrived": 20}}}
+    manual = {d1: {"M": {"arrived": 5}}}
+    f, src, insrc = day_figures(d1, esb, sheets, {}, manual)
+    assert (src, insrc) == ("sheet", "esb")
+    assert f["M"] == {"sold": 100, "arrived": 140}  # sold from the workbook, arrived 135 (ESB) + 5 entered, no workbook transfer
+    f, src, insrc = day_figures(d2, esb, sheets, {}, {})
+    assert (src, insrc) == ("sheet", "sheet") and f["M"] == {"sold": 90, "arrived": 50}  # ESB has nothing that day
+    f, src, insrc = day_figures(d3, esb, sheets, {d3: {"M": {"arrived": 7, "sold": 3}}}, {})
+    assert (src, insrc) == ("esb", "esb") and f["M"] == {"sold": 10, "arrived": 20}

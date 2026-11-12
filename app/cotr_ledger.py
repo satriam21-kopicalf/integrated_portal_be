@@ -10,6 +10,9 @@
     = calculated; actual = the physical count (per production / batch code); balance = actual − calculated.
 A day taken from the sheets (source 'sheet') keeps the figures of the sheet; else the ESB company COTR when it has
 documents that day (source 'esb': simple sales, transfers, cupping / waste journals, app/cotr_esb.py); else the app.
+Arrived and transfer (2026-11-13: the COTR team matched them, by the date of the document): from the ESB simple
+transfers whenever ESB has documents of the pool that day, a workbook day too — "Product Datang" is no longer typed;
+the workbook only when ESB has nothing that day. What is entered by hand (products ESB does not record) adds to it.
 The first count of a pool is its opening stock: the stock runs from the day after it.
 """
 import re
@@ -89,17 +92,36 @@ def _system(pool: str, d0: date, d1: date) -> dict[date, dict[str, dict[str, int
     return days
 
 
-def _moves(pool: str, d0: date, d1: date) -> tuple[dict, set]:
-    """Entered / sheet figures per day and menu, and the days taken from the sheets."""
-    days: dict[date, dict[str, dict[str, int]]] = {}
-    sheet: set[date] = set()
+def _moves(pool: str, d0: date, d1: date) -> tuple[dict, dict]:
+    """The figures per day and menu entered by hand, and those of the sheets (their days are the sheet days)."""
+    manual: dict[date, dict[str, dict[str, int]]] = {}
+    sheets: dict[date, dict[str, dict[str, int]]] = {}
     for r in db.fetch(f"""SELECT day, menu_code, kind, source, sum(qty) AS qty FROM {P}.cotr_pool_move
                            WHERE pool_code = %s AND day BETWEEN %s AND %s GROUP BY 1, 2, 3, 4""", (pool, d0, d1)):
-        m = days.setdefault(r["day"], {}).setdefault(r["menu_code"], {})
+        m = (sheets if r["source"] == "sheet" else manual).setdefault(r["day"], {}).setdefault(r["menu_code"], {})
         m[r["kind"]] = m.get(r["kind"], 0) + int(r["qty"])
-        if r["source"] == "sheet":
-            sheet.add(r["day"])
-    return days, sheet
+    return manual, sheets
+
+
+IN_KINDS = ("arrived", "transfer")
+
+
+def day_figures(d: date, esb: dict, sheets: dict, system: dict, manual: dict) -> tuple[dict[str, dict[str, int]], str, str]:
+    """The figures of one day per menu, its source and the source of arrived / transfer: sold, waste and cupping from
+    one source (the workbook, else ESB, else the app); arrived and transfer from ESB when it has the day, else that
+    source; the entered ones added."""
+    base = sheets[d] if d in sheets else esb[d] if d in esb else system.get(d) or {}
+    source = "sheet" if d in sheets else "esb" if d in esb else "app"
+    moved = esb[d] if d in esb else base
+    out: dict[str, dict[str, int]] = {}
+    for src, kinds in ((base, None), (moved, IN_KINDS), (manual.get(d) or {}, IN_KINDS + ("sold", "waste", "cupping"))):
+        for code, f in src.items():
+            for k, v in f.items():
+                if (kinds is None and k in IN_KINDS) or (kinds is not None and k not in kinds):
+                    continue
+                m = out.setdefault(code, {})
+                m[k] = m.get(k, 0) + v
+    return out, source, "esb" if d in esb else source
 
 
 def first_count(pool: str) -> Optional[date]:
@@ -119,7 +141,7 @@ def run(pool: str, d_from: date, d_to: date) -> dict:
     start = max(start, d_from - timedelta(days=MAX_DAYS)) if (d_from - start).days > MAX_DAYS else start
     counts = _counts(pool, start, d_to)
     system = _system(pool, start + timedelta(days=1), d_to)
-    moves, sheet = _moves(pool, start + timedelta(days=1), d_to)
+    manual, sheets = _moves(pool, start + timedelta(days=1), d_to)
     from app import cotr_esb  # migration 090: the ESB company COTR, where the workbooks have no day
     esb = cotr_esb.figures(start + timedelta(days=1), d_to).get(pool, {})
     batches = {r["batch_no"]: r["expires_on"] for r in db.fetch(
@@ -143,13 +165,11 @@ def run(pool: str, d_from: date, d_to: date) -> dict:
     d = start + timedelta(days=1)
     while d <= d_to:
         rows = {}
+        figures, source, in_source = day_figures(d, esb, sheets, system, manual)
         for c in codes:
             f = {k: 0 for k in KINDS}
-            # one source a day, never two: the workbook, else ESB, else the app (the entered moves add to ESB / the app)
-            srcs = [moves.get(d) or {}] if d in sheet else [esb[d], moves.get(d) or {}] if d in esb else [system.get(d) or {}, moves.get(d) or {}]
-            for src in srcs:
-                for k, v in src.get(c, {}).items():
-                    f[k] += v
+            for k, v in figures.get(c, {}).items():
+                f[k] += v
             opening = left[c] - gone[c]
             calc = opening + f["transfer"] + f["arrived"] - f["sold"] - f["waste"] - f["cupping"]
             counted = counts.get(d, {}).get(c)
@@ -160,7 +180,7 @@ def run(pool: str, d_from: date, d_to: date) -> dict:
                        "balance": actual - calc if actual is not None else None, "expired": exp, "lots": lots}
             left[c], gone[c] = (actual if actual is not None else calc), exp
         if d >= d_from:
-            out_days.append({"day": d.isoformat(), "source": "sheet" if d in sheet else "esb" if d in esb else "app", "rows": rows})
+            out_days.append({"day": d.isoformat(), "source": source, "arrivedSource": in_source, "rows": rows})
         d += timedelta(days=1)
     return base | {"days": out_days}
 

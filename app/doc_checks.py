@@ -263,6 +263,8 @@ def save_fix(user: dict, body: dict) -> dict:
             f"""INSERT INTO {T} (module, doc_num, line_type, product_code, uom, branch_code, doc_date, old_qty, new_qty, reason, created_by)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
             (module, doc, line_type, code, uom, line["branch_code"], line["doc_date"], abs(old), qty, reason[:500], by)).fetchone()
+    from app import running_stock
+    running_stock.clear()  # the Stock List reads the corrected quantity now
     return {**_fix_view(row), "docNum": doc, "code": code, "uom": uom, "branch": line["branch_code"]}
 
 
@@ -271,6 +273,8 @@ def cancel_fix(user: dict, fix_id: int) -> dict:
                           RETURNING id, doc_num, product_code, uom, branch_code""", (user.get("full_name") or user.get("username"), fix_id))
     if not row:
         raise DocFixError("Koreksi tidak ditemukan atau sudah dibatalkan")
+    from app import running_stock
+    running_stock.clear()
     return dict(row)
 
 

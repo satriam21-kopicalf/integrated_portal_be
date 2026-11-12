@@ -20,6 +20,10 @@ def menu_of(name: Any, menus: dict[str, dict]) -> Optional[str]:
     n = " ".join(str(name or "").lower().split())
     if not n:
         return None
+    # migration 095: a name mapped by hand in Master Menu wins
+    for c, m in menus.items():
+        if n in (m.get("esb_aliases") or []):
+            return c
     if "banana" in n and not any("banana" in m["name"].lower() for m in menus.values()):
         return None  # a flavour the master does not sell is not another menu
 

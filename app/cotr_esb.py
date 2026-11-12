@@ -285,3 +285,20 @@ def freshness() -> dict:
                        "esbTransfer": _iso(esb.get(p, {}).get("simple_transfer")), "esbJournal": _iso(esb.get(p, {}).get("item_journal")),
                        "sheet": _iso(sheet.get(p)), "count": _iso(count.get(p)), "app": _iso(app.get(p))} for p in pools
                       if any((esb.get(p), sheet.get(p), count.get(p), app.get(p)))]}
+
+
+def unmapped_products(days: int = 120) -> list[dict]:
+    """The COTR products of ESB (cups sold, moved or journaled in the last `days` days) no menu takes — by name or by
+    the names mapped in Master Menu (migration 095); with how often and when they were last seen."""
+    menus = _menu_map()
+    rows = db.fetch(f"""SELECT l.product_name AS name, count(*)::int AS lines, sum(l.qty) AS qty, max(d.doc_date) AS last
+                          FROM {S}.erp_document_lines l JOIN {S}.erp_documents d ON d.module = l.module AND d.doc_num = l.doc_num
+                         WHERE d.deleted_at IS NULL AND d.doc_date >= current_date - %s AND l.module IN ('simple_sales', 'simple_transfer', 'item_journal')
+                           AND upper(l.product_name) LIKE '%%COTR%%' AND upper(l.product_name) NOT LIKE '%%PREMIX%%'
+                         GROUP BY 1 ORDER BY 2 DESC""", (days,))
+    out = []
+    for r in rows:
+        hit = menu_of(r["name"], menus)
+        out.append({"name": r["name"], "key": " ".join(str(r["name"]).lower().split()), "lines": r["lines"], "qty": float(r["qty"] or 0),
+                    "last": _iso(r["last"]), "menu": hit, "menuName": (menus.get(hit) or {}).get("name") if hit else None})
+    return out

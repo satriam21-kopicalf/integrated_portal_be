@@ -58,6 +58,7 @@ Portal (Monitoring COTR):
     POST /api/cotr/issues/{id}/step             page cotr.fleet: {"status", "note", "handler", "cost"} handle an issue
     GET  /api/cotr/reconcile?pool=&dateFrom=&dateTo=     page cotr.storage / cotr.production: workbook vs ESB vs app per pool-day
     GET  /api/cotr/monthly-workbook?month=YYYY-MM&pool=   the month in one Excel file (Product, Report Armada, batch codes, waste, issues, reconciliation; #12)
+    GET  /api/cotr/esb/products                  the COTR products of ESB and the menu each goes to (#5, migration 095)
     GET  /api/cotr/freshness                     the newest ESB / workbook / count / app day per pool, last ESB sync (#3)
     GET  /api/cotr/dashboard?day=                 the daily dashboard of every pool (recommendation #7)
     GET  /api/cotr/shipment-plan?day=&days=&buffer=   cups to send each HUB: average sold + used + buffer − good leftover (#8)
@@ -897,6 +898,12 @@ def monthly_workbook(request: Request, month: str = Query(..., pattern=r"^\d{4}-
 @router.get("/freshness")
 def freshness(_: dict = Depends(require_page("cotr.check-in", "cotr.storage", "cotr.production"))):
     return cotr_esb.freshness()
+
+
+@router.get("/esb/products")
+def esb_products(_: dict = Depends(require_page("cotr.menu", "cotr.production"))):
+    """The COTR products of ESB with the menu each one goes to (by name or mapped by hand, migration 095)."""
+    return {"data": cotr_esb.unmapped_products()}
 
 
 @router.get("/esb/summary")

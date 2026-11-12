@@ -237,3 +237,12 @@ def test_own_pool_binds_storage_accounts(monkeypatch):
     assert cotr.own_pool({"id": "u1", "role": "user"}) == "HUB-TBT"
     assert cotr.own_pool({"id": "u2", "role": "user", "mgmt": True}) is None
     assert cotr.own_pool({"id": "u3", "role": "superadmin"}) is None
+
+
+def test_menu_of_takes_the_names_mapped_by_hand():
+    from app.cotr_sheet import menu_of
+    menus = {"M1": {"code": "M1", "name": "Calf Premium Cup", "esb_aliases": []},
+             "M9": {"code": "M9", "name": "Smooth Banana 250", "esb_aliases": ["pisang susu - cotr (250ml)"]}}
+    assert menu_of("Pisang  Susu - COTR (250ml)", menus) == "M9"
+    assert menu_of("Premium Cup - COTR (145ml)", menus) == "M1"
+    assert menu_of("Es Teh Manis", menus) is None

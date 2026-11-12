@@ -225,7 +225,8 @@ def _iso(v: Any) -> Any:
 
 def menus(active_only: bool = False) -> list[dict]:
     where = "WHERE is_active" if active_only else ""
-    return db.fetch(f"SELECT code, name, category, price, bom_code, is_active, sort, shelf_life_days FROM {P}.cotr_menu {where} ORDER BY sort, name")
+    return db.fetch(f"""SELECT code, name, category, price, bom_code, is_active, sort, shelf_life_days, esb_aliases
+                          FROM {P}.cotr_menu {where} ORDER BY sort, name""")
 
 
 def driver_of(user: dict) -> Optional[dict]:
@@ -777,7 +778,7 @@ MASTERS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
     "request-kinds": ("cotr_request_kind", "code", ("code", "name", "description", "max_amount", "needs_photo", "sort", "is_active"),
                       "sort, name"),  # migration 083
     "menu-categories": ("cotr_menu_category", "code", ("code", "name", "sort", "is_active"), "sort, name"),
-    "menus": ("cotr_menu", "code", ("code", "name", "category", "price", "bom_code", "is_active", "sort", "shelf_life_days"), "sort, name"),
+    "menus": ("cotr_menu", "code", ("code", "name", "category", "price", "bom_code", "is_active", "sort", "shelf_life_days", "esb_aliases"), "sort, name"),
     "boms": ("cotr_bom", "code", ("code", "name", "output", "yield_qty", "yield_unit", "lines", "kind", "units", "note"),
              "kind DESC, name"),
     "items": ("cotr_item", "code", ("code", "name", "category", "unit", "pack_unit", "pack_qty", "cost", "is_stock",
@@ -839,6 +840,8 @@ def _value(col: str, v: Any) -> Any:
         if any(x["qty"] <= 0 for x in lines):
             raise CotrError("Qty komponen harus lebih dari 0")
         return Jsonb(lines)
+    if col == "esb_aliases":  # migration 095: the ESB / workbook names of a menu, lower case, spaces collapsed
+        return sorted({" ".join(str(s).lower().split()) for s in (v.splitlines() if isinstance(v, str) else (v or [])) if str(s).strip()})
     if col == "storage":
         return [s.strip() for s in (v.split(",") if isinstance(v, str) else (v or [])) if str(s).strip()]
     if col == "tiers":  # [{from, to | null, rate}] sorted, not overlapping

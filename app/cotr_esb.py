@@ -258,3 +258,30 @@ def sync_recipes(user: dict, apply: bool) -> dict:
         for menu, code in picks.items():
             conn.execute(f"UPDATE {P}.cotr_menu SET bom_code = %s WHERE code = %s", (code, menu))
     return summary | {"saved": True}
+
+
+def freshness() -> dict:
+    """How fresh the figures of every pool / HUB are (recommendation #3): the newest ESB document per kind (sales,
+    transfers, journals), the last day of the workbook, the last physical count and the last app shift, and when ESB
+    was last synced — so the team knows whether today's figures are complete."""
+    br = branches()
+    pool_of = {(k or ""): v["pool"] for k, v in br.items() if v["pool"]}
+    esb: dict[str, dict[str, Optional[date]]] = {}
+    for r in db.fetch(f"""SELECT upper(trim(branch_name)) AS b, module, max(doc_date) AS last FROM {S}.erp_documents
+                           WHERE deleted_at IS NULL AND module IN ('simple_sales', 'simple_transfer', 'item_journal') GROUP BY 1, 2"""):
+        p = pool_of.get(r["b"] or "")
+        if p:
+            esb.setdefault(p, {})[r["module"]] = r["last"]
+    sync = db.fetchrow(f"SELECT max(synced_at) AS at FROM {S}.erp_documents")
+    def last(sql: str) -> dict[str, date]:
+        return {r["pool"]: r["day"] for r in db.fetch(sql)}
+    sheet = last(f"SELECT pool_code AS pool, max(day) AS day FROM {P}.cotr_pool_move WHERE source = 'sheet' GROUP BY 1")
+    count = last(f"SELECT pool_code AS pool, max(day) AS day FROM {P}.cotr_pool_count GROUP BY 1")
+    app = last(f"SELECT pool_code AS pool, max(day) AS day FROM {P}.cotr_shift GROUP BY 1")
+    names = {r["code"]: r["name"] for r in db.fetch(f"SELECT code, name FROM {P}.cotr_pool WHERE kind = 'parent' OR kind IS NULL")}
+    pools = sorted(set(names) | set(esb) | set(sheet) | set(count))
+    return {"synced": _iso(sync["at"]) if sync else None, "today": _iso(date.today()),
+            "pools": [{"pool": p, "name": names.get(p, p), "esbSales": _iso(esb.get(p, {}).get("simple_sales")),
+                       "esbTransfer": _iso(esb.get(p, {}).get("simple_transfer")), "esbJournal": _iso(esb.get(p, {}).get("item_journal")),
+                       "sheet": _iso(sheet.get(p)), "count": _iso(count.get(p)), "app": _iso(app.get(p))} for p in pools
+                      if any((esb.get(p), sheet.get(p), count.get(p), app.get(p)))]}

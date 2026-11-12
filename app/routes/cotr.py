@@ -57,6 +57,7 @@ Portal (Monitoring COTR):
     GET  /api/cotr/issues?status=&fleet=&pool=&days=, GET /api/cotr/issues/{id}   page cotr.fleet / cotr.check-in (088)
     POST /api/cotr/issues/{id}/step             page cotr.fleet: {"status", "note", "handler", "cost"} handle an issue
     GET  /api/cotr/reconcile?pool=&dateFrom=&dateTo=     page cotr.storage / cotr.production: workbook vs ESB vs app per pool-day
+    GET  /api/cotr/freshness                     the newest ESB / workbook / count / app day per pool, last ESB sync (#3)
     GET  /api/cotr/dashboard?day=                 the daily dashboard of every pool (recommendation #7)
     GET  /api/cotr/shipment-plan?day=&days=&buffer=   cups to send each HUB: average sold + used + buffer − good leftover (#8)
     GET  /api/cotr/fifo?pool=&day=              the batch codes per driver of the day's assignments, first expiring first (#13)
@@ -877,6 +878,11 @@ def batch_codes(pool: Optional[str] = None, dateFrom: Optional[date] = None, dat
 
 
 # ---------------------------------------------------------------- the ESB company COTR (migration 090)
+
+@router.get("/freshness")
+def freshness(_: dict = Depends(require_page("cotr.check-in", "cotr.storage", "cotr.production"))):
+    return cotr_esb.freshness()
+
 
 @router.get("/esb/summary")
 def esb_summary(_: dict = Depends(require_page("cotr.production", "cotr.storage"))):

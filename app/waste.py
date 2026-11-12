@@ -491,9 +491,11 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], scope
         if value and value in allowed:
             where.append(f"e.{key} = %({key})s")
             params[key] = value
-    if category:
-        where.append("e.category = %(cat)s")
-        params["cat"] = category
+    # one or more categories, joined by "|" (2026-11-12: Cost Control filters several at once)
+    cats = [c.strip() for c in (category or "").split("|") if c.strip()]
+    if cats:
+        where.append("e.category = ANY(%(cat)s)")
+        params["cat"] = cats
     if user_id:
         where.append("e.user_id::text = %(u)s")
         params["u"] = user_id

@@ -258,3 +258,12 @@ def test_a_new_entry_returns_no_correction_subquery():
     # 2026-11-10: the count of corrections in RETURNING compared waste_correction.id (bigint) to the entry id (uuid)
     assert "waste_correction" not in waste.COLUMNS_NEW and "0 AS corrections" in waste.COLUMNS_NEW
     assert "c.entry_id = e.id" in waste.COLUMNS
+
+
+def test_monitor_filters_several_categories(monkeypatch):
+    seen = []
+    monkeypatch.setattr(waste.db, "fetch", lambda q, p=None: seen.append(p) or [])
+    monkeypatch.setattr(waste.db, "fetchrow", lambda q, p=None: {"entries": 0})
+    monkeypatch.setattr(waste, "with_values", lambda rows: [])
+    waste.monitor(date(2026, 11, 1), date(2026, 11, 12), None, "", "Expired|Tumpah| ")
+    assert seen[0]["cat"] == ["Expired", "Tumpah"]

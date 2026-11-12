@@ -58,6 +58,9 @@ Portal (Monitoring COTR):
     POST /api/cotr/issues/{id}/step             page cotr.fleet: {"status", "note", "handler", "cost"} handle an issue
     GET  /api/cotr/reconcile?pool=&dateFrom=&dateTo=     page cotr.storage / cotr.production: workbook vs ESB vs app per pool-day
     GET  /api/cotr/monthly-workbook?month=YYYY-MM&pool=   the month in one Excel file (Product, Report Armada, batch codes, waste, issues, reconciliation; #12)
+    GET  /api/cotr/esb/storage-journals?dateFrom=&dateTo=   cupping and waste of the storage from the ESB item journals
+    GET/POST /api/cotr/esb/sync-now              ask the server to read ESB COTR now (last 2 days, every 10 min at most; #4)
+    POST /api/cotr/esb/sync-batches {apply}     Simple Manufacturing of ESB COTR as production batches (#6)
     GET  /api/cotr/esb/products                  the COTR products of ESB and the menu each goes to (#5, migration 095)
     GET  /api/cotr/freshness                     the newest ESB / workbook / count / app day per pool, last ESB sync (#3)
     GET  /api/cotr/dashboard?day=                 the daily dashboard of every pool (recommendation #7)
@@ -903,6 +906,42 @@ def freshness(_: dict = Depends(require_page("cotr.check-in", "cotr.storage", "c
     return cotr_esb.freshness()
 
 
+@router.get("/esb/storage-journals")
+def esb_storage_journals(dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
+                         _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    end = dateTo or today()
+    start = dateFrom or end.replace(day=1)
+    if start > end or (end - start).days > 92:
+        raise HTTPException(422, detail="Periode paling lama 92 hari")
+    return cotr_esb.storage_journals(start, end)
+
+
+class ApplyIn(BaseModel):
+    apply: bool = False
+
+
+@router.get("/esb/sync-now")
+def esb_sync_state(_: dict = Depends(require_page("cotr.check-in", "cotr.storage", "cotr.production"))):
+    return cotr_esb.sync_state()
+
+
+@router.post("/esb/sync-now")
+def esb_sync_now(request: Request, user: dict = Depends(require_page("cotr.production"))):
+    """#4: read ESB COTR now (last 2 days) instead of waiting for the half hour; at most every 10 minutes."""
+    out = _call(cotr_esb.request_sync, user)
+    _log(request, user, "cotr.esb.sync-now", "Sinkron ESB COTR diminta", {})
+    return out
+
+
+@router.post("/esb/sync-batches")
+def esb_sync_batches(body: ApplyIn, request: Request, user: dict = Depends(require_page("cotr.production"))):
+    """The Simple Manufacturing of ESB COTR as production batches (#6): check (apply false) or save."""
+    out = _call(cotr_esb.sync_batches, user, body.apply)
+    if body.apply:
+        _log(request, user, "cotr.esb.batches", f"Batch produksi dari ESB: {out['batches']} batch, {out['cups']} cup", {"batches": out["batches"]})
+    return out
+
+
 @router.get("/esb/products")
 def esb_products(_: dict = Depends(require_page("cotr.menu", "cotr.production"))):
     """The COTR products of ESB with the menu each one goes to (by name or mapped by hand, migration 095)."""
@@ -922,10 +961,6 @@ def esb_documents(module: str, dateFrom: Optional[date] = None, dateTo: Optional
     if (end - start).days > 400:
         raise HTTPException(422, detail="Periode paling lama 400 hari")
     return _call(cotr_esb.documents, module, start, end, branch, q)
-
-
-class ApplyIn(BaseModel):
-    apply: bool = False
 
 
 @router.post("/esb/sync-recipes")

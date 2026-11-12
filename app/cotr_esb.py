@@ -302,3 +302,107 @@ def unmapped_products(days: int = 120) -> list[dict]:
         out.append({"name": r["name"], "key": " ".join(str(r["name"]).lower().split()), "lines": r["lines"], "qty": float(r["qty"] or 0),
                     "last": _iso(r["last"]), "menu": hit, "menuName": (menus.get(hit) or {}).get("name") if hit else None})
     return out
+
+
+def sync_batches(user: Optional[dict], apply: bool, days: int = 60) -> dict:
+    """The Simple Manufacturing of ESB COTR as production batches (recommendation #6, 2026-11-12): every result line of a
+    COTR menu (not the premix) of the last `days` days becomes a batch of its hub — the ESB document number, the cups,
+    the day it was made and its expiry (the shelf life of the menu). Saved again: the cups follow ESB; batches made in the
+    portal stay as they are."""
+    from datetime import timedelta
+    menus = _menu_map()
+    br = branches()
+    rows = db.fetch(f"""SELECT d.doc_num, d.doc_date, d.branch_name, l.product_name, l.qty FROM {S}.erp_documents d
+                          JOIN {S}.erp_document_lines l ON l.module = d.module AND l.doc_num = d.doc_num
+                         WHERE d.module = 'simple_manufacturing' AND l.line_type = 'result' AND d.deleted_at IS NULL
+                           AND d.doc_date >= current_date - %s ORDER BY d.doc_date, d.doc_num""", (days,))
+    found, skipped = [], {"noMenu": 0, "noHub": 0}
+    for r in rows:
+        name = (r["product_name"] or "").upper()
+        if "COTR" not in name or "PREMIX" in name:
+            continue
+        menu = menu_of(r["product_name"], menus)
+        if not menu:
+            skipped["noMenu"] += 1
+            continue
+        hub = (br.get((r["branch_name"] or "").strip().upper()) or {}).get("pool")
+        if not hub:
+            skipped["noHub"] += 1
+            continue
+        qty = int(round(float(r["qty"] or 0)))
+        if qty <= 0:
+            continue
+        life = int((menus[menu].get("shelf_life_days") or 0))
+        no = str(r["doc_num"]).split(" ")[0]
+        found.append({"batchNo": no, "hub": hub, "menu": menu, "qty": qty, "producedOn": r["doc_date"],
+                      "expiresOn": r["doc_date"] + timedelta(days=life), "doc": r["doc_num"]})
+    out = {"batches": len(found), "skipped": skipped, "cups": sum(b["qty"] for b in found),
+           "sample": [{**b, "producedOn": _iso(b["producedOn"]), "expiresOn": _iso(b["expiresOn"])} for b in found[-5:]]}
+    if not apply:
+        return out
+    with db.transaction() as conn:
+        for b in found:
+            conn.execute(f"""INSERT INTO {P}.cotr_batch (batch_no, hub_code, menu_code, qty, produced_on, expires_on, note, created_by)
+                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                             ON CONFLICT (batch_no) DO UPDATE SET qty = EXCLUDED.qty, produced_on = EXCLUDED.produced_on,
+                                 expires_on = EXCLUDED.expires_on, hub_code = EXCLUDED.hub_code, menu_code = EXCLUDED.menu_code
+                             WHERE {P}.cotr_batch.note LIKE 'ESB %%'""",
+                         (b["batchNo"], b["hub"], b["menu"], b["qty"], b["producedOn"], b["expiresOn"], f"ESB {b['doc']}", (user or {}).get("id")))
+    return out | {"saved": True}
+
+
+# ---------------------------------------------------------------- "Sync now" (#4)
+SYNC_EVERY_MIN = 10
+
+
+def _flag_dir():
+    from pathlib import Path
+    from app.config import get_settings
+    return Path(get_settings().export_dir)
+
+
+def sync_state() -> dict:
+    """The "Sync now" of the portal (recommendation #4): asked and waiting for the server (the host checks every minute),
+    and when the last one finished."""
+    from datetime import datetime, timezone
+    d = _flag_dir()
+    asked = d / ".cotr-sync-now"
+    done = d / ".cotr-sync-done"
+    at = lambda p: datetime.fromtimestamp(p.stat().st_mtime, timezone.utc).isoformat() if p.exists() else None  # noqa: E731
+    return {"requested": at(asked), "done": done.read_text().strip() if done.exists() else None, "every": SYNC_EVERY_MIN}
+
+
+def request_sync(user: dict) -> dict:
+    """Asks the server to read ESB COTR now (the last 2 days), at most once every 10 minutes."""
+    from datetime import datetime, timezone
+    state = sync_state()
+    if state["requested"]:
+        raise CotrError("Sinkron sudah diminta, tunggu sebentar (paling lama 1 menit untuk mulai)")
+    last = state["done"]
+    if last:
+        try:
+            ago = (datetime.now(timezone.utc) - datetime.fromisoformat(last.replace("Z", "+00:00"))).total_seconds() / 60
+        except ValueError:
+            ago = SYNC_EVERY_MIN
+        if ago < SYNC_EVERY_MIN:
+            raise CotrError(f"Sinkron terakhir {int(ago)} menit lalu; coba lagi {SYNC_EVERY_MIN - int(ago)} menit lagi")
+    d = _flag_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / ".cotr-sync-now").write_text(f"{user.get('username') or user.get('id')}\n")
+    return sync_state()
+
+
+def storage_journals(d0: date, d1: date) -> dict:
+    """The cupping and waste of the storage (Storage Palmerah …) from the item journals of ESB COTR (the request of the
+    COTR team, 2026-11-12): per day and material the quantity and its value at the HPP of the journal."""
+    rows = db.fetch(f"""SELECT d.doc_date AS day, d.branch_name AS branch, l.product_name AS item, l.uom_name AS unit,
+                               upper(coalesce(l.raw_data->>'purposeName', '')) AS purpose, sum(abs(l.qty)) AS qty,
+                               sum(abs(l.qty) * coalesce(nullif(l.raw_data->>'hpp', '')::numeric, l.price, 0)) AS value
+                          FROM {S}.erp_documents d JOIN {S}.erp_document_lines l ON l.module = d.module AND l.doc_num = d.doc_num
+                         WHERE d.module = 'item_journal' AND d.deleted_at IS NULL AND upper(d.branch_name) LIKE '%%STORAGE%%'
+                           AND d.doc_date BETWEEN %s AND %s GROUP BY 1, 2, 3, 4, 5 ORDER BY 1 DESC, 6 DESC""", (d0, d1))
+    out = [{"day": _iso(r["day"]), "branch": r["branch"], "item": r["item"], "unit": r["unit"],
+            "kind": "cupping" if "CUPPING" in r["purpose"] else "waste" if "WAST" in r["purpose"] else "other",
+            "qty": float(r["qty"] or 0), "value": round(float(r["value"] or 0))} for r in rows]
+    return {"from": _iso(d0), "to": _iso(d1), "rows": out,
+            "cupping": sum(r["value"] for r in out if r["kind"] == "cupping"), "waste": sum(r["value"] for r in out if r["kind"] == "waste")}

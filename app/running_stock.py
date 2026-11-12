@@ -71,15 +71,10 @@ def _waste(starts: dict[str, date], d_to: date, cutoffs: Optional[dict[str, date
         if cut and r.get("created_at") and r["created_at"] < cut:  # entered before the SO was sent: inside the count
             continue
         mine = out.setdefault(r["branch_code"], {})
-        parts = ([(x.get("code"), _f(x.get("grams")), "GR") for x in (r["exploded"] or []) if x.get("isStock", True)]
-                 if r["scope"] == "premix" else [(r["item_code"], _f(r["qty"]), r["unit"])])
-        for code, qty, unit in parts:
+        for code, qty, unit, recipe in waste.entry_parts(r):
             if not code:
                 continue
-            base, packs = units.get(code, ("", {}))
-            q = mc.to_unit(qty, unit, base) if base else qty
-            if q is None and str(unit or "").upper() in packs:
-                q = qty * packs[str(unit or "").upper()]
+            q = waste.base_qty(units, code, qty, unit, recipe)
             if q is not None:
                 mine[code] = mine.get(code, 0.0) + q
     return out

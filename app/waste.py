@@ -270,20 +270,11 @@ def with_values(rows: list[dict]) -> list[dict]:
             return hpp[code][0], "esb"
         return None, None
 
-    def base(code: str, qty: float, unit: Optional[str]) -> Optional[float]:
-        b, packs = units.get(code, ("", {}))
-        v = mc.to_unit(qty, unit, b) if b else qty
-        if v is None and (unit or "").upper() in packs:
-            v = qty * packs[(unit or "").upper()]
-        return v
-
     for r, v in zip(rows, views):
-        parts = ([(x.get("code"), float(x.get("grams") or 0), "GR") for x in (r.get("exploded") or []) if x.get("isStock", True)]
-                 if r["scope"] == "premix" else [(r["item_code"], float(r["qty"]), r["unit"])])
         total, sources, missing = 0.0, set(), 0
-        for code, qty, unit in parts:
+        for code, qty, unit, recipe in entry_parts(r):
             p, src = price(code, r["business_date"]) if code else (None, None)
-            q = base(code, qty, unit) if code else None
+            q = base_qty(units, code, qty, unit, recipe) if code else None
             if p is None or q is None:
                 missing += 1
                 continue
@@ -298,11 +289,38 @@ def with_values(rows: list[dict]) -> list[dict]:
     return views
 
 
+def entry_parts(r: dict) -> list[tuple[Optional[str], float, Optional[str], bool]]:
+    """(code, qty, unit, from a recipe) of the stock an entry takes: the ingredients of a premix (their "grams" are the
+    recipe quantity in the base unit of the ingredient) or the item itself."""
+    if r["scope"] == "premix":
+        return [(x.get("code"), float(x.get("grams") or 0), "GR", True) for x in (r.get("exploded") or []) if x.get("isStock", True)]
+    return [(r["item_code"], float(r["qty"]), r["unit"], False)]
+
+
+def base_qty(units: dict, code: str, qty: float, unit: Optional[str], recipe: bool = False) -> Optional[float]:
+    """qty in the base unit of the item (mc.item_units: KG → GR, a pack → its factor); None when it cannot be converted.
+    2026-11-12: a recipe line of a counted item (KALENG 330ML, STICKER: base PCS) is already in that base unit — it was
+    read as grams and the entry had no value (and never left the running stock)."""
+    from app import menu_costing as mc
+    b, packs = units.get(code, ("", {}))
+    v = mc.to_unit(qty, unit, b) if b else qty
+    if v is None and (unit or "").upper() in packs:
+        v = qty * packs[(unit or "").upper()]
+    if v is None and recipe:
+        v = qty
+    return v
+
+
+VALUE_ROWS = 50_000  # entries valued for the totals of the monitor (a month of every outlet is ~10k)
+
+
 def _sum_values(views: list[dict], key: str) -> dict[str, float]:
+    """Σ value of the entries not rejected per `key` ("itemUnit" = item code | unit, as the byItem rows are grouped)."""
     out: dict[str, float] = {}
     for v in views:
         if v["status"] != "rejected" and v.get("value") is not None:
-            out[v[key]] = out.get(v[key], 0.0) + v["value"]
+            k = f'{v["itemCode"]}|{v["unit"]}' if key == "itemUnit" else v[key]
+            out[k] = out.get(k, 0.0) + v["value"]
     return out
 
 
@@ -500,8 +518,11 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], scope
         where.append("e.user_id::text = %(u)s")
         params["u"] = user_id
     cond = " AND ".join(where)
+    # 2026-11-12: the values (Rp) of the summary / items / outlets are summed over every entry of the filter, not only
+    # the `limit` rows the page lists (a busy period has more; the total was too low)
+    params["all"] = VALUE_ROWS
     rows = db.fetch(f"SELECT {COLUMNS} FROM {T} e WHERE {cond} ORDER BY e.business_date DESC, e.created_at DESC "
-                    "LIMIT %(lim)s", params)
+                    "LIMIT %(all)s", params)
     summary = db.fetchrow(
         f"""SELECT count(*)::int AS entries, count(DISTINCT e.branch_code)::int AS branches,
                    count(DISTINCT e.item_code)::int AS items, count(DISTINCT e.user_id)::int AS people,
@@ -524,16 +545,16 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], scope
         f"""SELECT e.category AS name, count(*)::int AS entries FROM {T} e WHERE {cond} AND e.status <> 'rejected'
             GROUP BY e.category ORDER BY 2 DESC, 1""", params)
     views = with_values(rows)
-    item_value, branch_value = _sum_values(views, "itemCode"), _sum_values(views, "branchCode")
+    item_value, branch_value = _sum_values(views, "itemUnit"), _sum_values(views, "branchCode")
     for b in by_branch:
         b["last_at"] = b["last_at"].isoformat() if b["last_at"] else None
         b["value"] = round(branch_value.get(b["code"], 0.0), 2)
     for i in by_item:
-        i["value"] = round(item_value.get(i["code"], 0.0), 2)
+        i["value"] = round(item_value.get(f'{i["code"]}|{i["unit"]}', 0.0), 2)
     summary = {**summary, "value": round(sum(branch_value.values()), 2),
                "unpriced": sum(1 for v in views if v["status"] != "rejected" and v.get("value") is None)}
-    return {"data": views, "summary": summary, "byItem": by_item, "byBranch": by_branch,
-            "byCategory": by_category, "truncated": len(rows) >= limit}
+    return {"data": views[:limit], "summary": summary, "byItem": by_item, "byBranch": by_branch,
+            "byCategory": by_category, "truncated": len(rows) > limit}
 
 
 def review(ids: list[str], status: str, note: Optional[str], user: dict, branches: Optional[tuple]) -> list[dict]:

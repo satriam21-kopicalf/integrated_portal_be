@@ -283,3 +283,17 @@ def test_bulk_category_corrects_each_entry(anon, store, page_access, monkeypatch
     r = anon.post("/api/waste/reviews/category", json={"ids": ["a", "b", "same", "gone", "a"], "category": "Expired", "reason": "salah pilih"})
     assert r.status_code == 200 and r.json()["updated"] == 2 and len(r.json()["skipped"]) == 2
     assert [c[0] for c in calls] == ["a", "b", "same", "gone"]
+
+
+def test_recipe_line_of_counted_item_keeps_its_base_unit():
+    """2026-11-12: KALENG 330ML + STICKER (premix of two PCS items) had no value: the recipe quantity was read as grams."""
+    from app import waste
+    units = {"PCPB-00008": ("PCS", {"PACK@150PCS": 150.0, "PCS": 1.0}), "MILK": ("GR", {})}
+    r = {"scope": "premix", "item_code": "KALENG-330ML-STICKER", "qty": 2, "unit": "SET",
+         "exploded": [{"code": "PCPB-00008", "grams": 2.0, "isStock": True}, {"code": "MILK", "grams": 30.0, "isStock": True},
+                      {"code": "WATER", "grams": 5.0, "isStock": False}]}
+    parts = waste.entry_parts(r)
+    assert [p[0] for p in parts] == ["PCPB-00008", "MILK"]
+    assert [waste.base_qty(units, c, q, u, rec) for c, q, u, rec in parts] == [2.0, 30.0]
+    # an item entered by itself in a unit that cannot be converted stays without a quantity
+    assert waste.base_qty(units, "PCPB-00008", 1, "KG", False) is None

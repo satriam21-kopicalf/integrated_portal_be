@@ -703,3 +703,58 @@ def reopen_day(pool: str, day: date) -> dict:
     with db.transaction() as conn:
         conn.execute(f"DELETE FROM {P}.cotr_pool_close WHERE pool_code = %s AND day = %s", (pool, day))
     return closing(pool, day)
+
+
+# ---------------------------------------------------------------- FIFO batch codes for the assignments (#13)
+def fifo(pool: str, day: date) -> dict:
+    """Which production / batch codes the storage gives each driver on `day`, first expiring first (recommendation #13):
+    the lots of the last physical count before the day (expired lots are set apart: not to be given), then the cups
+    arrived since without a code; the assignments of the day (oldest first) take them in that order."""
+    menus = _menu_map()
+    last = db.fetchrow(f"SELECT max(day) AS day FROM {P}.cotr_pool_count WHERE pool_code = %s AND day < %s", (pool, day))
+    counted = (last or {}).get("day")
+    batches = {r["batch_no"]: r["expires_on"] for r in db.fetch(
+        f"SELECT batch_no, expires_on FROM {P}.cotr_batch WHERE produced_on >= %s", (day - timedelta(days=60),))}
+    lots: dict[str, list[dict]] = {}
+    gone: dict[str, list[dict]] = {}
+    for r in (db.fetch(f"""SELECT menu_code, batch_no, sum(qty)::int AS qty, max(expires_on) AS expires_on FROM {P}.cotr_pool_count
+                            WHERE pool_code = %s AND day = %s AND qty > 0 GROUP BY 1, 2""", (pool, counted)) if counted else []):
+        exp = r["expires_on"] or expiry(r["batch_no"], menus.get(r["menu_code"], {}), counted, batches)
+        lot = {"batchNo": r["batch_no"], "qty": r["qty"], "expiresOn": _iso(exp), "daysLeft": (exp - day).days if exp else None}
+        (gone if exp and exp < day else lots).setdefault(r["menu_code"], []).append(lot)
+    for v in lots.values():
+        v.sort(key=lambda l: (l["expiresOn"] or "9999", l["batchNo"] or "~"))
+    # the cups arrived after the count (the day's figures: workbook, ESB or the app) come without a batch code
+    arrived: dict[str, int] = {}
+    if counted:
+        for d in run(pool, counted + timedelta(days=1), day)["days"]:
+            for c, r in d["rows"].items():
+                arrived[c] = arrived.get(c, 0) + (r.get("arrived") or 0) + max(0, r.get("transfer") or 0)
+    for c, n in arrived.items():
+        if n:
+            lots.setdefault(c, []).append({"batchNo": None, "qty": n, "expiresOn": None, "daysLeft": None, "new": True})
+    left = {c: [dict(l) for l in v] for c, v in lots.items()}
+    drivers = []
+    for x in db.fetch(f"""SELECT x.driver_code, d.name, x.status, x.lines, x.final_lines, x.assigned_at FROM {P}.cotr_dispatch x
+                           JOIN {P}.cotr_driver d ON d.code = x.driver_code WHERE x.pool_code = %s AND x.day = %s ORDER BY x.assigned_at, d.name""",
+                      (pool, day)):
+        want = x["final_lines"] if x["status"] == "accepted" and x["final_lines"] else x["lines"]
+        take = []
+        for c, n in (want or {}).items():
+            need = int(n or 0)
+            for lot in left.get(c, []):
+                if need <= 0:
+                    break
+                q = min(need, lot["qty"])
+                if q > 0:
+                    take.append({"menu": c, "name": (menus.get(c) or {}).get("name", c), "batchNo": lot["batchNo"], "qty": q, "expiresOn": lot["expiresOn"]})
+                    lot["qty"] -= q
+                    need -= q
+            if need > 0:
+                take.append({"menu": c, "name": (menus.get(c) or {}).get("name", c), "batchNo": None, "qty": need, "expiresOn": None, "short": True})
+        drivers.append({"code": x["driver_code"], "name": x["name"], "status": x["status"], "lines": take})
+    listed = sorted({*lots, *gone}, key=lambda c: ((menus.get(c) or {}).get("sort") or 0, c))
+    return {"pool": pool, "day": day.isoformat(), "counted": _iso(counted),
+            "menus": [{"menu": c, "name": (menus.get(c) or {}).get("name", c), "lots": lots.get(c, []), "expired": gone.get(c, []),
+                       "left": [l for l in left.get(c, []) if l["qty"] > 0]} for c in listed],
+            "drivers": drivers}

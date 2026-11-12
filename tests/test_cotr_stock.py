@@ -172,3 +172,31 @@ def test_close_day_needs_count_and_note(monkeypatch):
     state.update(openShifts=[{"code": "D1", "name": "Budi"}])
     with _pt.raises(CotrError, match="belum check out"):
         cotr_ledger.close_day({"id": None}, "HUB-A", date(2026, 11, 11), "x")
+
+
+def test_fifo_gives_the_oldest_lots_first(monkeypatch):
+    from datetime import date
+    from app import cotr_ledger
+    day = date(2026, 11, 12)
+    monkeypatch.setattr(cotr_ledger, "_menu_map", lambda: {"M1": {"code": "M1", "name": "Premium", "shelf_life_days": 5}})
+    monkeypatch.setattr(cotr_ledger, "run", lambda *a: {"days": [{"rows": {"M1": {"arrived": 10, "transfer": 0}}}]})
+
+    def fetch(q, p=None):
+        if "FROM integration_portal.cotr_batch" in q:
+            return []
+        if "cotr_pool_count" in q:
+            return [{"menu_code": "M1", "batch_no": "0210", "qty": 4, "expires_on": date(2026, 11, 15)},
+                    {"menu_code": "M1", "batch_no": "0108", "qty": 3, "expires_on": date(2026, 11, 13)},
+                    {"menu_code": "M1", "batch_no": "0105", "qty": 2, "expires_on": date(2026, 11, 10)}]
+        if "cotr_dispatch" in q:
+            return [{"driver_code": "D1", "name": "A", "status": "assigned", "lines": {"M1": 5}, "final_lines": None, "assigned_at": None},
+                    {"driver_code": "D2", "name": "B", "status": "assigned", "lines": {"M1": 15}, "final_lines": None, "assigned_at": None}]
+        return []
+    monkeypatch.setattr(cotr_ledger.db, "fetch", fetch)
+    monkeypatch.setattr(cotr_ledger.db, "fetchrow", lambda q, p=None: {"day": date(2026, 11, 11)})
+    r = cotr_ledger.fifo("HUB-A", day)
+    m = r["menus"][0]
+    assert [l["batchNo"] for l in m["expired"]] == ["0105"]
+    assert [(l["batchNo"], l["qty"]) for l in r["drivers"][0]["lines"]] == [("0108", 3), ("0210", 2)]
+    b = r["drivers"][1]["lines"]
+    assert [(l["batchNo"], l["qty"], l.get("short", False)) for l in b] == [("0210", 2, False), (None, 10, False), (None, 3, True)]

@@ -860,7 +860,19 @@ def pool_reopen_day(pool: str, day: date, request: Request, user: dict = Depends
 @router.get("/dashboard")
 def dashboard(day: Optional[date] = None, _: dict = Depends(require_page("cotr.check-in", "cotr.storage", "cotr.production"))):
     from app import cotr_dashboard
-    return cotr_dashboard.dashboard(day)
+    return cotr_dashboard.cached(day)
+
+
+@router.get("/overview")
+def overview(dateFrom: date, dateTo: date, compareFrom: Optional[date] = None, compareTo: Optional[date] = None,
+             _: dict = Depends(require_page("overview", "cotr.check-in", "cotr.storage", "cotr.production"))):
+    """COTR sales of a period against a comparison period (the COTR tab of the Dashboard, 2026-11-13; app/cotr_overview.py)."""
+    from app import cotr_overview
+    if dateFrom > dateTo or (dateTo - dateFrom).days >= cotr_overview.MAX_DAYS:
+        raise HTTPException(422, detail="Periode 1 hari sampai 3 bulan")
+    if (compareFrom is None) != (compareTo is None) or (compareFrom and compareTo and compareFrom > compareTo):
+        raise HTTPException(422, detail="Periode pembanding tidak valid")
+    return cotr_overview.overview(dateFrom, dateTo, compareFrom, compareTo)
 
 
 @router.get("/reconcile")

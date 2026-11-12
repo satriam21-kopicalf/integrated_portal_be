@@ -6,14 +6,40 @@
     todo      what waits: reloads and requests to decide, area requests, open fleet issues, workbook names without a
               driver, pool-days where the workbook and ESB differ (last 7 days)
 The day defaults to the latest day with figures (the workbooks arrive a day or two late).
+Kept warm (2026-11-13): a day is computed once and served from memory, refreshed in the background after CACHE_S
+seconds (stale-while-revalidate, app/utils.Fresh); the latest day is computed when a worker starts — the page opens at
+once instead of ~1.5 s (5.8 s on a cold worker).
 """
 from datetime import date, timedelta
 from typing import Optional
 
 from app import database as db
 from app.cotr import P, today
+from app.utils import Fresh
 
 TREND_DAYS = 14
+CACHE_S = 60
+_views: dict[str, Fresh] = {}
+
+
+def _fresh(day: Optional[date]) -> Fresh:
+    key = day.isoformat() if day else ""
+    f = _views.get(key)
+    if f is None:
+        if len(_views) > 60:  # days looked at once in a while: never more than a few in memory
+            _views.clear()
+        f = _views[key] = Fresh(lambda: dashboard(day), CACHE_S)
+    return f
+
+
+def cached(day: Optional[date]) -> dict:
+    """The dashboard of a day (None = the latest), from memory (refreshed in the background every CACHE_S seconds)."""
+    return _fresh(day).get()
+
+
+def warm() -> None:
+    """The start of a worker: the latest day computed in the background."""
+    _fresh(None).warm()
 
 
 def latest_day() -> date:

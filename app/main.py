@@ -67,6 +67,8 @@ async def lifespan(app: FastAPI):
         stock_transfer.warm()
         from app import alerts  # the notification bell: scan in the background (2026-11-13)
         alerts.start()
+        from app import cotr_dashboard  # the COTR dashboard of the latest day, ready before the first reader (2026-11-13)
+        cotr_dashboard.warm()
     yield
     db.close_pool()
 

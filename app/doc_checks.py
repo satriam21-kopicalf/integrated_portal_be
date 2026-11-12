@@ -7,9 +7,12 @@ line over the HISTORY_DAYS before, over every outlet with sales. TGP04 entered i
 KG instead of GR (27,720 KG): about Rp 2.6 bn of "unexplained" usage in the COGS & Usage, unseen until an audit.
 
 Cost Control corrects the quantity of a flagged line (any line of those documents, in the unit of the document) with a
-reason; ESB is never changed. adjustments() gives what the corrections change per branch × kind × (item, unit) and
-app/stock_moves.py adds it, so the COGS & Usage, the Sales Calculator and the Stock List read the corrected quantity.
-Goods receipts are flagged too but keep their own corrections (page Good Receipt, app/goods_receipt.py, migration 072).
+reason; ESB is never changed. The portal is the source of the figures (sales, counts, waste, TITO, prices move there),
+so a correction is the quantity of the line, not a change: adjustments() gives new − the quantity ESB holds NOW per
+branch × kind × (item, unit) and app/stock_moves.py adds it — when ESB is fixed later nothing is counted twice, and a
+document cancelled / deleted in ESB drops its correction (it is usually entered again). The COGS & Usage, the Sales
+Calculator and the Stock List read the corrected quantity. Goods receipts are flagged too but keep their own corrections
+(page Good Receipt, app/goods_receipt.py, migration 072).
 """
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
@@ -66,9 +69,36 @@ def _fixes(d_from: date, d_to: date, branches: Optional[list[str]]) -> list[dict
               AND (%s::text[] IS NULL OR branch_code = ANY(%s)) ORDER BY created_at""", (d_from, d_to, branches, branches))
 
 
-def _fix_view(f: dict) -> dict:
-    return {"id": f["id"], "newQty": float(f["new_qty"]), "oldQty": float(f["old_qty"]), "reason": f["reason"],
-            "by": f["created_by"], "at": f["created_at"].isoformat()}
+Key = tuple[str, str, str, str, str]  # module, doc, line type, item, unit (upper case)
+
+
+def _key(f: dict) -> Key:
+    return (f["module"], f["doc_num"], f["line_type"], f["product_code"], f["uom"])
+
+
+def _esb_now(fixes: list[dict]) -> dict[Key, float]:
+    """The quantity ESB holds now for the lines of the corrections (documents still counted by app/stock_moves.py);
+    a line missing here was cancelled or deleted in ESB."""
+    if not fixes:
+        return {}
+    rows = db.fetch(
+        f"""SELECT d.module, d.doc_num, l.line_type, l.product_code, upper(coalesce(l.uom_name, '')) AS uom, sum(l.qty) AS qty
+              FROM {SCHEMA}.erp_documents d
+              JOIN {SCHEMA}.erp_document_lines l ON l.module = d.module AND l.doc_num = d.doc_num
+             WHERE (d.module, d.doc_num) IN (SELECT * FROM unnest(%s::text[], %s::text[]))
+               AND d.deleted_at IS NULL AND coalesce(d.status_name, '') <> ALL(%s)
+             GROUP BY 1, 2, 3, 4, 5""",
+        ([f["module"] for f in fixes], [f["doc_num"] for f in fixes], list(SKIP)))
+    return {(r["module"], r["doc_num"], r["line_type"], r["product_code"], r["uom"]): float(r["qty"]) for r in rows}
+
+
+def _fix_view(f: dict, now: Optional[float] = None, gone: bool = False) -> dict:
+    """A correction; esbChanged: ESB holds another quantity than when it was corrected (fixed there, or changed again:
+    the portal keeps its own); docGone: the document was cancelled / deleted in ESB, the correction no longer counts."""
+    old = float(f["old_qty"])
+    return {"id": f["id"], "newQty": float(f["new_qty"]), "oldQty": old, "reason": f["reason"],
+            "by": f["created_by"], "at": f["created_at"].isoformat(), "esbNow": now,
+            "esbChanged": now is not None and abs(abs(now) - old) > 1e-9, "docGone": gone}
 
 
 def check(d_from: date, d_to: date, branches: Optional[list[str]]) -> dict:
@@ -168,7 +198,20 @@ def check(d_from: date, d_to: date, branches: Optional[list[str]]) -> dict:
             # 100× or more (or less): almost surely a unit typed wrong (KG for GR, a pack for a piece)
             "severe": factor is not None and (factor >= LIKELY_UNIT or factor <= 1 / LIKELY_UNIT),
             "price": pr, "impact": round(impact, 2) if impact is not None else None,
-            "ownPage": r["module"] in OWN_PAGE, "fix": _fix_view(fix) if fix else None})
+            "ownPage": r["module"] in OWN_PAGE, "fix": _fix_view(fix, qty) if fix else None})
+        fixes.pop(key, None)
+    # corrections of documents cancelled / deleted in ESB since: shown, no longer counted
+    gone = list(fixes.values())
+    names.update(_names(sorted({f["branch_code"] for f in gone} - set(names))) if gone else {})
+    for f in gone:
+        kind = _kind(f["module"], f["line_type"])
+        out.append({
+            "module": f["module"], "lineType": f["line_type"], "kind": kind[0] if kind else f["module"],
+            "docNum": f["doc_num"], "docDate": f["doc_date"].isoformat(), "status": None,
+            "branch": f["branch_code"], "branchName": names.get(f["branch_code"], f["branch_code"]),
+            "code": f["product_code"], "name": f["product_code"], "uom": f["uom"], "qty": 0.0, "baseQty": 0.0, "unit": f["uom"],
+            "usual": 0.0, "samples": 0, "factor": None, "unusual": False, "severe": False, "price": None, "impact": None,
+            "ownPage": False, "fix": _fix_view(f, None, gone=True)})
     out.sort(key=lambda x: (x["fix"] is not None, -(x["impact"] or 0)))
     open_rows = [x for x in out if x["unusual"] and not x["fix"]]
     return {"period": period, "data": out, "summary": {
@@ -183,8 +226,8 @@ def _line(module: str, doc_num: str, line_type: str, code: str, uom: str) -> Opt
               JOIN {SCHEMA}.erp_document_lines l ON l.module = d.module AND l.doc_num = d.doc_num
               JOIN {SCHEMA}.master_branches b ON b.branch_id::text = d.branch_id::text
              WHERE d.module = %s AND d.doc_num = %s AND l.line_type = %s AND l.product_code = %s
-               AND upper(coalesce(l.uom_name, '')) = %s AND d.deleted_at IS NULL
-             GROUP BY 1, 2""", (module, doc_num, line_type, code, uom))
+               AND upper(coalesce(l.uom_name, '')) = %s AND d.deleted_at IS NULL AND coalesce(d.status_name, '') <> ALL(%s)
+             GROUP BY 1, 2""", (module, doc_num, line_type, code, uom, list(SKIP)))
 
 
 def save_fix(user: dict, body: dict) -> dict:
@@ -240,11 +283,14 @@ def adjustments(d_from: date, d_to: date, branches: list[str]) -> dict[str, dict
         rows = _fixes(d_from, d_to, branches)
     except Exception:  # noqa: BLE001 - before migration 097: no correction
         return out
+    now = _esb_now(rows)
     for f in rows:
         kind = _kind(f["module"], f["line_type"])
-        if not kind:
+        esb = now.get(_key(f))
+        if not kind or esb is None:  # the document cancelled / deleted in ESB: its correction no longer counts
             continue
         bucket = out.setdefault(f["branch_code"], {}).setdefault(kind[0], {})
         key = (f["product_code"], f["uom"])
-        bucket[key] = bucket.get(key, 0.0) + kind[1] * (float(f["new_qty"]) - float(f["old_qty"]))
+        # the corrected quantity replaces what ESB holds now (ESB fixed later: no change; ESB qty as it is signed)
+        bucket[key] = bucket.get(key, 0.0) + kind[1] * float(f["new_qty"]) - kind[1] * esb
     return out

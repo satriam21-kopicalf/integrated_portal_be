@@ -57,6 +57,7 @@ Portal (Monitoring COTR):
     GET  /api/cotr/issues?status=&fleet=&pool=&days=, GET /api/cotr/issues/{id}   page cotr.fleet / cotr.check-in (088)
     POST /api/cotr/issues/{id}/step             page cotr.fleet: {"status", "note", "handler", "cost"} handle an issue
     GET  /api/cotr/reconcile?pool=&dateFrom=&dateTo=     page cotr.storage / cotr.production: workbook vs ESB vs app per pool-day
+    GET  /api/cotr/monthly-workbook?month=YYYY-MM&pool=   the month in one Excel file (Product, Report Armada, batch codes, waste, issues, reconciliation; #12)
     GET  /api/cotr/freshness                     the newest ESB / workbook / count / app day per pool, last ESB sync (#3)
     GET  /api/cotr/dashboard?day=                 the daily dashboard of every pool (recommendation #7)
     GET  /api/cotr/shipment-plan?day=&days=&buffer=   cups to send each HUB: average sold + used + buffer − good leftover (#8)
@@ -878,6 +879,20 @@ def batch_codes(pool: Optional[str] = None, dateFrom: Optional[date] = None, dat
 
 
 # ---------------------------------------------------------------- the ESB company COTR (migration 090)
+
+@router.get("/monthly-workbook")
+def monthly_workbook(request: Request, month: str = Query(..., pattern=r"^\d{4}-\d{2}$"), pool: Optional[str] = None,
+                     user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    from fastapi.responses import Response
+    from app import cotr_export
+    pool = _own_pool(user, pool)
+    m = date(int(month[:4]), int(month[5:]), 1)
+    data = cotr_export.monthly_workbook(m, pool or None)
+    _log(request, user, "cotr.export.monthly", f"Ringkasan bulanan COTR {month} {pool or 'semua pool'}", {"month": month, "pool": pool})
+    name = f"Ringkasan COTR {month}{' ' + pool if pool else ''}"
+    return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"content-disposition": f'attachment; filename="{name}.xlsx"'})
+
 
 @router.get("/freshness")
 def freshness(_: dict = Depends(require_page("cotr.check-in", "cotr.storage", "cotr.production"))):

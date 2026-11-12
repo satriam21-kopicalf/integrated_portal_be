@@ -58,6 +58,12 @@ def pricelist(search: str = "", category: str = "", day: Optional[date] = Query(
     return mc.items(search, category, day, status)
 
 
+@router.get("/pricelist/unpriced")
+def unpriced(_: dict = Depends(require_page(PRICE, CALC))) -> dict:
+    """The items the costing needs without a price (recipe cards, WIP, waste of 60 days; 2026-11-12)."""
+    return mc.unpriced_items(today())
+
+
 class ActiveIn(BaseModel):
     active: bool
 
@@ -252,6 +258,56 @@ def cogs_outlets(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] 
     scoped = scoped_branch(branch)
     branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
     return outlet_cogs.outlets(start, end, branches)
+
+
+# ---------------------------------------------------------------- unusual ESB documents (migration 097, 2026-11-12)
+
+@router.get("/doc-checks")
+def doc_checks_list(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
+                    _: dict = Depends(require_page("cc.cogs"))) -> dict:
+    """The ESB document lines with an unusual quantity in the period, and the ones corrected (app/doc_checks.py)."""
+    from app import doc_checks
+    end = dateTo or today()
+    start = dateFrom or end - timedelta(days=6)
+    if start > end or (end - start).days > 92:
+        raise HTTPException(422, detail="Periode 1 hari sampai 3 bulan")
+    scoped = scoped_branch(branch)
+    branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
+    return doc_checks.check(start, end, branches)
+
+
+class DocFixIn(BaseModel):
+    module: str = Field(min_length=1, max_length=60)
+    docNum: str = Field(min_length=1, max_length=80)
+    lineType: str = Field(min_length=1, max_length=40)
+    code: str = Field(min_length=1, max_length=60)
+    uom: str = Field(max_length=60)
+    qty: float = Field(ge=0, le=1_000_000_000)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+@router.post("/doc-fixes")
+def doc_fix(body: DocFixIn, request: Request, user: dict = Depends(require_page("cc.cogs"))) -> dict:
+    from app import doc_checks
+    try:
+        out = doc_checks.save_fix(user, body.model_dump())
+    except doc_checks.DocFixError as exc:
+        _refuse(exc)
+    activity.record("cc.doc_fix", user=user, request=request, page="/cost-control",
+                    summary=f"Koreksi {body.docNum} {body.code}: {out['oldQty']:g} → {out['newQty']:g} {body.uom}", details=out)
+    return out
+
+
+@router.delete("/doc-fixes/{fix_id}")
+def doc_fix_cancel(fix_id: int, request: Request, user: dict = Depends(require_page("cc.cogs"))) -> dict:
+    from app import doc_checks
+    try:
+        out = doc_checks.cancel_fix(user, fix_id)
+    except doc_checks.DocFixError as exc:
+        _refuse(exc)
+    activity.record("cc.doc_fix_cancel", user=user, request=request, page="/cost-control",
+                    summary=f"Koreksi {out['doc_num']} {out['product_code']} dibatalkan", details=out)
+    return out
 
 
 # ---------------------------------------------------------------- variants & modifiers, ESB BOM (migration 071)

@@ -79,4 +79,13 @@ def moves(d_from: date, d_to: date, branches: list[str]) -> dict[str, dict[str, 
             bucket = out.setdefault(branch, {}).setdefault("received", {})
             for key, dq in items.items():
                 bucket[key] = bucket.get(key, 0.0) + dq
+    # the other ESB documents Cost Control corrected (an unusual quantity, migration 097, app/doc_checks.py)
+    from app import doc_checks
+
+    for src, kinds in doc_checks.adjustments(d_from, d_to, branches).items():
+        for branch in readers.get(src, []):
+            for kind, items in kinds.items():
+                bucket = out.setdefault(branch, {}).setdefault(kind, {})
+                for key, dq in items.items():
+                    bucket[key] = bucket.get(key, 0.0) + dq
     return out

@@ -54,7 +54,13 @@ def stamp() -> str:
           (SELECT max(updated_at)::text || count(*) FROM {P}.cc_menu_recipe_map), (SELECT max(updated_at)::text || count(*) FROM {P}.cc_extra_item),
           (SELECT max(updated_at)::text || count(*) FROM {P}.cc_option_rule), (SELECT max(created_at)::text || count(*) FROM {P}.cc_gr_correction),
           (SELECT max(updated_at)::text FROM kc_master.item)) AS s""")
-    return r["s"] if r else ""
+    s = r["s"] if r else ""
+    try:  # the corrections of unusual ESB documents (migration 097)
+        f = db.fetchrow(f"SELECT max(coalesce(cancelled_at, created_at))::text || count(*) AS s FROM {P}.cc_doc_fix")
+        s += "|" + str((f or {}).get("s") or "")
+    except Exception:  # noqa: BLE001 - before migration 097
+        pass
+    return s
 SKIP_STATUSES = ("Rejected", "Cancelled", "Void")
 
 
@@ -103,6 +109,55 @@ def items(search: str = "", category: str = "", on: Optional[date] = None, statu
         "validFrom": r["valid_from"].isoformat() if r["valid_from"] else None, "note": r["note"],
         "purchaseAvg": avg.get((r["code"], str(r["base_uom"] or "").upper())),
         "esbHpp": hpp.get(r["code"], (None, 0))[0], "esbHppLocations": hpp.get(r["code"], (None, 0))[1]} for r in rows]}
+
+
+def unpriced_items(day: Optional[date] = None, waste_days: int = 60) -> dict:
+    """The items the costing needs without a Pricelist price (2026-11-12): used by an active recipe card (the HPP of its
+    menus is empty while any material has no price), a WIP / premix, or a waste entry of the last `waste_days` (no
+    value). level "none": no Pricelist price at all (not even a later one) and no ESB HPP — the menus and waste stay
+    without a value; "esb": costed with the ESB HPP only (a fallback Cost Control has not checked)."""
+    from app import waste
+    day = day or date.today()
+    cards = {k: c for k, c in resolve({r["code"]: r for r in recipes()}).items() if c["isActive"]}
+    wip = wips()
+    in_cards: dict[str, set[str]] = {}
+    for c in cards.values():
+        one: dict[str, dict] = {}
+        try:
+            explode(c, 1, wip, one)
+        except Exception:  # noqa: BLE001 - a card that cannot be exploded is shown by the calculator itself
+            continue
+        for v in one.values():
+            if v.get("code"):
+                in_cards.setdefault(v["code"], set()).add(c["name"])
+    in_wips: dict[str, set[str]] = {}
+    for w in wip.values():
+        for comp in w.get("components") or []:
+            if comp.get("code"):
+                in_wips.setdefault(comp["code"], set()).add(w["name"])
+    in_waste: dict[str, int] = {}
+    for r in db.fetch(f"""SELECT scope, item_code, qty, unit, exploded FROM {waste.T}
+                          WHERE business_date >= %s AND status <> 'rejected'""", (day - timedelta(days=waste_days),)):
+        for code, *_ in waste.entry_parts(r):
+            if code:
+                in_waste[code] = in_waste.get(code, 0) + 1
+    codes = sorted(set(in_cards) | set(in_wips) | set(in_waste))
+    price = prices_on(day, codes or None)
+    hpp = esb_hpp(day)
+    info = {r["code"]: r for r in db.fetch("SELECT code, name, base_uom, is_active FROM kc_master.item WHERE code = ANY(%s)", (codes,))}
+    out = []
+    for code in codes:
+        if code in price:
+            continue
+        i = info.get(code) or {}
+        cards_of, wips_of = sorted(in_cards.get(code, ())), sorted(in_wips.get(code, ()))
+        out.append({"code": code, "name": i.get("name") or code, "unit": i.get("base_uom"), "active": i.get("is_active", True),
+                    "level": "esb" if code in hpp else "none", "esbHpp": hpp[code][0] if code in hpp else None,
+                    "cards": len(cards_of), "cardNames": cards_of[:8], "wips": len(wips_of), "wipNames": wips_of[:5],
+                    "waste": in_waste.get(code, 0)})
+    out.sort(key=lambda x: (x["level"] != "none", -x["cards"], -x["wips"], -x["waste"], x["name"]))
+    return {"day": day.isoformat(), "wasteDays": waste_days, "data": out,
+            "counts": {"none": sum(1 for x in out if x["level"] == "none"), "esb": sum(1 for x in out if x["level"] == "esb")}}
 
 
 def set_item_active(code: str, active: bool, user: dict) -> dict:

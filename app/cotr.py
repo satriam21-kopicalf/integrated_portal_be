@@ -2431,3 +2431,33 @@ def count_approve(user: dict, count_id: str) -> dict:
     if not row:
         raise CotrError("Hanya stock opname yang sudah dikirim yang bisa di-approve")
     return count_detail(count_id)
+
+
+def driver_target(driver_code: str, day: date) -> dict:
+    """The COTR app Home (recommendation #23, 2026-11-12): the cups of the month so far and today, the incentive they
+    earn by now (the scheme of the month), the next tier of the scheme and the cups a day still needed to reach it on
+    the days left of the month."""
+    d = db.fetchrow(f"SELECT pool_code FROM {P}.cotr_driver WHERE code = %s", (driver_code,))
+    if not d:
+        raise CotrError("Driver tidak ditemukan")
+    try:
+        month = incentives(day.replace(day=1), None, d["pool_code"])
+    except CotrError:
+        return {"available": False}
+    row = next((r for r in month["rows"] if r["driver"] == driver_code), None)
+    if not row:
+        return {"available": False}
+    cups = row["cups"]
+    tiers = sorted(month["scheme"].get("tiers") or [], key=lambda t: t["from"])
+    nxt = next((t for t in tiers if t["from"] > cups), None)
+    current = next((t for t in reversed(tiers) if t["from"] <= cups), None)
+    end = (day.replace(day=1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+    left = (end - day).days + 1  # today included
+    t = db.fetchrow(f"""SELECT coalesce(sum((l->>'qty')::int), 0)::int AS n FROM {P}.cotr_sale s JOIN {P}.cotr_shift sh ON sh.id = s.shift_id,
+                             jsonb_array_elements(s.lines) l WHERE sh.driver_code = %s AND sh.day = %s AND s.voided_at IS NULL""", (driver_code, day))
+    today_cups = (t or {}).get("n", 0)
+    return {"available": True, "month": month["month"], "cups": cups, "today": today_cups, "incentive": row["total"], "eligible": row["eligible"],
+            "attendancePct": row["attendancePct"], "rate": float(current["rate"]) if current else 0.0,
+            "next": {"from": nxt["from"], "rate": float(nxt["rate"]), "missing": nxt["from"] - cups,
+                     "perDay": -(-(nxt["from"] - cups) // max(1, left))} if nxt else None,
+            "daysLeft": left}

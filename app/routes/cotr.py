@@ -1028,6 +1028,13 @@ def payslip_of(month: str, driver: str, _: dict = Depends(require_page("cotr.inc
     return out
 
 
+@router.get("/driver/target")
+def driver_target(user: dict = Depends(driver_only)):
+    """The COTR app Home (#23): cups of the month and today, incentive so far, the next tier and the cups a day to it."""
+    d = cotr.require_driver(user)
+    return cotr.driver_target(d["code"], today())
+
+
 @router.get("/driver/payslips")
 def driver_payslips(user: dict = Depends(driver_only)):
     """The COTR app: the months published and their payslips of the employee signed in."""

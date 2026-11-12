@@ -246,3 +246,15 @@ def test_menu_of_takes_the_names_mapped_by_hand():
     assert menu_of("Pisang  Susu - COTR (250ml)", menus) == "M9"
     assert menu_of("Premium Cup - COTR (145ml)", menus) == "M1"
     assert menu_of("Es Teh Manis", menus) is None
+
+
+def test_driver_target_next_tier(monkeypatch):
+    from datetime import date
+    from app import cotr
+    monkeypatch.setattr(cotr.db, "fetchrow", lambda q, p=None: {"pool_code": "HUB-A"} if "pool_code FROM" in q else {"n": 7})
+    monkeypatch.setattr(cotr, "incentives", lambda m, c, p: {"month": "2026-11", "scheme": {"tiers": [
+        {"from": 1500, "to": 2000, "rate": 500}, {"from": 2000, "to": None, "rate": 1000}]},
+        "rows": [{"driver": "D1", "cups": 1800, "total": 150000.0, "eligible": True, "attendancePct": 100.0}]})
+    r = cotr.driver_target("D1", date(2026, 11, 21))
+    assert r["rate"] == 500 and r["today"] == 7 and r["daysLeft"] == 10
+    assert r["next"] == {"from": 2000, "rate": 1000.0, "missing": 200, "perDay": 20}

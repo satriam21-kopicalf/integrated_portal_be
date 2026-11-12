@@ -152,6 +152,7 @@ def read_workbook(data: bytes, menus: dict[str, dict]) -> dict:
     import openpyxl
     wb = openpyxl.load_workbook(BytesIO(data), read_only=True, data_only=True)
     product, report, month = None, None, None
+    minus: dict[str, dict] = {}
     for name in wb.sheetnames:
         if name.strip().lower() == "product":
             rows = list(wb[name].iter_rows(values_only=True))
@@ -159,4 +160,32 @@ def read_workbook(data: bytes, menus: dict[str, dict]) -> dict:
             product = parse_product(rows, menus)
         elif name.lower().startswith("report armada"):
             report = parse_report(list(wb[name].iter_rows(values_only=True)), menus)
-    return {"month": month, "product": product or {}, "report": report or []}
+        elif name.lower().startswith("rekap minus"):
+            for m in parse_minus(list(wb[name].iter_rows(values_only=True))):
+                key = (m["armada"] or m["name"]).upper()
+                cur = minus.setdefault(key, {**m, "short": 0.0, "over": 0.0, "paid": 0.0})
+                for k in ("short", "over", "paid"):
+                    cur[k] += m[k]
+    return {"month": month, "product": product or {}, "report": report or [], "minus": list(minus.values())}
+
+
+def parse_minus(rows: list[tuple]) -> list[dict]:
+    """A sheet "Rekap Minus …": per employee (name, armada) and day the columns Kekurangan (short), Lebihan (over) and
+    Pembayaran (paid back); summed over the days of the sheet."""
+    head = next((i for i, r in enumerate(rows[:6]) if any(str(c or "").strip().lower() == "kekurangan" for c in r)), None)
+    if head is None:
+        return []
+    kinds = {j: str(c).strip().lower() for j, c in enumerate(rows[head]) if str(c or "").strip().lower() in ("kekurangan", "lebihan", "pembayaran")}
+    out = []
+    for r in rows[head + 1:]:
+        name = r[1] if len(r) > 1 else None
+        if not isinstance(name, str) or not name.strip() or name.strip().upper().startswith("TOTAL"):
+            continue
+        sums = {"kekurangan": 0.0, "lebihan": 0.0, "pembayaran": 0.0}
+        for j, k in kinds.items():
+            v = _num(r[j]) if j < len(r) else None
+            if v:
+                sums[k] += v
+        out.append({"name": " ".join(name.split()), "armada": " ".join(str(r[2] or "").split()) if len(r) > 2 else "",
+                    "short": sums["kekurangan"], "over": sums["lebihan"], "paid": sums["pembayaran"]})
+    return out

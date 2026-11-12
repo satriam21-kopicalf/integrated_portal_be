@@ -1711,18 +1711,132 @@ def incentives(month: date, code: Optional[str], pool: Optional[str]) -> dict:
     per: dict[str, dict[str, int]] = {}
     for r in sold:
         per.setdefault(r["driver_code"], {})[r["code"]] = int(r["qty"])
+    # migration 089 (2026-11-12): the days of the Report Armada sheets where the driver has no shift in the app count too
+    app_days = {(r["driver_code"], r["day"]) for r in db.fetch(
+        f"SELECT driver_code, day FROM {P}.cotr_shift WHERE day >= %s AND day < %s", (start, end))}
+    sheet_days: dict[str, int] = {}
+    for r in db.fetch(f"""SELECT driver_code, day, lines FROM {P}.cotr_report_day
+                           WHERE driver_code IS NOT NULL AND day >= %s AND day < %s""", (start, end)):
+        if (r["driver_code"], r["day"]) in app_days or not r["lines"]:
+            continue
+        sheet_days[r["driver_code"]] = sheet_days.get(r["driver_code"], 0) + 1
+        for k, x in r["lines"].items():
+            per.setdefault(r["driver_code"], {})[k] = per.get(r["driver_code"], {}).get(k, 0) + int(x.get("t") or 0)
     roster = schedule(start, last, pool) if (last - start).days <= 62 else {"drivers": [], "recap": []}
     att = {r["driver"]: r for r in roster["recap"]}
+    adjust = pay_adjustments(start)
     rows = []
     for d in roster["drivers"]:
+        if not str(d.get("department") or "armada").lower().startswith("armada"):
+            continue  # the incentive is of the armada; storage, stockist, CK … are paid otherwise (2026-11-12)
         by_menu = per.get(d["code"], {})
-        a = att.get(d["code"], {})
-        rows.append({"driver": d["code"], "name": d["name"], "pool": d["pool_code"],
-                     "attendance": {k: a.get(k, 0) for k in ("scheduled", "worked", "late", "absent")},
-                     **incentive(sum(by_menu.values()), by_menu, a, scheme)})
+        a = dict(att.get(d["code"], {}))
+        if sheet_days.get(d["code"]):
+            a["worked"] = a.get("worked", 0) + sheet_days[d["code"]]
+            a["scheduled"] = max(a.get("scheduled", 0), a["worked"])
+        row = {"driver": d["code"], "name": d["name"], "pool": d["pool_code"],
+               "attendance": {k: a.get(k, 0) for k in ("scheduled", "worked", "late", "absent")},
+               **incentive(sum(by_menu.values()), by_menu, a, scheme)}
+        adj = adjust.get(d["code"], {})
+        row["adjustments"] = {k: adj.get(k, 0.0) for k in PAY_KINDS}
+        row["takeHome"] = row["total"] + adj.get("bonus", 0.0) - sum(adj.get(k, 0.0) for k in PAY_DEDUCTIONS)
+        rows.append(row)
     rows.sort(key=lambda r: -r["total"])
-    return {"month": start.isoformat()[:7], "scheme": scheme, "rows": rows,
-            "total": sum(r["total"] for r in rows), "cups": sum(r["cups"] for r in rows)}
+    return {"month": start.isoformat()[:7], "scheme": scheme, "rows": rows, "published": is_published(start),
+            "total": sum(r["total"] for r in rows), "cups": sum(r["cups"] for r in rows),
+            "takeHome": sum(r["takeHome"] for r in rows)}
+
+
+# ---------------------------------------------------------------- pay adjustments and payslips (migration 092)
+
+PAY_KINDS = ("bonus", "kasbon", "minus", "warning", "other")
+PAY_DEDUCTIONS = ("kasbon", "minus", "warning", "other")
+
+
+def pay_adjustments(month: date, driver: Optional[str] = None) -> dict[str, dict[str, float]]:
+    out: dict[str, dict[str, float]] = {}
+    for r in db.fetch(f"""SELECT driver_code, kind, sum(amount) AS amount FROM {P}.cotr_pay_adjustment
+                           WHERE month = %s AND (%s::text IS NULL OR driver_code = %s) GROUP BY 1, 2""", (month.replace(day=1), driver, driver)):
+        out.setdefault(r["driver_code"], {})[r["kind"]] = float(r["amount"])
+    return out
+
+
+def pay_adjustment_list(month: date, driver: Optional[str] = None) -> list[dict]:
+    return [{"id": r["id"], "driver": r["driver_code"], "kind": r["kind"], "amount": float(r["amount"]), "note": r["note"],
+             "by": r["by_name"], "at": _iso(r["created_at"])}
+            for r in db.fetch(f"""SELECT a.*, u.full_name AS by_name FROM {P}.cotr_pay_adjustment a LEFT JOIN {P}.user_account u ON u.id = a.created_by
+                                   WHERE a.month = %s AND (%s::text IS NULL OR a.driver_code = %s) ORDER BY a.created_at""",
+                                (month.replace(day=1), driver, driver))]
+
+
+def add_pay_adjustment(user: dict, driver: str, month: date, kind: str, amount: float, note: Optional[str]) -> dict:
+    if kind not in PAY_KINDS:
+        raise CotrError("Jenis tidak dikenal")
+    if not amount or amount <= 0:
+        raise CotrError("Nominal harus lebih dari 0")
+    if kind != "bonus" and not (note or "").strip():
+        raise CotrError("Tulis keterangan potongan")
+    if is_published(month):
+        raise CotrError("Slip bulan ini sudah diterbitkan: batalkan penerbitan dulu untuk mengubah")
+    try:
+        r = db.fetchrow(f"""INSERT INTO {P}.cotr_pay_adjustment (driver_code, month, kind, amount, note, created_by)
+                            VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+                        (driver, month.replace(day=1), kind, amount, (note or "").strip() or None, user["id"]))
+    except Exception as e:
+        raise CotrError(_db_message(e)) from None
+    return {"id": r["id"]}
+
+
+def delete_pay_adjustment(adjustment_id: int) -> None:
+    r = db.fetchrow(f"SELECT month FROM {P}.cotr_pay_adjustment WHERE id = %s", (adjustment_id,))
+    if r and is_published(r["month"]):
+        raise CotrError("Slip bulan ini sudah diterbitkan: batalkan penerbitan dulu untuk mengubah")
+    db.fetchrow(f"DELETE FROM {P}.cotr_pay_adjustment WHERE id = %s RETURNING id", (adjustment_id,))
+
+
+def is_published(month: date) -> bool:
+    return bool(db.fetchrow(f"SELECT 1 FROM {P}.cotr_payslip_month WHERE month = %s", (month.replace(day=1),)))
+
+
+def publish_payslips(user: dict, month: date, on: bool) -> None:
+    if on:
+        db.fetchrow(f"""INSERT INTO {P}.cotr_payslip_month (month, published_by) VALUES (%s, %s)
+                        ON CONFLICT (month) DO UPDATE SET published_at = now(), published_by = EXCLUDED.published_by RETURNING month""",
+                    (month.replace(day=1), user["id"]))
+    else:
+        db.fetchrow(f"DELETE FROM {P}.cotr_payslip_month WHERE month = %s RETURNING month", (month.replace(day=1),))
+
+
+def payslip(driver_code: str, month: date, published_only: bool = True) -> Optional[dict]:
+    """The payslip of an employee for a month: base salary and allowance of Master Driver, the incentive, the bonus and
+    every deduction with its note, and the take home pay. Shown to the employee once the month is published."""
+    start = month.replace(day=1)
+    if published_only and not is_published(start):
+        return None
+    d = db.fetchrow(f"""SELECT d.*, p.name AS pool_name FROM {P}.cotr_driver d LEFT JOIN {P}.cotr_pool p ON p.code = d.pool_code
+                         WHERE d.code = %s""", (driver_code,))
+    if not d:
+        return None
+    rec = incentives(start, None, d["pool_code"])
+    row = next((r for r in rec["rows"] if r["driver"] == driver_code), None)
+    items = pay_adjustment_list(start, driver_code)
+    salary = float(d.get("salary_monthly") or 0)
+    allowance = float(d.get("allowance_monthly") or 0)
+    incentive_pay = float(row["total"]) if row else 0.0
+    bonus = sum(i["amount"] for i in items if i["kind"] == "bonus")
+    deductions = [i for i in items if i["kind"] in PAY_DEDUCTIONS]
+    cut = sum(i["amount"] for i in deductions)
+    return {"month": start.isoformat()[:7], "employee": {"code": d["code"], "name": d["name"], "nickname": d.get("nickname"),
+            "employeeId": d.get("employee_id"), "department": d.get("department"), "position": d.get("position"), "pool": d.get("pool_name"),
+            "bank": d.get("bank_name"), "account": d.get("bank_account"), "holder": d.get("bank_holder")},
+            "salary": salary, "allowance": allowance, "incentive": incentive_pay, "cups": row["cups"] if row else 0,
+            "attendance": row["attendance"] if row else None, "bonus": bonus, "bonusItems": [i for i in items if i["kind"] == "bonus"],
+            "deductions": deductions, "deductionTotal": cut,
+            "takeHome": round(salary + allowance + incentive_pay + bonus - cut, 2), "published": is_published(start)}
+
+
+def payslip_months(driver_code: str) -> list[str]:
+    return [r["m"] for r in db.fetch(f"""SELECT to_char(month, 'YYYY-MM') AS m FROM {P}.cotr_payslip_month ORDER BY month DESC LIMIT 24""")]
 
 
 # ---------------------------------------------------------------- the team of the sample "DATA COTR" (migration 060)

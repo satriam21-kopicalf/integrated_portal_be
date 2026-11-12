@@ -426,8 +426,20 @@ def import_workbook(user: dict, pool: str, data: bytes, d_from: date, d_to: Opti
             continue
         code = _match(r["label"], drivers)
         reports.append((d, r, code))
+    # migration 092: the Rekap Minus of the month → a "minus" deduction per employee (short − over − paid back)
+    fleet_of = {(r["fleet_code"] or "").upper(): r["code"] for r in db.fetch(
+        f"SELECT code, fleet_code FROM {P}.cotr_driver WHERE pool_code = %s AND fleet_code IS NOT NULL", (pool,))}
+    minus = []
+    for m in wb.get("minus") or []:
+        armada = re.sub(r"\s+", " ", m["armada"].upper())
+        mm = re.match(r"(BNI|BRI)\s*0*(\d+)", armada)
+        code = fleet_of.get(f"{mm.group(1)} {int(mm.group(2)):02d}") if mm else None
+        code = code or _match(f"X 0 {m['name']}", drivers)
+        net = round(m["short"] - m["over"] - m["paid"], 2)
+        minus.append((m, code, net))
     summary = {"days": [d.isoformat() for d in sorted(days) if d >= d_from], "counts": len(counts), "figures": len(moves),
-               "reports": len(reports), "unmatched": sorted({r["label"] for _, r, c in reports if not c})}
+               "reports": len(reports), "unmatched": sorted({r["label"] for _, r, c in reports if not c}),
+               "minus": sum(1 for _, c, n in minus if c and n > 0), "minusUnmatched": sorted({m["name"] for m, c, n in minus if not c and n > 0})}
     if not apply:
         return summary
     with db.transaction() as conn:
@@ -451,6 +463,17 @@ def import_workbook(user: dict, pool: str, data: bytes, d_from: date, d_to: Opti
                                  qris = EXCLUDED.qris, cash_actual = EXCLUDED.cash_actual, operational = EXCLUDED.operational,
                                  operational_note = EXCLUDED.operational_note""",
                          (pool, d, r["label"], code, Jsonb(r["lines"]), r["qris"], r["cashActual"], r["operational"], r["operationalNote"]))
+        from app.cotr import is_published
+        if minus and not is_published(month):
+            codes = [c for _, c, _ in minus if c]
+            conn.execute(f"""DELETE FROM {P}.cotr_pay_adjustment WHERE month = %s AND kind = 'minus' AND source = 'sheet'
+                             AND driver_code = ANY(%s)""", (month, codes))
+            for m, code, net in minus:
+                if code and net > 0:
+                    conn.execute(f"""INSERT INTO {P}.cotr_pay_adjustment (driver_code, month, kind, amount, note, source, created_by)
+                                     VALUES (%s, %s, 'minus', %s, %s, 'sheet', %s)""",
+                                 (code, month, net, f"Rekap Minus: kekurangan {m['short']:,.0f} − lebihan {m['over']:,.0f} − dibayar {m['paid']:,.0f}",
+                                  user["id"]))
     return summary | {"saved": True}
 
 

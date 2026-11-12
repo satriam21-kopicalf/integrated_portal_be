@@ -840,6 +840,65 @@ def incentives(month: Optional[str] = None, scheme: Optional[str] = None, pool: 
     return _call(cotr.incentives, day, scheme, pool)
 
 
+# ---------------------------------------------------------------- pay adjustments and payslips (migration 092)
+
+class PayAdjustmentIn(BaseModel):
+    driver: str = Field(min_length=1, max_length=40)
+    month: str = Field(pattern=r"^\d{4}-\d{2}$")
+    kind: Literal["bonus", "kasbon", "minus", "warning", "other"]
+    amount: float = Field(gt=0, le=1_000_000_000)
+    note: Optional[str] = Field(None, max_length=300)
+
+
+def _month(value: str) -> date:
+    return date.fromisoformat(f"{value}-01")
+
+
+@router.get("/pay-adjustments")
+def pay_adjustments(month: str, driver: Optional[str] = None, _: dict = Depends(require_page("cotr.incentive"))):
+    return {"data": cotr.pay_adjustment_list(_month(month), driver)}
+
+
+@router.post("/pay-adjustments", status_code=201)
+def add_pay_adjustment(body: PayAdjustmentIn, request: Request, user: dict = Depends(require_page("cotr.incentive"))):
+    out = _call(cotr.add_pay_adjustment, user, body.driver, _month(body.month), body.kind, body.amount, body.note)
+    _log(request, user, "cotr.pay-adjustment", f"COTR {body.kind} {body.driver} {body.month}: Rp {body.amount:,.0f}", body.model_dump())
+    return out
+
+
+@router.delete("/pay-adjustments/{adjustment_id}")
+def delete_pay_adjustment(adjustment_id: int, request: Request, user: dict = Depends(require_page("cotr.incentive"))):
+    _call(cotr.delete_pay_adjustment, adjustment_id)
+    _log(request, user, "cotr.pay-adjustment.delete", f"COTR hapus komponen gaji #{adjustment_id}")
+    return {"ok": True}
+
+
+class PublishIn(BaseModel):
+    on: bool
+
+
+@router.post("/payslips/{month}/publish")
+def publish_payslips(month: str, body: PublishIn, request: Request, user: dict = Depends(require_page("cotr.incentive"))):
+    cotr.publish_payslips(user, _month(month), body.on)
+    _log(request, user, "cotr.payslips.publish", f"COTR slip gaji {month} {'diterbitkan' if body.on else 'ditarik'}")
+    return {"ok": True}
+
+
+@router.get("/payslips/{month}/{driver}")
+def payslip_of(month: str, driver: str, _: dict = Depends(require_page("cotr.incentive"))):
+    out = cotr.payslip(driver, _month(month), published_only=False)
+    if not out:
+        raise HTTPException(404, detail="Karyawan tidak ditemukan")
+    return out
+
+
+@router.get("/driver/payslips")
+def driver_payslips(user: dict = Depends(driver_only)):
+    """The COTR app: the months published and their payslips of the employee signed in."""
+    d = cotr.require_driver(user)
+    return {"data": [s for s in (cotr.payslip(d["code"], _month(m)) for m in cotr.payslip_months(d["code"])) if s]}
+
+
 @router.get("/usage")
 def usage(dateFrom: Optional[date] = None, dateTo: Optional[date] = None, pool: Optional[str] = None,
           _: dict = Depends(require_page("cotr.production"))):

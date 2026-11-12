@@ -90,3 +90,17 @@ def test_a_fleet_issue_moves_by_steps_and_closing_needs_a_note(monkeypatch):
     monkeypatch.setattr(cotr, "require_driver", lambda u: {"code": "D1", "fleet_code": None})
     with pytest.raises(cotr.CotrError, match="armada"):
         cotr.report_issue({"id": "u"}, {"category": "brake", "severity": "high", "title": "Rem blong"})
+
+
+def test_a_pay_deduction_needs_its_note_and_a_published_month_is_locked(monkeypatch):
+    """migration 092: kasbon / minus / warning need a note; a published month cannot change."""
+    import pytest
+    from datetime import date as d
+    monkeypatch.setattr(cotr, "is_published", lambda m: False)
+    with pytest.raises(cotr.CotrError, match="keterangan"):
+        cotr.add_pay_adjustment({"id": "u"}, "D1", d(2026, 11, 1), "kasbon", 50000, " ")
+    with pytest.raises(cotr.CotrError, match="lebih dari 0"):
+        cotr.add_pay_adjustment({"id": "u"}, "D1", d(2026, 11, 1), "bonus", 0, None)
+    monkeypatch.setattr(cotr, "is_published", lambda m: True)
+    with pytest.raises(cotr.CotrError, match="diterbitkan"):
+        cotr.add_pay_adjustment({"id": "u"}, "D1", d(2026, 11, 1), "bonus", 100000, None)

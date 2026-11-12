@@ -267,3 +267,19 @@ def test_monitor_filters_several_categories(monkeypatch):
     monkeypatch.setattr(waste, "with_values", lambda rows: [])
     waste.monitor(date(2026, 11, 1), date(2026, 11, 12), None, "", "Expired|Tumpah| ")
     assert seen[0]["cat"] == ["Expired", "Tumpah"]
+
+
+def test_bulk_category_corrects_each_entry(anon, store, page_access, monkeypatch):
+    calls = []
+
+    def correct(entry_id, body, user, branches):
+        calls.append((entry_id, body["category"]))
+        if entry_id == "same":
+            raise waste.WasteError("Tidak ada perubahan")
+        return None if entry_id == "gone" else {"id": entry_id}
+    monkeypatch.setattr(waste, "correct", correct)
+    login(anon, "kasir", "Kasir1234")
+    page_access.overrides[str(store.user["id"])] = {"cc.waste-review": True}
+    r = anon.post("/api/waste/reviews/category", json={"ids": ["a", "b", "same", "gone", "a"], "category": "Expired", "reason": "salah pilih"})
+    assert r.status_code == 200 and r.json()["updated"] == 2 and len(r.json()["skipped"]) == 2
+    assert [c[0] for c in calls] == ["a", "b", "same", "gone"]

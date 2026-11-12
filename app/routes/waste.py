@@ -222,6 +222,34 @@ class CorrectIn(BaseModel):
     note: Optional[str] = Field(None, max_length=500)
 
 
+class BulkCategoryIn(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=500)
+    category: str = Field(min_length=1, max_length=120)
+    reason: str = Field(min_length=3, max_length=500)
+
+
+@router.post("/reviews/category")
+def bulk_category(body: BulkCategoryIn, request: Request, user: dict = Depends(require_page(REV))) -> dict:
+    """Cost Control (2026-11-12): the waste category of several entries changed at once — each one as a correction
+    (reason, old → new in its log); an entry already in that category or whose form does not have it is skipped."""
+    changed, skipped = [], []
+    for entry_id in dict.fromkeys(body.ids):
+        try:
+            row = waste.correct(entry_id, {"category": body.category, "reason": body.reason}, user, allowed_branches())
+        except waste.CheckInError as exc:
+            skipped.append({"id": entry_id, "reason": str(exc)})
+            continue
+        if row is None:
+            skipped.append({"id": entry_id, "reason": "Waste tidak ditemukan"})
+        else:
+            changed.append(entry_id)
+    if changed:
+        activity.record("waste.correct", user=user, request=request, page="/cost-control/waste/reviews",
+                        summary=f"Kategori waste diubah ke {body.category}: {len(changed)} entri",
+                        details={"ids": changed, "category": body.category, "reason": body.reason})
+    return {"updated": len(changed), "skipped": skipped}
+
+
 @router.patch("/reviews/{entry_id}")
 def correct(entry_id: str, body: CorrectIn, request: Request, user: dict = Depends(require_page(REV))) -> dict:
     try:

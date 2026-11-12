@@ -155,3 +155,20 @@ def test_dashboard_adds_up_the_pools(monkeypatch):
     r = cotr_dashboard.dashboard(day)
     assert r["summary"]["sold"] == 5 and r["summary"]["revenue"] == 50000 and r["summary"]["balance"] == 1
     assert r["drivers"][0]["cups"] == 5 and r["todo"]["reconcileDiff"] == 3 and r["todo"]["unmatchedNames"] == 1
+
+
+def test_close_day_needs_count_and_note(monkeypatch):
+    from datetime import date
+    import pytest as _pt
+    from app import cotr_ledger
+    from app.cotr import CotrError
+    state = {"openShifts": [], "counted": False, "balance": 0, "menus": [], "waste": {}}
+    monkeypatch.setattr(cotr_ledger, "closing", lambda p, d: dict(state))
+    with _pt.raises(CotrError, match="Sisa Aktual"):
+        cotr_ledger.close_day({"id": None}, "HUB-A", date(2026, 11, 11), None)
+    state.update(counted=True, balance=-2)
+    with _pt.raises(CotrError, match="penjelasan"):
+        cotr_ledger.close_day({"id": None}, "HUB-A", date(2026, 11, 11), " ")
+    state.update(openShifts=[{"code": "D1", "name": "Budi"}])
+    with _pt.raises(CotrError, match="belum check out"):
+        cotr_ledger.close_day({"id": None}, "HUB-A", date(2026, 11, 11), "x")

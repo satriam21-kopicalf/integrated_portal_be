@@ -650,3 +650,56 @@ def untie_label(pool: str, label: str) -> dict:
     with db.transaction() as conn:
         n = conn.execute(f"DELETE FROM {P}.cotr_driver_alias WHERE pool_code = %s AND label_key = %s", (pool, _label_key(label))).rowcount
     return {"removed": n}
+
+
+# ---------------------------------------------------------------- the night closing of a pool (migration 094, #15)
+def closing(pool: str, day: date) -> dict:
+    """The steps of the night closing of a pool: the drivers still on the road and the reloads not decided (before),
+    1) the waste and cupping of the pool entered, 2) the physical leftover counted, 3) the balance per menu, then closed."""
+    open_shifts = db.fetch(f"""SELECT s.driver_code, d.name FROM {P}.cotr_shift s JOIN {P}.cotr_driver d ON d.code = s.driver_code
+                                WHERE s.pool_code = %s AND s.day = %s AND s.status = 'open' ORDER BY d.name""", (pool, day))
+    reloads = db.fetchrow(f"""SELECT count(*)::int AS n FROM {P}.cotr_reload r JOIN {P}.cotr_shift s ON s.id = r.shift_id
+                               WHERE s.pool_code = %s AND s.day = %s AND r.status = 'requested'""", (pool, day))
+    waste = db.fetch(f"""SELECT kind, count(*)::int AS entries, sum(qty) AS qty FROM {P}.cotr_waste WHERE pool_code = %s AND day = %s
+                          GROUP BY kind""", (pool, day))
+    led = run(pool, day, day)
+    today_row = next((d for d in led["days"] if d["day"] == day.isoformat()), None)
+    names = {m["code"]: m["name"] for m in led["menus"]}
+    menus = []
+    for code, r in ((today_row or {}).get("rows") or {}).items():
+        if any(r.get(k) for k in ("opening", "sold", "arrived", "transfer", "waste", "cupping", "calculated")) or r.get("actual") is not None:
+            menus.append({"menu": code, "name": names.get(code, code), "opening": r.get("opening"), "arrived": r.get("arrived"), "transfer": r.get("transfer"),
+                          "sold": r.get("sold"), "waste": r.get("waste"), "cupping": r.get("cupping"), "calculated": r.get("calculated"),
+                          "actual": r.get("actual"), "balance": r.get("balance")})
+    counted = bool(menus) and all(m["actual"] is not None for m in menus)
+    closed = db.fetchrow(f"""SELECT c.note, c.closed_at, c.closed_by, u.username FROM {P}.cotr_pool_close c
+                              LEFT JOIN integration_portal.user_account u ON u.id = c.closed_by WHERE c.pool_code = %s AND c.day = %s""", (pool, day))
+    return {"pool": pool, "day": day.isoformat(), "started": led["start"] is not None, "source": (today_row or {}).get("source"),
+            "openShifts": [{"code": s["driver_code"], "name": s["name"]} for s in open_shifts], "reloads": (reloads or {}).get("n", 0),
+            "waste": {w["kind"]: {"entries": w["entries"], "qty": float(w["qty"] or 0)} for w in waste},
+            "counted": counted, "menus": menus, "balance": sum(m["balance"] or 0 for m in menus if m["balance"] is not None),
+            "closed": {"at": _iso(closed["closed_at"]), "by": closed["username"], "note": closed["note"]} if closed else None}
+
+
+def close_day(user: dict, pool: str, day: date, note: Optional[str]) -> dict:
+    """Closes the night of a pool once its leftover is counted; a balance other than 0 needs a note."""
+    c = closing(pool, day)
+    if c["openShifts"]:
+        raise CotrError(f"Masih ada {len(c['openShifts'])} driver yang belum check out")
+    if not c["counted"]:
+        raise CotrError("Hitung Sisa Aktual Fisik semua menu dulu")
+    note = (note or "").strip() or None
+    if c["balance"] and not note:
+        raise CotrError("Balance tidak 0: tulis penjelasan selisihnya")
+    with db.transaction() as conn:
+        conn.execute(f"""INSERT INTO {P}.cotr_pool_close (pool_code, day, note, snapshot, closed_by) VALUES (%s, %s, %s, %s, %s)
+                         ON CONFLICT (pool_code, day) DO UPDATE SET note = EXCLUDED.note, snapshot = EXCLUDED.snapshot,
+                             closed_by = EXCLUDED.closed_by, closed_at = now()""",
+                     (pool, day, note, Jsonb({"menus": c["menus"], "balance": c["balance"], "waste": c["waste"]}), user.get("id")))
+    return closing(pool, day)
+
+
+def reopen_day(pool: str, day: date) -> dict:
+    with db.transaction() as conn:
+        conn.execute(f"DELETE FROM {P}.cotr_pool_close WHERE pool_code = %s AND day = %s", (pool, day))
+    return closing(pool, day)

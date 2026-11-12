@@ -58,6 +58,7 @@ Portal (Monitoring COTR):
     POST /api/cotr/issues/{id}/step             page cotr.fleet: {"status", "note", "handler", "cost"} handle an issue
     GET  /api/cotr/reconcile?pool=&dateFrom=&dateTo=     page cotr.storage / cotr.production: workbook vs ESB vs app per pool-day
     GET  /api/cotr/dashboard?day=                 the daily dashboard of every pool (recommendation #7)
+    GET/POST/DELETE /api/cotr/pool-close        the night closing of a pool: steps, close (note when balance is not 0), reopen (094)
     GET/PUT/DELETE /api/cotr/driver-labels       the names of Report Armada without a driver, tied by hand (migration 093)
     GET  /api/cotr/pool-ledger?pool=&dateFrom=&dateTo=   page cotr.storage / cotr.production: the sheet "Product" (089)
     PUT  /api/cotr/pool-count                   {"pool", "day", "lines": [{"menu", "qty", "batchNo", "expiresOn"}]} the physical leftover
@@ -785,6 +786,31 @@ def tie_driver_label(body: LabelTieIn, request: Request, user: dict = Depends(re
 def untie_driver_label(pool: str, label: str, request: Request, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
     out = cotr_ledger.untie_label(pool, label)
     _log(request, user, "cotr.label.untie", f"Tautan nama workbook {label} ({pool}) dihapus", out)
+    return out
+
+
+class CloseIn(BaseModel):
+    pool: str = Field(min_length=1, max_length=40)
+    day: date
+    note: Optional[str] = Field(None, max_length=500)
+
+
+@router.get("/pool-close")
+def pool_close(pool: str, day: Optional[date] = None, _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    return cotr_ledger.closing(pool, day or today())
+
+
+@router.post("/pool-close")
+def pool_close_day(body: CloseIn, request: Request, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    out = _call(cotr_ledger.close_day, user, body.pool, body.day, body.note)
+    _log(request, user, "cotr.pool.close", f"Closing {body.pool} {body.day.isoformat()} (balance {out['balance']})", {"pool": body.pool, "day": body.day.isoformat(), "note": body.note})
+    return out
+
+
+@router.delete("/pool-close")
+def pool_reopen_day(pool: str, day: date, request: Request, user: dict = Depends(require_page("cotr.production"))):
+    out = cotr_ledger.reopen_day(pool, day)
+    _log(request, user, "cotr.pool.reopen", f"Closing {pool} {day.isoformat()} dibuka lagi", {"pool": pool, "day": day.isoformat()})
     return out
 
 

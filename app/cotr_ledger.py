@@ -532,3 +532,40 @@ def adjust_lot(user: dict, pool: str, day: date, menu: str, batch: str, qty: int
         conn.execute(f"""INSERT INTO {P}.cotr_pool_count (pool_code, day, menu_code, batch_no, qty, source, created_by)
                          VALUES (%s, %s, %s, %s, %s, 'manual', %s)""", (pool, day, menu, batch, qty, user["id"]))
     return {"pool": pool, "day": day.isoformat(), "menu": menu, "batchNo": batch, "old": old, "new": qty}
+
+
+def reconcile(pool: Optional[str], d_from: date, d_to: date) -> dict:
+    """The workbook of the COTR team against ESB COTR (and the app) per pool, day and menu (recommendation #1, 2026-11-12):
+    arrived, transfer, sold, waste and cupping of each source; a day of a source without any figure is null (not 0).
+    status of a pool-day: match (sheet = ESB), diff, sheet (only the workbook), esb (only ESB) or app (only the app)."""
+    from app import cotr_esb
+    menus = _menu_map()
+    names = {r["code"]: r["name"] for r in db.fetch(f"SELECT code, name FROM {P}.cotr_pool")}
+    sheet: dict[str, dict[date, dict[str, dict[str, int]]]] = {}
+    for r in db.fetch(f"""SELECT pool_code, day, menu_code, kind, sum(qty) AS qty FROM {P}.cotr_pool_move
+                           WHERE source = 'sheet' AND day BETWEEN %s AND %s AND (%s::text IS NULL OR pool_code = %s)
+                           GROUP BY 1, 2, 3, 4""", (d_from, d_to, pool, pool)):
+        m = sheet.setdefault(r["pool_code"], {}).setdefault(r["day"], {}).setdefault(r["menu_code"], {})
+        m[r["kind"]] = m.get(r["kind"], 0) + int(r["qty"])
+    esb = {k: v for k, v in cotr_esb.figures(d_from, d_to).items() if not pool or k == pool}
+    codes = set(sheet) | set(esb) | ({pool} if pool else set())
+    app = {p: _system(p, d_from, d_to) for p in codes}
+    days, totals = [], {"match": 0, "diff": 0, "sheet": 0, "esb": 0, "app": 0}
+    for p in sorted(codes):
+        for d in sorted(set(sheet.get(p, {})) | set(esb.get(p, {})) | set(app.get(p, {}))):
+            s, e, a = sheet.get(p, {}).get(d), esb.get(p, {}).get(d), app.get(p, {}).get(d)
+            lines = []
+            for c in sorted(set(s or {}) | set(e or {}) | set(a or {}), key=lambda c: ((menus.get(c) or {}).get("sort") or 0, c)):
+                for k in KINDS:
+                    v = [None if src is None else (src.get(c) or {}).get(k, 0) for src in (s, e, a)]
+                    if any(v):
+                        lines.append({"menu": c, "name": (menus.get(c) or {}).get("name", c), "kind": k, "sheet": v[0], "esb": v[1], "app": v[2],
+                                      "diff": v[0] - v[1] if s is not None and e is not None else None})
+            if not lines:
+                continue
+            status = ("diff" if any(x["diff"] for x in lines) else "match") if s is not None and e is not None \
+                else "sheet" if s is not None else "esb" if e is not None else "app"
+            totals[status] += 1
+            days.append({"pool": p, "poolName": names.get(p, p), "day": d.isoformat(), "status": status, "lines": lines,
+                         "gap": sum(abs(x["diff"] or 0) for x in lines)})
+    return {"from": d_from.isoformat(), "to": d_to.isoformat(), "pool": pool, "summary": totals, "days": days}

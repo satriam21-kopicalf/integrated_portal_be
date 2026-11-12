@@ -104,3 +104,27 @@ def test_a_pay_deduction_needs_its_note_and_a_published_month_is_locked(monkeypa
     monkeypatch.setattr(cotr, "is_published", lambda m: True)
     with pytest.raises(cotr.CotrError, match="diterbitkan"):
         cotr.add_pay_adjustment({"id": "u"}, "D1", d(2026, 11, 1), "bonus", 100000, None)
+
+
+def test_reconcile_sheet_against_esb(monkeypatch):
+    from datetime import date
+    from app import cotr_esb, cotr_ledger
+    d1, d2 = date(2026, 11, 1), date(2026, 11, 2)
+    monkeypatch.setattr(cotr_ledger, "_menu_map", lambda: {"M1": {"code": "M1", "name": "Premium", "sort": 1}})
+
+    def fetch(q, p=None):
+        if "FROM integration_portal.cotr_pool\n" in q or q.strip().startswith("SELECT code, name"):
+            return [{"code": "HUB-A", "name": "Hub A"}]
+        if "cotr_pool_move" in q:
+            return [{"pool_code": "HUB-A", "day": d1, "menu_code": "M1", "kind": "sold", "qty": 10},
+                    {"pool_code": "HUB-A", "day": d2, "menu_code": "M1", "kind": "sold", "qty": 5}]
+        return []
+    monkeypatch.setattr(cotr_ledger.db, "fetch", fetch)
+    monkeypatch.setattr(cotr_ledger, "_system", lambda *a: {})
+    monkeypatch.setattr(cotr_esb, "figures", lambda a, b: {"HUB-A": {d1: {"M1": {"sold": 12}}}})
+    r = cotr_ledger.reconcile(None, d1, d2)
+    assert r["summary"]["diff"] == 1 and r["summary"]["sheet"] == 1
+    first = r["days"][0]
+    assert first["status"] == "diff" and first["gap"] == 2
+    assert first["lines"][0] | {} == {"menu": "M1", "name": "Premium", "kind": "sold", "sheet": 10, "esb": 12, "app": None, "diff": -2}
+    assert r["days"][1]["status"] == "sheet" and r["days"][1]["lines"][0]["esb"] is None

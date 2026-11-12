@@ -56,6 +56,7 @@ Portal (Monitoring COTR):
     POST /api/cotr/driver/issues                {"category", "severity", "title", "description", "photo", "latitude", "longitude"} (088)
     GET  /api/cotr/issues?status=&fleet=&pool=&days=, GET /api/cotr/issues/{id}   page cotr.fleet / cotr.check-in (088)
     POST /api/cotr/issues/{id}/step             page cotr.fleet: {"status", "note", "handler", "cost"} handle an issue
+    GET  /api/cotr/reconcile?pool=&dateFrom=&dateTo=     page cotr.storage / cotr.production: workbook vs ESB vs app per pool-day
     GET  /api/cotr/pool-ledger?pool=&dateFrom=&dateTo=   page cotr.storage / cotr.production: the sheet "Product" (089)
     PUT  /api/cotr/pool-count                   {"pool", "day", "lines": [{"menu", "qty", "batchNo", "expiresOn"}]} the physical leftover
     PUT  /api/cotr/pool-moves                   {"pool", "day", "kind": transfer|arrived, "lines": {menu: cups}, "note"}
@@ -758,6 +759,16 @@ def pool_available(pool: str, day: Optional[date] = None, _: dict = Depends(requ
     menus = {m["code"]: m["name"] for m in cotr.menus(active_only=True)}
     return {"pool": pool, "day": d.isoformat(), "counted": a is not None,
             "rows": [{"menu": c, "name": menus.get(c, c), **v} for c, v in (a or {}).items() if c in menus]}
+
+
+@router.get("/reconcile")
+def reconcile(pool: Optional[str] = None, dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
+              _: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    end = dateTo or today()
+    start = dateFrom or end.replace(day=1)
+    if start > end or (end - start).days > 62:
+        raise HTTPException(422, detail="Periode paling lama 62 hari")
+    return cotr_ledger.reconcile(pool or None, start, end)
 
 
 @router.get("/batch-codes")

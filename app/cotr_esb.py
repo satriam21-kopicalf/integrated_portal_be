@@ -9,8 +9,11 @@ menus, cotr_sheet.menu_of; premixes and other materials are left out):
     waste / cupping = item journals of the HUB, purpose WASTING / CUPPING (their quantity is negative in ESB)
 And the documents of every module, to list and open in the portal (tab ESB COTR).
 """
+import re
 from datetime import date
 from typing import Any, Optional
+
+from psycopg.types.json import Jsonb
 
 from app import database as db
 from app.cotr import P, CotrError, _iso, _menu_map
@@ -139,3 +142,119 @@ def document(module: str, doc_num: str) -> dict[str, Any]:
                        "qty": float(r["qty"]) if r["qty"] is not None else None, "price": float(r["price"]) if r["price"] is not None else None,
                        "total": float(r["total"]) if r["total"] is not None else None, "ref": r["ref_num"], "notes": r["notes"], "purpose": r["purpose"]}
                       for r in ls]}
+
+
+# ---------------------------------------------------------------- recipe cards and items as in ESB (2026-11-12)
+
+ITEM_CATEGORY = {"raw material": "raw", "roasted beans": "raw", "wip": "premix", "packaging": "packaging", "packaging bar": "packaging",
+                 "general": "supply", "exp gas": "other"}
+
+
+def _category(name: Optional[str]) -> Optional[str]:
+    n = (name or "").strip().lower()
+    if n == "finished good":
+        return None  # the menus, not items
+    if n.startswith("kitchen"):
+        return "supply"
+    return ITEM_CATEGORY.get(n, "other")
+
+
+def _base_unit(uom: Optional[str]) -> str:
+    u = (uom or "").strip().upper()
+    return {"GR": "g", "GRAM": "g", "ML": "ml", "PCS": "pcs"}.get(u, (uom or "pcs").lower())
+
+
+def sync_recipes(user: dict, apply: bool) -> dict:
+    """The items and recipe cards of COTR made the same as ESB COTR (the request of the COTR team, 2026-11-12): every
+    active BOM of ESB becomes a card (premix per gram with the batch of ESB, a finished good per portion), its products
+    become items (base unit, stock unit, the last HPP of ESB), and each menu takes the active finished-good card named
+    like it. Cards and items of the portal not in ESB stay."""
+    menus = _menu_map()
+    units: dict[str, dict[str, float]] = {}
+    base_of: dict[str, str] = {}
+    stock_of: dict[str, tuple[str, float]] = {}
+    for r in db.fetch(f"""SELECT p.product_code, u.uom_name, u.qty, u.is_base, u.is_stock FROM {S}.master_product_units u
+                            JOIN {S}.master_products p ON p.product_id = u.product_id WHERE u.is_active IS NOT FALSE"""):
+        units.setdefault(r["product_code"], {})[r["uom_name"].upper()] = float(r["qty"] or 1)
+        if r["is_base"]:
+            base_of[r["product_code"]] = r["uom_name"]
+        if r["is_stock"] and not r["is_base"]:
+            stock_of[r["product_code"]] = (r["uom_name"], float(r["qty"] or 1))
+    products = {r["product_code"]: r for r in db.fetch(
+        f"SELECT product_code, product_name, raw_data->>'categoryName' AS category FROM {S}.master_products")}
+    boms = db.fetch(f"""SELECT bom_id, bom_code, bom_name, product_name, raw_data->>'uomName' AS uom, raw_data->>'flagActive' AS active
+                          FROM {S}.master_bom WHERE NOT coalesce(is_deleted, false)""")
+    lines = {}
+    for r in db.fetch(f"SELECT bom_id, line_no, product_code, product_name, uom_name, qty, last_hpp FROM {S}.master_bom_lines ORDER BY bom_id, line_no"):
+        lines.setdefault(r["bom_id"], []).append(r)
+
+    def to_base(code: str, uom: str, qty: float) -> float:
+        return qty * units.get(code, {}).get((uom or "").upper(), 1.0)
+
+    items: dict[str, dict] = {}
+    cost: dict[str, float] = {}
+    for ls in lines.values():
+        for l in ls:
+            factor = units.get(l["product_code"], {}).get((l["uom_name"] or "").upper(), 1.0)
+            if l["last_hpp"] is not None and factor:
+                cost[l["product_code"]] = float(l["last_hpp"]) / factor
+    used = {l["product_code"] for ls in lines.values() for l in ls}
+    # the products COTR really moves: in the recipes, or in its documents of the last 120 days (transfers, purchases,
+    # stock opname, journals); the rest of the master of ESB is left out
+    seen = {r["code"] for r in db.fetch(f"""SELECT DISTINCT l.product_code AS code FROM {S}.erp_document_lines l
+                                              JOIN {S}.erp_documents d ON d.module = l.module AND d.doc_num = l.doc_num
+                                             WHERE d.doc_date >= current_date - 120 AND l.product_code IS NOT NULL""")}
+    for code, p in products.items():
+        cat = _category(p["category"])
+        if cat is None or not (code in used or code in seen):
+            continue
+        pack = stock_of.get(code)
+        items[code] = {"code": code, "name": p["product_name"], "category": cat, "unit": _base_unit(base_of.get(code)),
+                       "pack_unit": pack[0] if pack else None, "pack_qty": pack[1] if pack else None, "cost": cost.get(code)}
+    cards = []
+    for b in boms:
+        if str(b["active"]) not in ("1", "true", "True", "None"):
+            continue
+        cat = _category((products.get(b["bom_code"]) or {}).get("category"))
+        premix = cat == "premix" or "PREMIX" in (b["bom_name"] or "").upper()
+        if premix:
+            yield_qty = units.get(b["bom_code"], {}).get((b["uom"] or "").upper())
+            if not yield_qty:
+                m = re.search(r"@([\d.,]+)\s*(GR|ML)", b["uom"] or "", re.I)
+                yield_qty = float(m.group(1).replace(".", "").replace(",", ".")) if m else 1.0
+            unit = "g"
+        else:
+            yield_qty, unit = 1.0, "porsi"
+        cards.append({"code": b["bom_code"], "name": b["bom_name"], "output": b["bom_code"], "kind": "premix" if premix else "menu",
+                      "yield_qty": yield_qty, "yield_unit": unit,
+                      "lines": [{"item": l["product_code"], "qty": round(to_base(l["product_code"], l["uom_name"], float(l["qty"] or 0)), 6),
+                                 "unit": _base_unit(base_of.get(l["product_code"]) or l["uom_name"])} for l in lines.get(b["bom_id"], [])]})
+    picks = {}
+    for c in cards:
+        if c["kind"] != "menu" or not c["lines"]:
+            continue
+        menu = menu_of(c["name"], menus) if "COTR" in (c["name"] or "").upper() else None
+        if menu and menu not in picks:
+            picks[menu] = c["code"]
+    summary = {"items": len(items), "cards": len(cards), "premix": sum(1 for c in cards if c["kind"] == "premix"),
+               "menus": {menus[m]["name"]: code for m, code in picks.items()}}
+    if not apply:
+        return summary
+    with db.transaction() as conn:
+        for it in items.values():
+            conn.execute(f"""INSERT INTO {P}.cotr_item (code, name, category, unit, pack_unit, pack_qty, cost, is_stock, is_active, note, updated_by)
+                             VALUES (%(code)s, %(name)s, %(category)s, %(unit)s, %(pack_unit)s, %(pack_qty)s, %(cost)s, true, true, 'ESB COTR', %(by)s)
+                             ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, category = EXCLUDED.category, unit = EXCLUDED.unit,
+                                 pack_unit = coalesce(EXCLUDED.pack_unit, {P}.cotr_item.pack_unit), pack_qty = coalesce(EXCLUDED.pack_qty, {P}.cotr_item.pack_qty),
+                                 cost = coalesce(EXCLUDED.cost, {P}.cotr_item.cost), is_active = true, updated_at = now(), updated_by = EXCLUDED.updated_by""",
+                         it | {"by": user["id"]})
+        for c in cards:
+            conn.execute(f"""INSERT INTO {P}.cotr_bom (code, name, output, yield_qty, yield_unit, lines, kind, note, updated_by)
+                             VALUES (%s, %s, %s, %s, %s, %s, %s, 'ESB COTR', %s)
+                             ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, output = EXCLUDED.output, yield_qty = EXCLUDED.yield_qty,
+                                 yield_unit = EXCLUDED.yield_unit, lines = EXCLUDED.lines, kind = EXCLUDED.kind, note = 'ESB COTR',
+                                 updated_at = now(), updated_by = EXCLUDED.updated_by""",
+                         (c["code"], c["name"], c["output"], c["yield_qty"], c["yield_unit"], Jsonb(c["lines"]), c["kind"], user["id"]))
+        for menu, code in picks.items():
+            conn.execute(f"UPDATE {P}.cotr_menu SET bom_code = %s WHERE code = %s", (code, menu))
+    return summary | {"saved": True}

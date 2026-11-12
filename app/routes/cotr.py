@@ -787,6 +787,19 @@ def esb_documents(module: str, dateFrom: Optional[date] = None, dateTo: Optional
     return _call(cotr_esb.documents, module, start, end, branch, q)
 
 
+class ApplyIn(BaseModel):
+    apply: bool = False
+
+
+@router.post("/esb/sync-recipes")
+def esb_sync_recipes(body: ApplyIn, request: Request, user: dict = Depends(require_page("cotr.production"))):
+    """The items and recipe cards made the same as ESB COTR (checked first with apply false)."""
+    out = _call(cotr_esb.sync_recipes, user, body.apply)
+    if body.apply:
+        _log(request, user, "cotr.recipes.esb", f"COTR resep & item disamakan dengan ESB: {out['cards']} kartu, {out['items']} item", out)
+    return out
+
+
 @router.get("/esb/lines")
 def esb_lines(module: str, dateFrom: Optional[date] = None, dateTo: Optional[date] = None, branch: Optional[str] = None,
               _: dict = Depends(require_page("cotr.production", "cotr.storage"))):

@@ -258,3 +258,9 @@ def test_driver_target_next_tier(monkeypatch):
     r = cotr.driver_target("D1", date(2026, 11, 21))
     assert r["rate"] == 500 and r["today"] == 7 and r["daysLeft"] == 10
     assert r["next"] == {"from": 2000, "rate": 1000.0, "missing": 200, "perDay": 20}
+
+
+def test_sale_api_takes_client_id_and_time():
+    from app.routes.cotr import SaleIn
+    s = SaleIn(lines=[{"code": "M1", "qty": 2}], payment="cash", clientId="abc-1", at="2026-11-12T09:15:00+07:00")
+    assert s.clientId == "abc-1" and s.at.hour == 9

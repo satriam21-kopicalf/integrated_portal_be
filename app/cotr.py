@@ -445,7 +445,9 @@ def check_in(user: dict, kind: str, photo: str, lat: float, lng: float, accuracy
     return today_of(user)
 
 
-def sell(user: dict, lines: list[dict], payment: str) -> dict:
+def sell(user: dict, lines: list[dict], payment: str, client_id: Optional[str] = None, at: Optional[datetime] = None) -> dict:
+    """A sale of the open shift. Sent again from the phone's offline queue (migration 096), the same client id is
+    ignored and the time it was made is kept when it lies inside the shift (not in the future)."""
     if payment not in PAYMENTS:
         raise CotrError("Pilih Tunai atau QRIS")
     d = require_driver(user)
@@ -453,11 +455,15 @@ def sell(user: dict, lines: list[dict], payment: str) -> dict:
         s = conn.execute(f"SELECT * FROM {P}.cotr_shift WHERE driver_code = %s AND day = %s FOR UPDATE", (d["code"], today())).fetchone()
         if not s or s["status"] != "open":
             raise CotrError("Belum ada shift yang berjalan. Check in dulu.")
+        if client_id and conn.execute(f"SELECT 1 FROM {P}.cotr_sale WHERE client_id = %s", (client_id,)).fetchone():
+            return today_of(user)  # sent before (the reply was lost): nothing to add
         sales = conn.execute(f"SELECT * FROM {P}.cotr_sale WHERE shift_id = %s", (s["id"],)).fetchall()
         reloads = conn.execute(f"SELECT * FROM {P}.cotr_reload WHERE shift_id = %s", (s["id"],)).fetchall()
         sold, total = sale_lines(lines, _menu_map(), stock_now(s["start_stock"], reloads, sales))
-        conn.execute(f"INSERT INTO {P}.cotr_sale (shift_id, lines, payment, total) VALUES (%s, %s, %s, %s)",
-                     (s["id"], Jsonb(sold), payment, total))
+        now = datetime.now(at.tzinfo) if at and at.tzinfo else None
+        when = at if at and now and s.get("started_at") and s["started_at"] <= at <= now else None
+        conn.execute(f"INSERT INTO {P}.cotr_sale (shift_id, lines, payment, total, client_id, at) VALUES (%s, %s, %s, %s, %s, coalesce(%s, now()))",
+                     (s["id"], Jsonb(sold), payment, total, client_id, when))
     return today_of(user)
 
 

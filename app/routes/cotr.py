@@ -168,6 +168,9 @@ class SaleLine(BaseModel):
 class SaleIn(BaseModel):
     lines: list[SaleLine] = Field(min_length=1, max_length=50)
     payment: Literal["cash", "qris"]
+    # migration 096: a sale kept on the phone without signal: its own id (a resend is ignored) and when it was made
+    clientId: Optional[str] = Field(None, max_length=64)
+    at: Optional[datetime] = None
 
 
 class ReasonIn(BaseModel):
@@ -211,7 +214,7 @@ def driver_confirm(body: CountsIn, request: Request, user: dict = Depends(driver
 
 @router.post("/driver/sales")
 def driver_sell(body: SaleIn, user: dict = Depends(driver_only)):
-    return _call(cotr.sell, user, [line.model_dump() for line in body.lines], body.payment)
+    return _call(cotr.sell, user, [line.model_dump() for line in body.lines], body.payment, body.clientId, body.at)
 
 
 @router.post("/driver/sales/{sale_id}/void")

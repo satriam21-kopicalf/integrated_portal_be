@@ -24,7 +24,7 @@ T_USER_BRANCH = "integration_portal.user_branch"
 
 MAX_FAILED_LOGINS = 5
 LOCK_MINUTES = 15
-ROLES = ("superadmin", "cost_control", "user", "outlet", "driver")  # outlet = shared outlet / hub accounts (2026-10-28);
+ROLES = ("superadmin", "cost_control", "user", "outlet", "driver", "cotr_admin")  # outlet = shared outlet / hub accounts (2026-10-28);
 # driver = Calf On The Road driver app only (migration 046)
 # roles that see every branch (no user_branch rows); "user" sees only its branches
 GLOBAL_ROLES = ("superadmin", "cost_control")
@@ -159,8 +159,8 @@ def list_users(search: str = "", role: str = "", status: str = "", limit: int = 
     return rows, total
 
 
-def user_counts() -> dict:
-    """Headline counts for the User Accounts page."""
+def user_counts(line: Optional[str] = None) -> dict:
+    """Headline counts for the User Accounts page (`line`: the accounts of one business line only, a COTR admin)."""
     return db.fetchrow(f"""
         SELECT count(*)::int AS total,
                count(*) FILTER (WHERE u.is_active)::int AS active,
@@ -177,9 +177,10 @@ def user_counts() -> dict:
                count(*) FILTER (WHERE u.business_line = 'cotr')::int AS line_cotr,
                count(*) FILTER (WHERE u.last_login_at > now() - interval '7 days')::int AS active_7d,
                (SELECT count(DISTINCT x.branch_code)::int FROM {T_USER_BRANCH} x
-                JOIN {T_USER} xu ON xu.id = x.user_id AND xu.role IN ('user', 'outlet') AND xu.is_active) AS branches_covered
-        FROM {T_USER} u
-    """) or {}
+                JOIN {T_USER} xu ON xu.id = x.user_id AND xu.role IN ('user', 'outlet') AND xu.is_active
+                 AND (%(line)s::text IS NULL OR xu.business_line = %(line)s)) AS branches_covered
+        FROM {T_USER} u WHERE %(line)s::text IS NULL OR u.business_line = %(line)s
+    """, {"line": line}) or {}
 
 
 def known_branch_codes(codes: list[str]) -> set[str]:

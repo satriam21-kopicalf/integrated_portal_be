@@ -141,6 +141,19 @@ def clean_hidden(pages) -> list[str]:
     return sorted({str(p) for p in (pages or []) if str(p) in PAGE_KEYS})
 CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))
 EDITABLE_ROLES = ("cost_control", "user", "outlet")
+# the Calf On The Road line (2026-11-13, migration 099): its accounts open the COTR pages and the guide only, never the
+# Dashboard / Sales of Kopi Calf and Wasgee; the COTR admin opens every COTR page and manages the COTR accounts
+COTR_ADMIN = "cotr_admin"
+COTR_ROLES = ("user", "outlet", "driver", COTR_ADMIN)  # the roles a COTR admin gives
+
+
+def cotr_page(page: str) -> bool:
+    return page.startswith(("cotr.", "driver.")) or page == "guide"
+
+
+def account_admin(user: dict) -> bool:
+    """Manages user accounts: a superadmin (every account) or a COTR admin (the COTR line)."""
+    return user.get("role") in ("superadmin", COTR_ADMIN)
 # the Surveyor Check In is given per account (migration 039), not to a role
 PER_USER_FORMS = ("form.surveyor-check-in", "form.wwwr")  # WW-WR: the SWAT team (2026-11-03)
 # the WW-WR team (2026-11-04): accounts assigned Form WW-WR or Monitoring WW-WR; a super admin opens every page anyway, so
@@ -199,10 +212,19 @@ def pages_for(user: dict) -> list[str]:
     """Pages the user opens, in menu order."""
     if user.get("role") == "superadmin":
         return list(PAGE_KEYS)
-    base = set(role_pages().get(user.get("role") or "user", []))
+    base = set(role_base(user.get("role") or "user"))
     for page, allowed in user_overrides(str(user["id"])).items():
         (base.add if allowed else base.discard)(page)
+    if user.get("role") == COTR_ADMIN or user.get("business_line") == "cotr":
+        base = {p for p in base if cotr_page(p)}
     return [k for k in PAGE_KEYS if k in base]
+
+
+def role_base(role: str) -> list[str]:
+    """The pages of a role before the exceptions of an account (a COTR admin: every COTR page and the guide)."""
+    if role == COTR_ADMIN:
+        return [p for p in PAGE_KEYS if cotr_page(p)]
+    return role_pages().get(role, [])
 
 
 def has_page(user: dict, page: str) -> bool:
@@ -317,7 +339,7 @@ def clean_overrides(role: str, overrides: dict) -> dict[str, bool]:
     unknown = sorted(set(overrides) - set(PAGE_KEYS))
     if unknown:
         raise ValueError(f"Halaman tidak dikenal: {', '.join(unknown)}")
-    base = set(role_pages().get(role, []))
+    base = set(role_base(role))
     return {p: bool(a) for p, a in overrides.items() if bool(a) != (p in base)}
 
 

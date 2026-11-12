@@ -1,6 +1,6 @@
 """Page access and the job title / department lists (app/access.py).
 
-    GET    /api/access/pages                     catalog + pages per role (superadmin)
+    GET    /api/access/pages                     catalog + pages per role (superadmin; a COTR admin: COTR pages)
     PUT    /api/access/roles/{role}              {"pages": [...]} (superadmin; role cost_control or user)
     GET    /api/access/platforms                 menus per platform: catalog with the platforms each page exists on and
                                                  the set ones (superadmin; migration 054)
@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app import access, activity
-from app.routes.auth import current_user, forget_sessions, require_superadmin
+from app.routes.auth import current_user, forget_sessions, require_account_admin, require_superadmin
 
 router = APIRouter(prefix="/api/access", tags=["access"])
 Kind = Literal["jobTitle", "department"]
@@ -28,8 +28,14 @@ def catalog() -> list[dict]:
 
 
 @router.get("/pages")
-def pages(_user: dict = Depends(require_superadmin)) -> dict:
-    return {"pages": catalog(), "roles": access.role_pages(), "defaults": access.DEFAULT_ROLE_PAGES}
+def pages(user: dict = Depends(require_account_admin)) -> dict:
+    """The page catalog and the pages per role; a COTR admin (2026-11-13) gets the COTR pages only."""
+    roles = {**access.role_pages(), access.COTR_ADMIN: access.role_base(access.COTR_ADMIN)}
+    if user.get("role") == access.COTR_ADMIN:
+        return {"pages": [p for p in catalog() if access.cotr_page(p["key"])],
+                "roles": {r: [p for p in v if access.cotr_page(p)] for r, v in roles.items() if r in access.COTR_ROLES},
+                "defaults": {}}
+    return {"pages": catalog(), "roles": roles, "defaults": access.DEFAULT_ROLE_PAGES}
 
 
 @router.get("/platforms")

@@ -1,4 +1,4 @@
-"""User account management (superadmin only).
+"""User account management (superadmin; a COTR admin for the accounts of the COTR line, 2026-11-13).
 
     GET    /api/users?search=&role=&status=&line=&page=&pageSize=   line: kopicalf | wasgee | cotr (migration 054)
     POST   /api/users
@@ -9,7 +9,8 @@
     PUT    /api/users/{id}/avatar   {"image": data URL}   DELETE /api/users/{id}/avatar
 
 Safeguards: you cannot delete or deactivate yourself, and the last active
-superadmin can be neither removed, deactivated nor demoted.
+superadmin can be neither removed, deactivated nor demoted. A COTR admin (migration 099) sees and manages the accounts
+of the COTR line only: roles user / outlet / driver / COTR admin, the line stays COTR, page exceptions of COTR pages.
 
 `branches` (list of branch codes): the branches a "user" may see on the Overview and
 Sales Transactions; required (at least one) for role "user", cleared for superadmins.
@@ -23,17 +24,17 @@ from pydantic import BaseModel, Field
 
 from app import access, accounts, activity, avatars
 from app.profile import ProfileError, clean_profile
-from app.routes.auth import AvatarUpload, forget_sessions, require_superadmin
+from app.routes.auth import AvatarUpload, forget_sessions, require_account_admin
 from app.security import EMAIL_RE, USERNAME_RE, hash_password, password_problem
 
-router = APIRouter(prefix="/api/users", tags=["users"], dependencies=[Depends(require_superadmin)])
+router = APIRouter(prefix="/api/users", tags=["users"], dependencies=[Depends(require_account_admin)])
 
 
 class UserFields(BaseModel):
     username: Optional[str] = Field(default=None, max_length=32)
     email: Optional[str] = Field(default=None, max_length=254)
     fullName: Optional[str] = Field(default=None, max_length=120)
-    role: Optional[Literal["superadmin", "cost_control", "user", "outlet", "driver"]] = None
+    role: Optional[Literal["superadmin", "cost_control", "user", "outlet", "driver", "cotr_admin"]] = None
     isActive: Optional[bool] = None
     phoneNumber: Optional[str] = Field(default=None, max_length=32)
     jobTitle: Optional[str] = Field(default=None, max_length=80)
@@ -59,6 +60,31 @@ class UserFields(BaseModel):
 
 def _error(message: str, status: int = 422, field: Optional[str] = None) -> JSONResponse:
     return JSONResponse({"error": message, "field": field}, status_code=status)
+
+
+def _cotr_admin(actor: dict) -> bool:
+    return actor.get("role") == access.COTR_ADMIN
+
+
+def _out_of_scope(actor: dict, target: Optional[dict]) -> Optional[JSONResponse]:
+    """A COTR admin touches the accounts of the COTR line only (never a superadmin or a Cost Control account)."""
+    if target and _cotr_admin(actor) and (target.get("business_line") != "cotr" or target["role"] not in access.COTR_ROLES):
+        return _error("Admin COTR hanya dapat mengelola akun lini Calf On The Road", 403)
+    return None
+
+
+def _cotr_fields(actor: dict, body: "UserFields", data: dict) -> Optional[JSONResponse]:
+    """What a COTR admin may set: the COTR line, a COTR role, exceptions of COTR pages."""
+    if not _cotr_admin(actor):
+        return None
+    if body.businessLine not in (None, "cotr"):
+        return _error("Akun buatan admin COTR selalu lini Calf On The Road", 403, "businessLine")
+    data["businessLine"] = "cotr"
+    if "role" in data and data["role"] not in access.COTR_ROLES:
+        return _error("Admin COTR hanya dapat memberi role User, Outlet, Driver atau Admin COTR", 403, "role")
+    if body.pageOverrides and any(not access.cotr_page(p) for p in body.pageOverrides):
+        return _error("Admin COTR hanya dapat mengatur halaman Calf On The Road", 403, "pageOverrides")
+    return None
 
 
 def _clean(body: UserFields, creating: bool, user_id: Optional[str] = None,
@@ -102,6 +128,8 @@ def _clean(body: UserFields, creating: bool, user_id: Optional[str] = None,
             return None, _error(f"Cabang tidak dikenal: {', '.join(sorted(unknown))}", field="branches")
         data["branches"] = codes
     role = data.get("role") or (current or {}).get("role") or "user"
+    if role == access.COTR_ADMIN:
+        data["businessLine"] = "cotr"  # a COTR admin is of the COTR line (migration 099)
     if role in accounts.GLOBAL_ROLES or role == "driver":  # superadmin / cost_control see every branch; drivers none (COTR)
         if creating or "branches" in data or (current or {}).get("branch_codes"):
             data["branches"] = []
@@ -125,7 +153,9 @@ def _password(body: UserFields, required: bool) -> tuple[Optional[str], Optional
 
 @router.get("")
 def list_users(search: str = "", role: str = "", status: str = "", branch: str = "", line: str = "",
-               page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100)):
+               page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100), actor: dict = Depends(require_account_admin)):
+    if _cotr_admin(actor):
+        line = "cotr"
     rows, total = accounts.list_users(search, role, status, pageSize, (page - 1) * pageSize, branch, line)
     return {"data": [_view(r) for r in rows], "total": total, "page": page, "pageSize": pageSize}
 
@@ -135,9 +165,9 @@ def _target(user: dict) -> dict:
 
 
 @router.get("/summary")
-def users_summary():
-    """Counts for the page header: totals, roles, status, users without branches, sign-in activity."""
-    c = accounts.user_counts()
+def users_summary(actor: dict = Depends(require_account_admin)):
+    """Counts for the page header: totals, roles, status, users without branches, sign-in activity (a COTR admin: its line)."""
+    c = accounts.user_counts("cotr" if _cotr_admin(actor) else None)
     return {"total": c.get("total", 0), "active": c.get("active", 0), "inactive": c.get("inactive", 0),
             "locked": c.get("locked", 0), "superadmins": c.get("superadmins", 0), "users": c.get("users", 0), "outlets": c.get("outlets", 0),
             "withoutBranch": c.get("without_branch", 0), "neverSignedIn": c.get("never_signed_in", 0),
@@ -146,8 +176,11 @@ def users_summary():
 
 
 @router.post("", status_code=201)
-def create_user(body: UserFields, request: Request, actor: dict = Depends(require_superadmin)):
+def create_user(body: UserFields, request: Request, actor: dict = Depends(require_account_admin)):
     data, error = _clean(body, creating=True)
+    if error:
+        return error
+    error = _cotr_fields(actor, body, data)
     if error:
         return error
     password_hash, error = _password(body, required=True)
@@ -164,18 +197,26 @@ def create_user(body: UserFields, request: Request, actor: dict = Depends(requir
 
 
 @router.get("/{user_id}")
-def get_user(user_id: UUID):
+def get_user(user_id: UUID, actor: dict = Depends(require_account_admin)):
     user = accounts.get_user(str(user_id))
-    return {"user": _view(user)} if user else _error("User tidak ditemukan", 404)
+    if not user:
+        return _error("User tidak ditemukan", 404)
+    return _out_of_scope(actor, user) or {"user": _view(user)}
 
 
 @router.patch("/{user_id}")
-def update_user(user_id: UUID, body: UserFields, request: Request, actor: dict = Depends(require_superadmin)):
+def update_user(user_id: UUID, body: UserFields, request: Request, actor: dict = Depends(require_account_admin)):
     uid = str(user_id)
     current = accounts.get_user(uid)
     if not current:
         return _error("User tidak ditemukan", 404)
+    error = _out_of_scope(actor, current)
+    if error:
+        return error
     data, error = _clean(body, creating=False, user_id=uid, current=current)
+    if error:
+        return error
+    error = _cotr_fields(actor, body, data)
     if error:
         return error
     password_hash, error = _password(body, required=False)
@@ -238,7 +279,10 @@ def _plain(value):
 
 
 @router.post("/{user_id}/unlock")
-def unlock_user(user_id: UUID, request: Request, actor: dict = Depends(require_superadmin)):
+def unlock_user(user_id: UUID, request: Request, actor: dict = Depends(require_account_admin)):
+    error = _out_of_scope(actor, accounts.get_user(str(user_id)))
+    if error:
+        return error
     user = accounts.unlock_user(str(user_id), str(actor["id"]))
     if user:
         activity.record("user.unlock", user=actor, request=request, page="/users",
@@ -247,10 +291,14 @@ def unlock_user(user_id: UUID, request: Request, actor: dict = Depends(require_s
 
 
 @router.put("/{user_id}/avatar")
-def set_avatar(user_id: UUID, body: AvatarUpload, actor: dict = Depends(require_superadmin)):
+def set_avatar(user_id: UUID, body: AvatarUpload, actor: dict = Depends(require_account_admin)):
     uid = str(user_id)
-    if not accounts.get_user(uid):
+    target = accounts.get_user(uid)
+    if not target:
         return _error("User tidak ditemukan", 404)
+    error = _out_of_scope(actor, target)
+    if error:
+        return error
     parsed, problem = avatars.parse_data_url(body.image)
     if problem:
         return _error(problem, field="avatar")
@@ -260,21 +308,28 @@ def set_avatar(user_id: UUID, body: AvatarUpload, actor: dict = Depends(require_
 
 
 @router.delete("/{user_id}/avatar")
-def delete_avatar(user_id: UUID, actor: dict = Depends(require_superadmin)):
+def delete_avatar(user_id: UUID, actor: dict = Depends(require_account_admin)):
     uid = str(user_id)
-    if not accounts.get_user(uid):
+    target = accounts.get_user(uid)
+    if not target:
         return _error("User tidak ditemukan", 404)
+    error = _out_of_scope(actor, target)
+    if error:
+        return error
     avatars.remove(uid, str(actor["id"]))
     forget_sessions()
     return {"user": accounts.public_user(accounts.get_user(uid))}
 
 
 @router.delete("/{user_id}")
-def delete_user(user_id: UUID, request: Request, actor: dict = Depends(require_superadmin)):
+def delete_user(user_id: UUID, request: Request, actor: dict = Depends(require_account_admin)):
     uid = str(user_id)
     current = accounts.get_user(uid)
     if not current:
         return _error("User tidak ditemukan", 404)
+    error = _out_of_scope(actor, current)
+    if error:
+        return error
     if uid == str(actor["id"]):
         return _error("Anda tidak dapat menghapus akun Anda sendiri", 409)
     if current["role"] == "superadmin" and current["is_active"] and accounts.count_active_superadmins(exclude_id=uid) == 0:

@@ -370,11 +370,28 @@ def _driver_by_label(pool: str) -> list[tuple[str, str, str]]:
             for d in db.fetch(f"SELECT code, name, nickname FROM {P}.cotr_driver WHERE pool_code = %s", (pool,))]
 
 
-def _match(label: str, drivers: list[tuple[str, str, str]]) -> Optional[str]:
-    """"BNI 10 DAHLAN" → the driver nicknamed Dahlan; "BAHANUALI" → Bahanu Ali; "M.APRIZAL" → Muhammad Aprizal."""
-    words = label.split()
-    name = " ".join(w for w in words if not re.fullmatch(r"(BNI|BRI|BCA|MANDIRI|\d+)", w.upper()))
+def _label_name(label: str) -> str:
+    """"BRI 55 BAKRI" → "BAKRI": the name without the bank and the armada number."""
+    return " ".join(w for w in label.split() if not re.fullmatch(r"(BNI|BRI|BCA|MANDIRI|\d+)", w.upper()))
+
+
+def _label_key(label: str) -> str:
+    return _key(_label_name(label))
+
+
+def _aliases(pool: str) -> dict[str, Optional[str]]:
+    """migration 093: label key -> driver code (None = not a driver) of a pool."""
+    return {r["label_key"]: (None if r["ignored"] else r["driver_code"])
+            for r in db.fetch(f"SELECT label_key, driver_code, ignored FROM {P}.cotr_driver_alias WHERE pool_code = %s", (pool,))}
+
+
+def _match(label: str, drivers: list[tuple[str, str, str]], aliases: Optional[dict[str, Optional[str]]] = None) -> Optional[str]:
+    """"BNI 10 DAHLAN" → the driver nicknamed Dahlan; "BAHANUALI" → Bahanu Ali; "M.APRIZAL" → Muhammad Aprizal. A name
+    tied by hand (migration 093) wins."""
+    name = _label_name(label)
     k = _key(name)
+    if aliases and k in aliases:
+        return aliases[k]
     if len(k) < 3:
         return None
     first = _key(name.replace(".", " ").split()[-1] if "." in name else name.split()[0])
@@ -415,6 +432,7 @@ def import_workbook(user: dict, pool: str, data: bytes, d_from: date, d_to: Opti
     if not any(c[0] == first for c in counts) and d_from in days:  # no count the day before: the sheet's opening of the first day
         counts = [(first, code, None, f["opening"]) for code, f in days[d_from]["figures"].items() if "opening" in f] + counts
     drivers = _driver_by_label(pool)
+    aliases = _aliases(pool)
     month = wb["month"] or d_from.replace(day=1)
     reports = []
     for r in wb["report"]:
@@ -424,7 +442,7 @@ def import_workbook(user: dict, pool: str, data: bytes, d_from: date, d_to: Opti
             continue
         if not d_from <= d <= d_to:
             continue
-        code = _match(r["label"], drivers)
+        code = _match(r["label"], drivers, aliases)
         reports.append((d, r, code))
     # migration 092: the Rekap Minus of the month → a "minus" deduction per employee (short − over − paid back)
     fleet_of = {(r["fleet_code"] or "").upper(): r["code"] for r in db.fetch(
@@ -434,11 +452,11 @@ def import_workbook(user: dict, pool: str, data: bytes, d_from: date, d_to: Opti
         armada = re.sub(r"\s+", " ", m["armada"].upper())
         mm = re.match(r"(BNI|BRI)\s*0*(\d+)", armada)
         code = fleet_of.get(f"{mm.group(1)} {int(mm.group(2)):02d}") if mm else None
-        code = code or _match(f"X 0 {m['name']}", drivers)
+        code = code or _match(f"X 0 {m['name']}", drivers, aliases)
         net = round(m["short"] - m["over"] - m["paid"], 2)
         minus.append((m, code, net))
     summary = {"days": [d.isoformat() for d in sorted(days) if d >= d_from], "counts": len(counts), "figures": len(moves),
-               "reports": len(reports), "unmatched": sorted({r["label"] for _, r, c in reports if not c}),
+               "reports": len(reports), "unmatched": sorted({r["label"] for _, r, c in reports if not c and aliases.get(_label_key(r["label"]), "") is not None}),
                "minus": sum(1 for _, c, n in minus if c and n > 0), "minusUnmatched": sorted({m["name"] for m, c, n in minus if not c and n > 0})}
     if not apply:
         return summary
@@ -569,3 +587,66 @@ def reconcile(pool: Optional[str], d_from: date, d_to: date) -> dict:
             days.append({"pool": p, "poolName": names.get(p, p), "day": d.isoformat(), "status": status, "lines": lines,
                          "gap": sum(abs(x["diff"] or 0) for x in lines)})
     return {"from": d_from.isoformat(), "to": d_to.isoformat(), "pool": pool, "summary": totals, "days": days}
+
+
+# ---------------------------------------------------------------- names of the workbooks tied to the drivers (migration 093)
+def unmatched_labels(pool: Optional[str]) -> dict:
+    """The names of Report Armada no driver was found for, per pool (rows, days), with the drivers whose name looks most
+    like it; and the names tied by hand."""
+    from difflib import SequenceMatcher
+    drivers = db.fetch(f"""SELECT d.code, d.name, d.nickname, d.pool_code, d.fleet_code, p.name AS pool_name FROM {P}.cotr_driver d
+                            LEFT JOIN {P}.cotr_pool p ON p.code = d.pool_code WHERE d.department ILIKE 'armada%%' OR d.department IS NULL""")
+    names = {r["code"]: r["name"] for r in db.fetch(f"SELECT code, name FROM {P}.cotr_pool")}
+    rows = db.fetch(f"""SELECT pool_code, label, count(*)::int AS rows, min(day) AS first, max(day) AS last FROM {P}.cotr_report_day
+                         WHERE driver_code IS NULL AND (%s::text IS NULL OR pool_code = %s) GROUP BY 1, 2 ORDER BY 1, 3 DESC""", (pool, pool))
+    ignored = {(r["pool_code"], r["label_key"]) for r in db.fetch(f"SELECT pool_code, label_key FROM {P}.cotr_driver_alias WHERE ignored")}
+    out = []
+    for r in rows:
+        k = _label_key(r["label"])
+        if (r["pool_code"], k) in ignored:
+            continue
+        armada = re.match(r"\s*(BNI|BRI)\s*0*(\d+)", r["label"].upper())
+        fleet = f"{armada.group(1)} {int(armada.group(2)):02d}" if armada else None
+
+        def score(d: dict) -> float:
+            best = max(SequenceMatcher(None, k, _key(x)).ratio() for x in (d["name"] or "", d["nickname"] or "", (d["name"] or "").split()[0] if d["name"] else ""))
+            return best + (0.3 if fleet and (d["fleet_code"] or "").upper() == fleet else 0) + (0.1 if d["pool_code"] == r["pool_code"] else 0)
+        ranked = sorted(drivers, key=score, reverse=True)[:3]
+        out.append({"pool": r["pool_code"], "poolName": names.get(r["pool_code"], r["pool_code"]), "label": r["label"], "key": k,
+                    "rows": r["rows"], "first": _iso(r["first"]), "last": _iso(r["last"]),
+                    "suggestions": [{"code": d["code"], "name": d["name"], "nickname": d["nickname"], "pool": d["pool_name"], "fleet": d["fleet_code"],
+                                     "score": round(min(score(d), 1.0), 2)} for d in ranked]})
+    tied = db.fetch(f"""SELECT a.pool_code, a.label, a.driver_code, a.ignored, a.created_at, d.name AS driver_name FROM {P}.cotr_driver_alias a
+                         LEFT JOIN {P}.cotr_driver d ON d.code = a.driver_code WHERE (%s::text IS NULL OR a.pool_code = %s)
+                         ORDER BY a.created_at DESC""", (pool, pool))
+    return {"unmatched": out, "tied": [{"pool": t["pool_code"], "poolName": names.get(t["pool_code"], t["pool_code"]), "label": t["label"],
+                                         "driver": t["driver_code"], "driverName": t["driver_name"], "ignored": t["ignored"], "at": _iso(t["created_at"])} for t in tied]}
+
+
+def tie_label(user: dict, pool: str, label: str, driver: Optional[str]) -> dict:
+    """A name of the workbooks of a pool tied to a driver (None: not a driver): kept for the next imports, and the rows of
+    Report Armada already imported with that name take the driver (the incentives count their cups)."""
+    k = _label_key(label)
+    if len(k) < 2:
+        raise CotrError("Nama terlalu pendek")
+    if driver and not db.fetchrow(f"SELECT 1 FROM {P}.cotr_driver WHERE code = %s", (driver,)):
+        raise CotrError("Driver tidak ditemukan")
+    # every spelling of the name in the pool ("BRI 55 BAKRI", "BRI 055 BAKRI ") takes the driver
+    labels = [r["label"] for r in db.fetch(f"SELECT DISTINCT label FROM {P}.cotr_report_day WHERE pool_code = %s", (pool,))
+              if _label_key(r["label"]) == k]
+    with db.transaction() as conn:
+        conn.execute(f"""INSERT INTO {P}.cotr_driver_alias (pool_code, label_key, label, driver_code, ignored, created_by)
+                         VALUES (%s, %s, %s, %s, %s, %s)
+                         ON CONFLICT (pool_code, label_key) DO UPDATE SET label = EXCLUDED.label, driver_code = EXCLUDED.driver_code,
+                             ignored = EXCLUDED.ignored, created_by = EXCLUDED.created_by, created_at = now()""",
+                     (pool, k, label, driver, driver is None, user.get("id")))
+        updated = conn.execute(f"UPDATE {P}.cotr_report_day SET driver_code = %s WHERE pool_code = %s AND label = ANY(%s)",
+                               (driver, pool, labels)).rowcount if labels else 0
+    return {"pool": pool, "label": label, "driver": driver, "rows": updated}
+
+
+def untie_label(pool: str, label: str) -> dict:
+    """The tie removed: the next import matches the name by itself again (the rows already imported keep their driver)."""
+    with db.transaction() as conn:
+        n = conn.execute(f"DELETE FROM {P}.cotr_driver_alias WHERE pool_code = %s AND label_key = %s", (pool, _label_key(label))).rowcount
+    return {"removed": n}

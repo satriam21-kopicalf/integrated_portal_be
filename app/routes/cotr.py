@@ -57,6 +57,7 @@ Portal (Monitoring COTR):
     GET  /api/cotr/issues?status=&fleet=&pool=&days=, GET /api/cotr/issues/{id}   page cotr.fleet / cotr.check-in (088)
     POST /api/cotr/issues/{id}/step             page cotr.fleet: {"status", "note", "handler", "cost"} handle an issue
     GET  /api/cotr/reconcile?pool=&dateFrom=&dateTo=     page cotr.storage / cotr.production: workbook vs ESB vs app per pool-day
+    GET/PUT/DELETE /api/cotr/driver-labels       the names of Report Armada without a driver, tied by hand (migration 093)
     GET  /api/cotr/pool-ledger?pool=&dateFrom=&dateTo=   page cotr.storage / cotr.production: the sheet "Product" (089)
     PUT  /api/cotr/pool-count                   {"pool", "day", "lines": [{"menu", "qty", "batchNo", "expiresOn"}]} the physical leftover
     PUT  /api/cotr/pool-moves                   {"pool", "day", "kind": transfer|arrived, "lines": {menu: cups}, "note"}
@@ -759,6 +760,31 @@ def pool_available(pool: str, day: Optional[date] = None, _: dict = Depends(requ
     menus = {m["code"]: m["name"] for m in cotr.menus(active_only=True)}
     return {"pool": pool, "day": d.isoformat(), "counted": a is not None,
             "rows": [{"menu": c, "name": menus.get(c, c), **v} for c, v in (a or {}).items() if c in menus]}
+
+
+class LabelTieIn(BaseModel):
+    pool: str = Field(min_length=1, max_length=40)
+    label: str = Field(min_length=1, max_length=200)
+    driver: Optional[str] = Field(None, max_length=40)  # null: not a driver
+
+
+@router.get("/driver-labels")
+def driver_labels(pool: Optional[str] = None, _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    return cotr_ledger.unmatched_labels(pool or None)
+
+
+@router.put("/driver-labels")
+def tie_driver_label(body: LabelTieIn, request: Request, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    out = _call(cotr_ledger.tie_label, user, body.pool, body.label.strip(), body.driver or None)
+    _log(request, user, "cotr.label.tie", f"Nama workbook {body.label} ({body.pool}) → {body.driver or 'bukan driver'}", out)
+    return out
+
+
+@router.delete("/driver-labels")
+def untie_driver_label(pool: str, label: str, request: Request, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    out = cotr_ledger.untie_label(pool, label)
+    _log(request, user, "cotr.label.untie", f"Tautan nama workbook {label} ({pool}) dihapus", out)
+    return out
 
 
 @router.get("/reconcile")

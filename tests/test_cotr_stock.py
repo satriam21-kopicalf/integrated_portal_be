@@ -128,3 +128,12 @@ def test_reconcile_sheet_against_esb(monkeypatch):
     assert first["status"] == "diff" and first["gap"] == 2
     assert first["lines"][0] | {} == {"menu": "M1", "name": "Premium", "kind": "sold", "sheet": 10, "esb": 12, "app": None, "diff": -2}
     assert r["days"][1]["status"] == "sheet" and r["days"][1]["lines"][0]["esb"] is None
+
+
+def test_label_alias_wins_and_ignored():
+    from app import cotr_ledger
+    drivers = [("bakri", "bakrisaputra", "D1"), ("dahlan", "dahlan", "D2")]
+    assert cotr_ledger._label_key("BRI 55 BAKRI") == "bakri"
+    assert cotr_ledger._match("BRI 55 BAKRI", drivers) == "D1"
+    assert cotr_ledger._match("BRI 55 BAKRI", drivers, {"bakri": "D2"}) == "D2"
+    assert cotr_ledger._match("BNI 47 PESENAN POOL", drivers, {"pesenanpool": None}) is None

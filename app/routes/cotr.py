@@ -469,6 +469,14 @@ def renew_label_token(code: str, request: Request, user: dict = Depends(require_
     return {"label_token": token}
 
 
+@router.get("/employees")
+def employees(q: Optional[str] = Query(None, max_length=80), user: dict = Depends(current_user)):
+    """User Accounts → COTR (2026-11-12): the employees of Master Driver to make an account for (super admins)."""
+    if user.get("role") != "superadmin":
+        raise HTTPException(403, detail="Khusus super admin")
+    return {"data": cotr.employees(q)}
+
+
 @router.get("/driver-accounts")
 def driver_accounts(_: dict = Depends(require_page("cotr.drivers"))):
     return cotr.driver_accounts()

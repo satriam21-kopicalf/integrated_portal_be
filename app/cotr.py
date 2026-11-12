@@ -961,6 +961,39 @@ def _db_message(e: Exception) -> str:
     return "Data tidak dapat disimpan"
 
 
+def link_account(user_id: str, driver_code: Optional[str]) -> None:
+    """User Accounts (2026-11-12): the account belongs to this employee of Master Driver (None = to none); an employee
+    has one account, so the one it had before is untied."""
+    with db.transaction() as conn:
+        if driver_code:
+            d = conn.execute(f"SELECT code, user_id FROM {P}.cotr_driver WHERE code = %s FOR UPDATE", (driver_code,)).fetchone()
+            if not d:
+                raise CotrError("Karyawan COTR tidak ditemukan")
+        conn.execute(f"UPDATE {P}.cotr_driver SET user_id = NULL WHERE user_id = %s AND code IS DISTINCT FROM %s", (user_id, driver_code))
+        if driver_code:
+            conn.execute(f"UPDATE {P}.cotr_driver SET user_id = %s WHERE code = %s", (user_id, driver_code))
+
+
+def driver_of_account(user_id: str) -> Optional[dict]:
+    r = db.fetchrow(f"""SELECT d.code, d.name, d.nickname, d.pool_code, d.department, p.name AS pool_name FROM {P}.cotr_driver d
+                         LEFT JOIN {P}.cotr_pool p ON p.code = d.pool_code WHERE d.user_id = %s""", (user_id,))
+    return {"code": r["code"], "name": r["name"], "nickname": r["nickname"], "pool": r["pool_code"], "poolName": r["pool_name"],
+            "department": r["department"]} if r else None
+
+
+def employees(q: Optional[str] = None) -> list[dict]:
+    """The employees of Master Driver to pick an account for (User Accounts → COTR), with the account they have."""
+    like = f"%{q.strip()}%" if q and q.strip() else None
+    rows = db.fetch(f"""SELECT d.code, d.name, d.nickname, d.phone, d.pool_code, p.name AS pool_name, d.department, d.position,
+                               d.employee_id, u.username
+                          FROM {P}.cotr_driver d LEFT JOIN {P}.cotr_pool p ON p.code = d.pool_code
+                          LEFT JOIN {P}.user_account u ON u.id = d.user_id
+                         WHERE d.status <> 'inactive' AND (%s::text IS NULL OR d.name ILIKE %s OR d.nickname ILIKE %s OR d.code ILIKE %s)
+                         ORDER BY p.name NULLS LAST, d.department, d.name LIMIT 400""", (like, like, like, like))
+    return [{"code": r["code"], "name": r["name"], "nickname": r["nickname"], "phone": r["phone"], "pool": r["pool_code"],
+             "poolName": r["pool_name"], "department": r["department"], "position": r["position"], "username": r["username"]} for r in rows]
+
+
 def driver_accounts() -> list[dict]:
     """Accounts of role driver, with the driver each one is tied to (Master Driver: the account select)."""
     return [{"id": str(r["id"]), "username": r["username"], "name": r["full_name"], "driver": r["driver"]}

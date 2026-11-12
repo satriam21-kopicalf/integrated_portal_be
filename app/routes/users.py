@@ -53,6 +53,8 @@ class UserFields(BaseModel):
     businessLine: Optional[Literal["kopicalf", "wasgee", "cotr"]] = None
     # pages left out of the sidebar of the account (display only; migration 054)
     hiddenPages: Optional[list[str]] = Field(default=None, max_length=200)
+    # Calf On The Road (2026-11-12): the employee of Master Driver the account belongs to ("" = none)
+    cotrDriver: Optional[str] = Field(default=None, max_length=40)
 
 
 def _error(message: str, status: int = 422, field: Optional[str] = None) -> JSONResponse:
@@ -64,6 +66,7 @@ def _clean(body: UserFields, creating: bool, user_id: Optional[str] = None,
     """Normalised fields to store, or a validation error response."""
     data = body.model_dump(exclude_unset=True)
     data.pop("password", None)
+    data.pop("cotrDriver", None)  # not a column of the account: tied in _after_save
     try:
         data.update(clean_profile(data))
     except ProfileError as exc:
@@ -204,13 +207,20 @@ def update_user(user_id: UUID, body: UserFields, request: Request, actor: dict =
 
 def _view(row: dict) -> dict:
     """A user for this page: the account, the pages it opens and the exceptions to its role."""
-    return {**accounts.public_user(row), "pages": access.pages_for(row),
+    from app import cotr
+    return {**accounts.public_user(row), "pages": access.pages_for(row), "cotrDriver": cotr.driver_of_account(str(row["id"])),
             "pageOverrides": ({p: v for p, v in access.user_overrides(str(row["id"])).items() if p in access.TEAM_PAGES and v}
                               if row["role"] == "superadmin" else access.user_overrides(str(row["id"])))}
 
 
 def _after_save(user: dict, body: UserFields, actor: dict) -> Optional[JSONResponse]:
-    """Page exceptions of the form, and new job titles / departments into their lists."""
+    """Page exceptions of the form, new job titles / departments into their lists, and the COTR employee of the account."""
+    if body.cotrDriver is not None:
+        from app import cotr
+        try:
+            cotr.link_account(str(user["id"]), body.cotrDriver.strip() or None)
+        except cotr.CotrError as exc:
+            return _error(str(exc), 422, "cotrDriver")
     for kind, value in (("jobTitle", user.get("job_title")), ("department", user.get("department"))):
         if value and value.strip():
             access.add_master(kind, value, str(actor["id"]))

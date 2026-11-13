@@ -63,14 +63,20 @@ def get_cost_groups(days: int = Query(60, ge=7, le=180)):
 class CostGroupIn(BaseModel):
     category: str = Field(max_length=200)
     group: Optional[Literal["bb", "espresso", "dimsum", "gs", "other"]] = None
+    validFrom: date
+    note: str = Field(default="", max_length=300)
 
 
 @router.put("/cost-groups")
 def put_cost_group(body: CostGroupIn, request: Request):
     user = getattr(request.state, "user", None) or {}
-    ratio.set_cost_group(body.category, body.group, str(user.get("id")))
+    try:
+        ratio.set_cost_group(body.category, body.group, body.validFrom, body.note, str(user.get("id")))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
     activity.record("cc.ratio", user=user or None, request=request, page="/cost-control/ratio",
-                    summary=f"Kelompok biaya {body.category or '(tanpa kategori)'}: {body.group or 'ikut supplier'}", details=body.model_dump())
+                    summary=f"Kelompok biaya {body.category or '(tanpa kategori)'}: {body.group or 'ikut supplier'} mulai {body.validFrom:%d/%m/%Y} — {body.note[:120]}",
+                    details=body.model_dump(mode="json"))
     return {"ok": True}
 
 

@@ -220,18 +220,52 @@ def _total(rows: list[dict]) -> dict:
 # The workbook counts the purchase invoices by supplier. The invoices lag the goods received and a supplier is no cost
 # group (Calf Warehouse also sends packaging and general supplies), so the basis "gr" counts what came in: the goods
 # receipts (with the PO price when the line carries none) and the outlets' own purchases, each line in the cost group of
-# its ESB category (cc_cost_group, set by Cost Control); a category not set yet follows its supplier as the workbook
-# (an outlet purchase: BB). Transfer Stock received in the period: in at the receiver, out at the sender (its value).
+# its ESB category (set by Cost Control); a category not set yet follows its supplier as the workbook (an outlet
+# purchase: BB). Transfer Stock received in the period: in at the receiver, out at the sender (its value).
+# The group of a category has a valid-from date (cc_cost_group_version, migration 103): a line takes the group valid on
+# its document day, so a change applies from its date on and the months before keep theirs; a closed month (before the
+# 1st of the current month) cannot be changed, every change needs a reason and stays in the history.
 
 COST_GROUPS = ("bb", "espresso", "dimsum", "gs", "other")
 GR_SKIP = ("New", "Draft", "Rejected", "Cancelled", "Canceled", "Void")
 
 
-def cost_groups() -> dict[str, str]:
+def versions() -> dict[str, list[tuple[date, Optional[str]]]]:
+    """{category: [(valid from, group or None = its supplier)], oldest first}."""
     try:
-        return {r["category"]: r["cost_group"] for r in db.fetch(f"SELECT category, cost_group FROM {PORTAL}.cc_cost_group")}
-    except Exception:  # noqa: BLE001 - before migration 102
+        rows = db.fetch(f"SELECT category, valid_from, cost_group FROM {PORTAL}.cc_cost_group_version ORDER BY category, valid_from")
+    except Exception:  # noqa: BLE001 - before migration 103
         return {}
+    out: dict[str, list[tuple[date, Optional[str]]]] = {}
+    for r in rows:
+        out.setdefault(r["category"], []).append((r["valid_from"], r["cost_group"]))
+    return out
+
+
+def group_on(vers: dict[str, list[tuple[date, Optional[str]]]], category: str, day: date) -> Optional[str]:
+    """The group of a category valid on `day` (None: not set, its supplier)."""
+    got = None
+    for valid_from, group in vers.get(category, ()):
+        if valid_from <= day:
+            got = group
+        else:
+            break
+    return got
+
+
+def mapping_on(vers: dict[str, list[tuple[date, Optional[str]]]], day: date) -> dict[str, str]:
+    out = {}
+    for c in vers:
+        g = group_on(vers, c, day)
+        if g:
+            out[c] = g
+    return out
+
+
+def cost_groups() -> dict[str, str]:
+    """The groups valid today."""
+    from app.utils import today
+    return mapping_on(versions(), today())
 
 
 def group_of(category: str, supplier: Optional[str], module: str, mapping: dict[str, str]) -> str:
@@ -243,7 +277,7 @@ def group_of(category: str, supplier: Optional[str], module: str, mapping: dict[
 
 
 def _lines_sql(extra_where: str) -> str:
-    return f"""SELECT b.branch_code, d.module, d.counterparty_name AS supplier, coalesce(l.raw_data->>'categoryName', '') AS category,
+    return f"""SELECT b.branch_code, d.module, d.counterparty_name AS supplier, coalesce(l.raw_data->>'categoryName', '') AS category, d.doc_date AS day,
                       sum(l.qty * coalesce(nullif(l.price, 0), po.price)) AS value,
                       count(*) FILTER (WHERE coalesce(nullif(l.price, 0), po.price) IS NULL) AS unpriced
                  FROM {SCHEMA}.erp_documents d
@@ -255,17 +289,20 @@ def _lines_sql(extra_where: str) -> str:
                                      ORDER BY (upper(coalesce(p.uom_name, '')) = upper(coalesce(l.uom_name, ''))) DESC LIMIT 1) po ON true
                 WHERE d.module IN ('goods_receipt', 'simple_purchase') AND d.deleted_at IS NULL
                   AND coalesce(d.status_name, '') <> ALL(%(skip)s) {extra_where}
-                GROUP BY 1, 2, 3, 4"""
+                GROUP BY 1, 2, 3, 4, 5"""
 
 
 def gr_purchases(start: date, end: date, codes: Optional[list[str]]) -> tuple[dict[str, dict[str, float]], dict[str, int]]:
     """({branch: {cost group: value}}, {branch: lines without a price}) of the GRs and outlet purchases of the period."""
-    mapping = cost_groups()
+    vers = versions()
+    by_day: dict[date, dict[str, str]] = {}
     buy: dict[str, dict[str, float]] = {}
     unpriced: dict[str, int] = {}
     for r in db.fetch(_lines_sql("AND d.doc_date BETWEEN %(s)s AND %(e)s AND (%(codes)s::text[] IS NULL OR b.branch_code = ANY(%(codes)s))"),
                       {"s": start, "e": end, "codes": codes, "skip": list(GR_SKIP)}):
-        g = group_of(r["category"], r["supplier"], r["module"], mapping)
+        if r["day"] not in by_day:
+            by_day[r["day"]] = mapping_on(vers, r["day"])
+        g = group_of(r["category"], r["supplier"], r["module"], by_day[r["day"]])
         b = buy.setdefault(r["branch_code"], {})
         b[g] = b.get(g, 0.0) + _f(r["value"])
         if r["unpriced"]:
@@ -294,7 +331,7 @@ def categories(days: int = 60) -> dict:
     group Cost Control set and the one its suppliers suggest."""
     from app.utils import today
     end = today()
-    mapping = cost_groups()
+    vers = versions()
     cats: dict[str, dict] = {}
     for r in db.fetch(_lines_sql("AND d.doc_date BETWEEN %(s)s AND %(e)s"), {"s": end - timedelta(days=days), "e": end, "skip": list(GR_SKIP)}):
         c = cats.setdefault(r["category"], {"category": r["category"], "value": 0.0, "lines": 0, "bySupplier": {}, "byGroup": {}})
@@ -304,25 +341,43 @@ def categories(days: int = 60) -> dict:
         c["bySupplier"][who or "-"] = round(c["bySupplier"].get(who or "-", 0.0) + v, 2)
         g = group_of("\0", r["supplier"], r["module"], {})
         c["byGroup"][g] = c["byGroup"].get(g, 0.0) + v
+    hist: dict[str, list[dict]] = {}
+    try:
+        for r in db.fetch(f"""SELECT v.category, v.valid_from, v.cost_group, v.note, v.created_at, u.username
+                                FROM {PORTAL}.cc_cost_group_version v LEFT JOIN {PORTAL}.user_account u ON u.id = v.updated_by
+                               ORDER BY v.valid_from DESC, v.created_at DESC"""):
+            hist.setdefault(r["category"], []).append({"validFrom": r["valid_from"].isoformat(), "group": r["cost_group"], "note": r["note"],
+                                                       "by": r["username"], "at": r["created_at"].isoformat() if r["created_at"] else None})
+    except Exception:  # noqa: BLE001 - before migration 103
+        pass
     out = []
     for c in cats.values():
         suggested = max(c["byGroup"].items(), key=lambda kv: kv[1])[0] if c["byGroup"] else "other"
+        later = [h for h in hist.get(c["category"], []) if h["validFrom"] > end.isoformat()]
         out.append({"category": c["category"], "value": round(c["value"], 2), "bySupplier": c["bySupplier"], "suggested": suggested,
-                    "group": mapping.get(c["category"])})
+                    "group": group_on(vers, c["category"], end), "next": later[-1] if later else None,
+                    "history": hist.get(c["category"], [])[:10]})
     out.sort(key=lambda x: -x["value"])
-    return {"days": days, "groups": list(COST_GROUPS), "data": out}
+    return {"days": days, "groups": list(COST_GROUPS), "minValidFrom": end.replace(day=1).isoformat(), "data": out}
 
 
-def set_cost_group(category: str, group: Optional[str], actor_id: str) -> None:
+def set_cost_group(category: str, group: Optional[str], valid_from: date, note: str, actor_id: str) -> None:
+    """The group of a category from `valid_from` on (None: back to its supplier). Not before the 1st of the current month
+    (a closed month keeps its figures); a reason is needed; the same category and day again replaces that version."""
+    from app.utils import today
     if group is not None and group not in COST_GROUPS:
         raise ValueError("Kelompok biaya tidak dikenal")
+    first = today().replace(day=1)
+    if valid_from < first:
+        raise ValueError(f"Berlaku paling awal {first.strftime('%d/%m/%Y')}: bulan yang sudah lewat tidak diubah")
+    if not (note or "").strip():
+        raise ValueError("Alasan wajib diisi")
     with db.transaction() as conn:
-        if group is None:
-            conn.execute(f"DELETE FROM {PORTAL}.cc_cost_group WHERE category = %s", (category,))
-        else:
-            conn.execute(f"""INSERT INTO {PORTAL}.cc_cost_group (category, cost_group, updated_by) VALUES (%s, %s, %s)
-                             ON CONFLICT (category) DO UPDATE SET cost_group = EXCLUDED.cost_group, updated_by = EXCLUDED.updated_by,
-                             updated_at = now()""", (category, group, actor_id))
+        conn.execute(f"""INSERT INTO {PORTAL}.cc_cost_group_version (category, valid_from, cost_group, note, updated_by)
+                         VALUES (%s, %s, %s, %s, %s)
+                         ON CONFLICT (category, valid_from) DO UPDATE SET cost_group = EXCLUDED.cost_group, note = EXCLUDED.note,
+                         updated_by = EXCLUDED.updated_by, created_at = now()""",
+                     (category, valid_from, group, note.strip()[:300], actor_id))
 
 
 # ---------------------------------------------------------------- corrections

@@ -62,3 +62,25 @@ def test_purchases_basis_gr_groups_by_category_and_counts_the_transfers(monkeypa
     monkeypatch.setattr(ratio.db, "fetch", lambda q, p=None: rows)
     assert ratio.transfers(None, None, None) == {"A": 70.0, "B": -70.0}
     assert ratio.transfers(None, None, ["A"]) == {"A": 70.0}
+
+
+def test_a_cost_group_change_applies_from_its_date_on(monkeypatch):
+    """2026-11-13: the group of a category has a valid-from date; the months before keep theirs; no change of a closed month."""
+    from datetime import date
+    vers = {"PACKAGING": [(date(2026, 11, 1), "bb"), (date(2026, 12, 1), "gs")], "ESPRESSO": [(date(2026, 11, 1), "espresso"), (date(2026, 11, 20), None)]}
+    assert ratio.group_on(vers, "PACKAGING", date(2026, 10, 31)) is None  # before any version: its supplier
+    assert ratio.group_on(vers, "PACKAGING", date(2026, 11, 30)) == "bb"
+    assert ratio.group_on(vers, "PACKAGING", date(2026, 12, 1)) == "gs"
+    assert ratio.mapping_on(vers, date(2026, 11, 25)) == {"PACKAGING": "bb"}  # ESPRESSO back to its supplier from the 20th
+    rows = [{"branch_code": "A", "module": "goods_receipt", "supplier": "Calf Warehouse", "category": "PACKAGING", "day": date(2026, 11, 30), "value": 100, "unpriced": 0},
+            {"branch_code": "A", "module": "goods_receipt", "supplier": "Calf Warehouse", "category": "PACKAGING", "day": date(2026, 12, 2), "value": 40, "unpriced": 1}]
+    monkeypatch.setattr(ratio, "versions", lambda: vers)
+    monkeypatch.setattr(ratio.db, "fetch", lambda q, p=None: rows)
+    buy, unpriced = ratio.gr_purchases(date(2026, 11, 1), date(2026, 12, 31), None)
+    assert buy == {"A": {"bb": 100.0, "gs": 40.0}} and unpriced == {"A": 1}
+    import app.utils as u
+    monkeypatch.setattr(u, "today", lambda: date(2026, 11, 13))
+    with pytest.raises(ValueError):
+        ratio.set_cost_group("PACKAGING", "gs", date(2026, 10, 31), "x", "u")  # a closed month
+    with pytest.raises(ValueError):
+        ratio.set_cost_group("PACKAGING", "gs", date(2026, 12, 1), "  ", "u")  # no reason

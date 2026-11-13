@@ -27,7 +27,7 @@ from app.database import SCHEMA
 logger = logging.getLogger("integrated_portal_be")
 P = "integration_portal"
 T, T_READ = f"{P}.cc_alert", f"{P}.cc_alert_read"
-PAGES = ("cc.goods-receipt", "cc.cogs")
+PAGES = ("cc.goods-receipt", "cc.cogs", "cc.info", "cc.purchase-plan", "cc.ratio", "cc.sales-calc", "cc.reviews", "cc.waste-review")
 SCAN_S = 1800
 FIRST_SCAN_S = 90
 LOOK_BACK = 3        # days of documents scanned for the per-line alerts
@@ -150,6 +150,13 @@ def daily(today: date, hour: int) -> list[dict]:
     return out
 
 
+def _health(today: date, hour: int) -> list[dict]:
+    """The daily alerts of the Pusat Informasi (app/data_health.py): ESB not synced, outlets without SO or waste report,
+    materials without a price, menus without a card, Transfer Stock not finished (2026-11-13)."""
+    from app import data_health
+    return data_health.health_alerts(today, hour)
+
+
 def scan(now: Optional[datetime] = None) -> dict:
     """One scan (one worker at a time): the new alerts are stored, the old ones deleted. {added, checked}."""
     from app.config import get_settings
@@ -157,7 +164,7 @@ def scan(now: Optional[datetime] = None) -> dict:
     today = now.date()
     found: list[dict] = []
     for name, step in (("doc", lambda: unusual_docs(today)), ("short", lambda: short_receipts(today)),
-                       ("daily", lambda: daily(today, now.hour))):
+                       ("daily", lambda: daily(today, now.hour)), ("health", lambda: _health(today, now.hour))):
         try:
             found += step()
         except Exception:  # noqa: BLE001 - one rule failing leaves the others

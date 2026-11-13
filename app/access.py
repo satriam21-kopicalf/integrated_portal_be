@@ -54,6 +54,8 @@ PAGES: list[tuple[str, str, str]] = [
     ("cc.ratio", "Outlet Ratio", "Cost Control · Analytics"),
     ("cc.cogs", "COGS & Usage", "Cost Control · Analytics"),
     ("cc.goods-receipt", "Good Receipt", "Cost Control · Analytics"),
+    ("cc.purchase-plan", "Purchase Estimate", "Cost Control · Analytics"),
+    ("cc.info", "Information Center", "Cost Control · Analytics"),
     ("cc.stock-list", "Stock List", "Monitoring Stock"),
     ("cc.stock-transfer", "Transfer Stock", "Monitoring Stock"),
     ("mon.overview", "Overview", "Operations"),

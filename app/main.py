@@ -27,6 +27,8 @@ from app.routes.access import router as access_router
 from app.routes.ratio import router as ratio_router
 from app.routes.menu_costing import router as menu_costing_router
 from app.routes.goods_receipt import router as goods_receipt_router
+from app.routes.purchase_plan import router as purchase_plan_router
+from app.routes.data_health import router as data_health_router
 from app.routes.stock_transfer import router as stock_transfer_router
 from app.routes.xlsx import router as xlsx_router
 from app.routes.auth import current_user, session_lookup
@@ -133,6 +135,8 @@ app.include_router(overview_router, dependencies=[Depends(require_page("overview
 app.include_router(live_router, dependencies=[Depends(require_page("overview"))])
 app.include_router(ratio_router)  # /api/cost-control/ratio (page cc.ratio)
 app.include_router(menu_costing_router)  # /api/cost-control/pricelist, /sales-calc (pages cc.pricelist, cc.sales-calc)
+app.include_router(data_health_router)  # /api/cost-control/health (page cc.info and the Sources line of the Cost Control pages)
+app.include_router(purchase_plan_router)  # /api/cost-control/purchase-plan (page cc.purchase-plan, migration 100)
 app.include_router(goods_receipt_router)  # /api/cost-control/goods-receipts (page cc.goods-receipt, migration 072)
 app.include_router(stock_transfer_router)  # Monitoring Stock + Form Transfer Stock (TITO, migration 075)
 app.include_router(stock_opname_router, dependencies=signed_in)  # stock opname through the kopicalf gateway (pages per path)

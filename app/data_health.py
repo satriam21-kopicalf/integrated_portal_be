@@ -102,6 +102,38 @@ def esb_docs(now: datetime) -> dict:
                 "ESB ERP", "/cost-control/goods-receipt", items=items)
 
 
+COST_MODULES = ("goods_receipt", "purchase_invoice", "stock_opname", "simple_purchase", "item_journal", "pos_sales")
+
+
+def esb_integrity() -> dict:
+    """Is what the portal holds of ESB complete (integrated-esbapi): the latest count check of every module and month
+    (sync_reconciliation: ESB lists N documents, the portal holds M), the documents whose detail (lines) could not be read
+    or is still waiting (no lines = out of the COGS and the stock), and the modules whose last sync failed."""
+    d0 = today()
+    diffs = db.fetch(
+        f"""SELECT entity, period_start, esb_count, db_count, diff, checked_at FROM {SCHEMA}.sync_reconciliation
+             WHERE period_start >= %s AND diff <> 0 ORDER BY abs(diff) DESC LIMIT 50""", (d0.replace(day=1) - timedelta(days=40),))
+    detail = db.fetch(
+        f"""SELECT module, count(*) FILTER (WHERE detail_error IS NOT NULL) AS failed,
+                   count(*) FILTER (WHERE detail_error IS NULL AND detail_synced_at IS NULL AND synced_at < now() - interval '2 hours') AS waiting
+              FROM {SCHEMA}.erp_documents WHERE deleted_at IS NULL AND doc_date >= %s
+               AND (detail_error IS NOT NULL OR detail_synced_at IS NULL) GROUP BY 1""", (d0 - timedelta(days=62),))
+    failed_runs = db.fetch(f"""SELECT entity_type, last_sync_at FROM {SCHEMA}.sync_metadata
+                               WHERE last_sync_status <> 'success' AND entity_type NOT LIKE %s""", ("grab%",))
+    items = [{"name": f"{r['entity']} {r['period_start'].strftime('%m/%Y') if r['entity'] != 'pos_sales' else r['period_start'].strftime('%d/%m/%Y')}",
+              "module": r["entity"], "esb": r["esb_count"], "db": r["db_count"], "diff": r["diff"]} for r in diffs]
+    items += [{"name": f"{r['module']}: {int(r['failed'])} gagal, {int(r['waiting'])} menunggu detail", "module": r["module"],
+               "failed": int(r["failed"]), "waiting": int(r["waiting"])} for r in detail if r["failed"] or r["waiting"]]
+    items += [{"name": f"{r['entity_type']}: sinkron terakhir gagal", "module": r["entity_type"], "failedRun": True} for r in failed_runs]
+    n_diff = len(diffs)
+    n_detail = sum(int(r["failed"]) + int(r["waiting"]) for r in detail)
+    cost_hit = any(i["module"] in COST_MODULES for i in items)
+    status = "high" if cost_hit else "warn" if items else "ok"
+    return card("esbIntegrity", status, str(n_diff + n_detail + len(failed_runs)),
+                f"{n_diff} modul/periode jumlahnya beda dengan ESB · {n_detail} dokumen tanpa baris detail · {len(failed_runs)} sinkron terakhir gagal",
+                "ESB ↔ Portal", "/cost-control/goods-receipt", items=items[:50], diffs=n_diff, details=n_detail, failedRuns=len(failed_runs))
+
+
 def so_counts() -> dict:
     from app import menu_costing as mc
     from app import test_branches
@@ -206,7 +238,7 @@ def transfers() -> dict:
 
 
 CHECKS: dict[str, Callable[..., dict]] = {
-    "esbSales": esb_sales, "esbDocs": esb_docs, "so": lambda now: so_counts(), "waste": lambda now: waste_reports(),
+    "esbSales": esb_sales, "esbDocs": esb_docs, "esbIntegrity": lambda now: esb_integrity(), "so": lambda now: so_counts(), "waste": lambda now: waste_reports(),
     "gr": lambda now: goods_receipts(), "prices": lambda now: prices(), "recipes": lambda now: recipes(),
     "transfers": lambda now: transfers(),
 }
@@ -252,7 +284,7 @@ def health_alerts(day: date, hour: int) -> list[dict]:
 
 
 TITLES = {
-    "esbSales": "Penjualan ESB belum sinkron", "esbDocs": "Dokumen ESB tertinggal", "so": "Outlet tanpa SO portal",
+    "esbSales": "Penjualan ESB belum sinkron", "esbDocs": "Dokumen ESB tertinggal", "esbIntegrity": "Data ESB di portal belum lengkap", "so": "Outlet tanpa SO portal",
     "waste": "Outlet belum lapor waste", "prices": "Bahan tanpa harga", "recipes": "Menu tanpa kartu resep",
     "transfers": "Transfer Stock belum selesai",
 }

@@ -87,7 +87,7 @@ def mdr(month: date, codes: Optional[list[str]]) -> dict[str, dict]:
     return {r["branch_code"]: {"pct": _f(r["mdr_pct"]), "note": r["note"]} for r in rows}
 
 
-def ratio(start: date, end: date, codes: Optional[list[str]] = None) -> dict:
+def ratio(start: date, end: date, codes: Optional[list[str]] = None, purchases: str = "invoice") -> dict:
     """Per outlet (with POS sales in the period) and in total, the columns of the workbook."""
     # 2026-11-12: rejected / cancelled / void invoices and item journals are left out, as the stock opname documents
     p = {"s": start, "e": end, "codes": codes, "skip": list(SKIP_STATUSES)}
@@ -100,16 +100,22 @@ def ratio(start: date, end: date, codes: Optional[list[str]] = None) -> dict:
                    sum(subtotal) FILTER (WHERE tx_type = 'other_cost') AS non_sales
             FROM {PORTAL}.agg_sales_daily WHERE sales_date BETWEEN %(s)s AND %(e)s {scope} GROUP BY 1""", p)}
     buy: dict[str, dict[str, float]] = {}
-    for r in db.fetch(
-        f"""SELECT b.branch_code, d.counterparty_name, sum(d.total) AS total, count(*) AS docs
-            FROM {SCHEMA}.erp_documents d JOIN {SCHEMA}.master_branches b ON b.branch_id::text = d.branch_id::text
-            WHERE d.module = 'purchase_invoice' AND d.doc_date BETWEEN %(s)s AND %(e)s AND d.deleted_at IS NULL
-              AND coalesce(d.status_name, '') <> ALL(%(skip)s)
-              AND (%(codes)s::text[] IS NULL OR b.branch_code = ANY(%(codes)s))
-            GROUP BY 1, 2""", p):
-        key = SUPPLIERS.get(r["counterparty_name"], "other")
-        b = buy.setdefault(r["branch_code"], {})
-        b[key] = b.get(key, 0.0) + _f(r["total"])
+    unpriced: dict[str, int] = {}
+    if purchases == "gr":  # 2026-11-13: what came in (GR + outlet purchases) by the cost group of its category
+        buy, unpriced = gr_purchases(start, end, codes)
+        for code, v in transfers(start, end, codes).items():
+            buy.setdefault(code, {})["transfer"] = v
+    else:
+        for r in db.fetch(
+            f"""SELECT b.branch_code, d.counterparty_name, sum(d.total) AS total, count(*) AS docs
+                FROM {SCHEMA}.erp_documents d JOIN {SCHEMA}.master_branches b ON b.branch_id::text = d.branch_id::text
+                WHERE d.module = 'purchase_invoice' AND d.doc_date BETWEEN %(s)s AND %(e)s AND d.deleted_at IS NULL
+                  AND coalesce(d.status_name, '') <> ALL(%(skip)s)
+                  AND (%(codes)s::text[] IS NULL OR b.branch_code = ANY(%(codes)s))
+                GROUP BY 1, 2""", p):
+            key = SUPPLIERS.get(r["counterparty_name"], "other")
+            b = buy.setdefault(r["branch_code"], {})
+            b[key] = b.get(key, 0.0) + _f(r["total"])
     # the Good Receipts Cost Control corrected (receipt date, quantity; migration 072), valued at their PO price
     fixed_gr: dict[str, float] = {}
     for code, by_supplier in goods_receipt.adjustments(start, end, codes)["value"].items():
@@ -151,26 +157,30 @@ def ratio(start: date, end: date, codes: Optional[list[str]] = None) -> dict:
                             b, journal.get(code, 0.0), so(code, day_a, so_a), so(code, day_b, so_b), mdrs.get(code)))
     for o in outlets:
         o["grCorrection"] = round(fixed_gr.get(o["branchCode"], 0.0), 2)
+        o["unpricedLines"] = unpriced.get(o["branchCode"], 0)
     outlets.sort(key=lambda o: o["branchName"])
-    total = {**_total(outlets), "grCorrection": round(sum(o["grCorrection"] for o in outlets), 2)}
+    total = {**_total(outlets), "grCorrection": round(sum(o["grCorrection"] for o in outlets), 2),
+             "unpricedLines": sum(o["unpricedLines"] for o in outlets)}
     return {"period": {"from": start.isoformat(), "to": end.isoformat(), "soStart": day_a.isoformat(), "soEnd": day_b.isoformat(),
                        "month": month.isoformat(), "mdrEditable": bool(start.replace(day=1) == end.replace(day=1))},
-            "outlets": outlets, "total": total}
+            "purchases": purchases, "outlets": outlets, "total": total}
 
 
 def _row(code: str, name: str, gross: float, nett: float, bills: int, non_sales: float, buy: dict[str, float],
          journal: float, so_a: dict, so_b: dict, mdr_row: Optional[dict]) -> dict:
     bb, esp, dim, other = buy.get("bb", 0.0), buy.get("espresso", 0.0), buy.get("dimsum", 0.0), buy.get("other", 0.0)
+    gs, transfer = buy.get("gs", 0.0), buy.get("transfer", 0.0)  # basis "gr" only (General Supplies, Transfer Stock in − out)
     cogs = bb + esp + dim
     pendapatan = round(gross * (1 - mdr_row["pct"] / 100), 2) if mdr_row else None
     net = pendapatan if pendapatan is not None else nett
     have_so = so_a["value"] is not None and so_b["value"] is not None
-    usage = cogs + so_a["value"] - so_b["value"] if have_so else None
+    usage = cogs + transfer + so_a["value"] - so_b["value"] if have_so else None
     out = {
         "branchCode": code, "branchName": name, "bills": bills,
         "gross": gross, "nett": nett, "net": net, "pendapatan": pendapatan, "mdrPct": mdr_row["pct"] if mdr_row else None,
         "netBasis": "pendapatan" if pendapatan is not None else "nett",
-        "bb": bb, "espresso": esp, "dimsum": dim, "otherPurchases": other, "cogs": cogs,
+        "bb": bb, "espresso": esp, "dimsum": dim, "otherPurchases": other, "cogs": cogs, "gs": gs, "transfer": transfer,
+        "gsRatio": _div(gs, net), "gsRatioGross": _div(gs, gross),
         "espressoShare": _div(esp, cogs), "bbRatio": _div(bb + dim, net), "espressoRatio": _div(esp, net),
         "bbRatioGross": _div(bb + dim, gross), "espressoRatioGross": _div(esp, gross),
         "cogsRatioGross": _div(cogs, gross), "cogsRatioNet": _div(cogs, net),
@@ -188,7 +198,7 @@ def _row(code: str, name: str, gross: float, nett: float, bills: int, non_sales:
 
 
 def _total(rows: list[dict]) -> dict:
-    keys = ("gross", "nett", "bb", "espresso", "dimsum", "otherPurchases", "cogs", "nonSales", "itemJournal", "bills")
+    keys = ("gross", "nett", "bb", "espresso", "dimsum", "otherPurchases", "cogs", "gs", "transfer", "nonSales", "itemJournal", "bills")
     t = {k: sum(r[k] for r in rows) for k in keys}
     net = sum((r["pendapatan"] if r["pendapatan"] is not None else r["nett"]) for r in rows)
     with_so = [r for r in rows if r["usage"] is not None]
@@ -201,9 +211,118 @@ def _total(rows: list[dict]) -> dict:
             "espressoShare": _div(t["espresso"], t["cogs"]), "bbRatio": _div(t["bb"] + t["dimsum"], net),
             "espressoRatio": _div(t["espresso"], net), "bbRatioGross": _div(t["bb"] + t["dimsum"], t["gross"]),
             "espressoRatioGross": _div(t["espresso"], t["gross"]), "cogsRatioGross": _div(t["cogs"], t["gross"]),
-            "cogsRatioNet": _div(t["cogs"], net), "usageRatioGross": _div(usage, gross_so), "usageRatioNet": _div(usage, net_so),
+            "cogsRatioNet": _div(t["cogs"], net), "gsRatio": _div(t["gs"], net), "gsRatioGross": _div(t["gs"], t["gross"]), "usageRatioGross": _div(usage, gross_so), "usageRatioNet": _div(usage, net_so),
             "nonSalesPct": _div(t["nonSales"], t["gross"]), "itemJournalPct": _div(t["itemJournal"], t["gross"]),
             "nonSalesPctNet": _div(t["nonSales"], net), "itemJournalPctNet": _div(t["itemJournal"], net)}
+
+
+# ---------------------------------------------------------------- basis "gr" (2026-11-13)
+# The workbook counts the purchase invoices by supplier. The invoices lag the goods received and a supplier is no cost
+# group (Calf Warehouse also sends packaging and general supplies), so the basis "gr" counts what came in: the goods
+# receipts (with the PO price when the line carries none) and the outlets' own purchases, each line in the cost group of
+# its ESB category (cc_cost_group, set by Cost Control); a category not set yet follows its supplier as the workbook
+# (an outlet purchase: BB). Transfer Stock received in the period: in at the receiver, out at the sender (its value).
+
+COST_GROUPS = ("bb", "espresso", "dimsum", "gs", "other")
+GR_SKIP = ("New", "Draft", "Rejected", "Cancelled", "Canceled", "Void")
+
+
+def cost_groups() -> dict[str, str]:
+    try:
+        return {r["category"]: r["cost_group"] for r in db.fetch(f"SELECT category, cost_group FROM {PORTAL}.cc_cost_group")}
+    except Exception:  # noqa: BLE001 - before migration 102
+        return {}
+
+
+def group_of(category: str, supplier: Optional[str], module: str, mapping: dict[str, str]) -> str:
+    if category in mapping:
+        return mapping[category]
+    if module == "simple_purchase":
+        return "bb"
+    return SUPPLIERS.get(supplier or "", "other")
+
+
+def _lines_sql(extra_where: str) -> str:
+    return f"""SELECT b.branch_code, d.module, d.counterparty_name AS supplier, coalesce(l.raw_data->>'categoryName', '') AS category,
+                      sum(l.qty * coalesce(nullif(l.price, 0), po.price)) AS value,
+                      count(*) FILTER (WHERE coalesce(nullif(l.price, 0), po.price) IS NULL) AS unpriced
+                 FROM {SCHEMA}.erp_documents d
+                 JOIN {SCHEMA}.erp_document_lines l ON l.module = d.module AND l.doc_num = d.doc_num AND l.line_type = 'detail'
+                 JOIN {SCHEMA}.master_branches b ON b.branch_id::text = d.branch_id::text
+                 LEFT JOIN LATERAL (SELECT p.price FROM {SCHEMA}.erp_document_lines p
+                                     WHERE coalesce(l.price, 0) = 0 AND d.module = 'goods_receipt' AND p.module = 'purchase_order'
+                                       AND p.doc_num = d.ref_num AND p.line_type = 'detail' AND p.product_code = l.product_code AND p.price > 0
+                                     ORDER BY (upper(coalesce(p.uom_name, '')) = upper(coalesce(l.uom_name, ''))) DESC LIMIT 1) po ON true
+                WHERE d.module IN ('goods_receipt', 'simple_purchase') AND d.deleted_at IS NULL
+                  AND coalesce(d.status_name, '') <> ALL(%(skip)s) {extra_where}
+                GROUP BY 1, 2, 3, 4"""
+
+
+def gr_purchases(start: date, end: date, codes: Optional[list[str]]) -> tuple[dict[str, dict[str, float]], dict[str, int]]:
+    """({branch: {cost group: value}}, {branch: lines without a price}) of the GRs and outlet purchases of the period."""
+    mapping = cost_groups()
+    buy: dict[str, dict[str, float]] = {}
+    unpriced: dict[str, int] = {}
+    for r in db.fetch(_lines_sql("AND d.doc_date BETWEEN %(s)s AND %(e)s AND (%(codes)s::text[] IS NULL OR b.branch_code = ANY(%(codes)s))"),
+                      {"s": start, "e": end, "codes": codes, "skip": list(GR_SKIP)}):
+        g = group_of(r["category"], r["supplier"], r["module"], mapping)
+        b = buy.setdefault(r["branch_code"], {})
+        b[g] = b.get(g, 0.0) + _f(r["value"])
+        if r["unpriced"]:
+            unpriced[r["branch_code"]] = unpriced.get(r["branch_code"], 0) + int(r["unpriced"])
+    return buy, unpriced
+
+
+def transfers(start: date, end: date, codes: Optional[list[str]]) -> dict[str, float]:
+    """{branch: value in − value out} of the Transfer Stock received in the period (portal, TITO)."""
+    try:
+        rows = db.fetch(f"""SELECT to_branch, from_branch, coalesce(value, 0) AS value FROM {PORTAL}.stock_transfer
+                             WHERE status = 'received' AND (received_at AT TIME ZONE 'Asia/Jakarta')::date BETWEEN %s AND %s""", (start, end))
+    except Exception:  # noqa: BLE001 - before migration 075
+        return {}
+    out: dict[str, float] = {}
+    keep = set(codes) if codes is not None else None
+    for r in rows:
+        for code, sign in ((r["to_branch"], 1), (r["from_branch"], -1)):
+            if code and (keep is None or code in keep):
+                out[code] = out.get(code, 0.0) + sign * _f(r["value"])
+    return out
+
+
+def categories(days: int = 60) -> dict:
+    """Every ESB category of the GRs and outlet purchases of the last `days` days with its value per supplier, the cost
+    group Cost Control set and the one its suppliers suggest."""
+    from app.utils import today
+    end = today()
+    mapping = cost_groups()
+    cats: dict[str, dict] = {}
+    for r in db.fetch(_lines_sql("AND d.doc_date BETWEEN %(s)s AND %(e)s"), {"s": end - timedelta(days=days), "e": end, "skip": list(GR_SKIP)}):
+        c = cats.setdefault(r["category"], {"category": r["category"], "value": 0.0, "lines": 0, "bySupplier": {}, "byGroup": {}})
+        v = _f(r["value"])
+        c["value"] += v
+        who = r["supplier"] if r["module"] == "goods_receipt" else "Pembelian outlet"
+        c["bySupplier"][who or "-"] = round(c["bySupplier"].get(who or "-", 0.0) + v, 2)
+        g = group_of("\0", r["supplier"], r["module"], {})
+        c["byGroup"][g] = c["byGroup"].get(g, 0.0) + v
+    out = []
+    for c in cats.values():
+        suggested = max(c["byGroup"].items(), key=lambda kv: kv[1])[0] if c["byGroup"] else "other"
+        out.append({"category": c["category"], "value": round(c["value"], 2), "bySupplier": c["bySupplier"], "suggested": suggested,
+                    "group": mapping.get(c["category"])})
+    out.sort(key=lambda x: -x["value"])
+    return {"days": days, "groups": list(COST_GROUPS), "data": out}
+
+
+def set_cost_group(category: str, group: Optional[str], actor_id: str) -> None:
+    if group is not None and group not in COST_GROUPS:
+        raise ValueError("Kelompok biaya tidak dikenal")
+    with db.transaction() as conn:
+        if group is None:
+            conn.execute(f"DELETE FROM {PORTAL}.cc_cost_group WHERE category = %s", (category,))
+        else:
+            conn.execute(f"""INSERT INTO {PORTAL}.cc_cost_group (category, cost_group, updated_by) VALUES (%s, %s, %s)
+                             ON CONFLICT (category) DO UPDATE SET cost_group = EXCLUDED.cost_group, updated_by = EXCLUDED.updated_by,
+                             updated_at = now()""", (category, group, actor_id))
 
 
 # ---------------------------------------------------------------- corrections

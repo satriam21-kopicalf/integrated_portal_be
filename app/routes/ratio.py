@@ -11,7 +11,7 @@ import os
 import tempfile
 from datetime import date
 from decimal import Decimal
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -45,12 +45,33 @@ def _codes(branch: Optional[str]) -> Optional[list[str]]:
 
 
 @router.get("")
-def get_ratio(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Query(None), branch: Optional[str] = Query(None)):
+def get_ratio(dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Query(None), branch: Optional[str] = Query(None),
+              purchases: Literal["invoice", "gr"] = "invoice"):
     try:
         start, end = _range(dateFrom, dateTo)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    return ratio.ratio(start, end, _codes(branch))
+    return ratio.ratio(start, end, _codes(branch), purchases)
+
+
+@router.get("/cost-groups")
+def get_cost_groups(days: int = Query(60, ge=7, le=180)):
+    """The ESB categories of the GRs and outlet purchases with their cost group (basis "gr", migration 102)."""
+    return ratio.categories(days)
+
+
+class CostGroupIn(BaseModel):
+    category: str = Field(max_length=200)
+    group: Optional[Literal["bb", "espresso", "dimsum", "gs", "other"]] = None
+
+
+@router.put("/cost-groups")
+def put_cost_group(body: CostGroupIn, request: Request):
+    user = getattr(request.state, "user", None) or {}
+    ratio.set_cost_group(body.category, body.group, str(user.get("id")))
+    activity.record("cc.ratio", user=user or None, request=request, page="/cost-control/ratio",
+                    summary=f"Kelompok biaya {body.category or '(tanpa kategori)'}: {body.group or 'ikut supplier'}", details=body.model_dump())
+    return {"ok": True}
 
 
 COLUMNS = [
@@ -62,7 +83,7 @@ COLUMNS = [
     ("COGS ratio (net)", "cogsRatioNet", 10), ("SO awal", "soStart", 16), ("SO akhir", "soEnd", 16), ("Usage", "usage", 16),
     ("Usage ratio (gross)", "usageRatioGross", 10), ("Usage ratio (net)", "usageRatioNet", 10),
     ("Delta COGS - usage (gross)", "deltaGross", 10), ("Delta COGS - usage (net)", "delta", 10), ("Non sales", "nonSales", 14), ("Item journal", "itemJournal", 14),
-    ("Pembelian lain", "otherPurchases", 14),
+    ("Pembelian lain", "otherPurchases", 14), ("General Supplies (basis GR)", "gs", 14), ("Transfer Stock bersih (basis GR)", "transfer", 14),
 ]
 
 
@@ -75,15 +96,15 @@ def _cell(row: dict, key: str):
 
 @router.get("/export")
 def export_ratio(request: Request, dateFrom: Optional[str] = Query(None), dateTo: Optional[str] = Query(None),
-                 branch: Optional[str] = Query(None)):
+                 branch: Optional[str] = Query(None), purchases: Literal["invoice", "gr"] = "invoice"):
     try:
         start, end = _range(dateFrom, dateTo)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    data = ratio.ratio(start, end, _codes(branch))
+    data = ratio.ratio(start, end, _codes(branch), purchases)
     fd, path = tempfile.mkstemp(suffix=".xlsx")
     os.close(fd)
-    rows = [[f"Rasio Outlet {start.isoformat()} – {end.isoformat()} (SO awal {data['period']['soStart']}, SO akhir {data['period']['soEnd']})"], [],
+    rows = [[f"Rasio Outlet {start.isoformat()} – {end.isoformat()} · pembelian {'GR aktual' if purchases == 'gr' else 'faktur (workbook)'} (SO awal {data['period']['soStart']}, SO akhir {data['period']['soEnd']})"], [],
             [c[0] for c in COLUMNS]]
     rows += [[_cell(o, c[1]) for c in COLUMNS] for o in data["outlets"]]
     t = data["total"]

@@ -36,7 +36,7 @@ def test_formulas_match_the_workbook():
 
 
 def test_ratio_page_needs_its_page(anon, store, page_access, monkeypatch):
-    monkeypatch.setattr(ratio, "ratio", lambda start, end, codes=None: {"outlets": [], "total": {}, "codes": codes})
+    monkeypatch.setattr(ratio, "ratio", lambda start, end, codes=None, purchases="invoice": {"outlets": [], "total": {}, "codes": codes})
     login(anon, "kasir", "Kasir1234")
     assert anon.get("/api/cost-control/ratio").status_code == 403
     page_access.overrides[str(store.user["id"])] = {"cc.ratio": True}
@@ -44,3 +44,21 @@ def test_ratio_page_needs_its_page(anon, store, page_access, monkeypatch):
     assert r.status_code == 200 and r.json()["codes"] == ["CCI01"]  # role user: its own branches only
     login(anon, "superadmin", "Admin1234")
     assert anon.get("/api/cost-control/ratio?dateFrom=2026-01-01&dateTo=2026-09-30").status_code == 400  # > 3 months
+
+
+def test_purchases_basis_gr_groups_by_category_and_counts_the_transfers(monkeypatch):
+    """2026-11-13: basis "gr" — the goods that came in, by the cost group of their ESB category; General Supplies apart
+    from the COGS; Transfer Stock in − out in the usage. A category not set follows its supplier as the workbook."""
+    mapping = {"PACKAGING": "gs", "SUSU": "bb"}
+    assert ratio.group_of("PACKAGING", "Calf Warehouse", "goods_receipt", mapping) == "gs"
+    assert ratio.group_of("KOPI", "Calf Central Kitchen", "goods_receipt", mapping) == "espresso"  # not set: its supplier
+    assert ratio.group_of("BUAH", None, "simple_purchase", mapping) == "bb"  # an outlet purchase
+    assert ratio.group_of("X", "Toko Lain", "goods_receipt", mapping) == "other"
+    row = ratio._row("A", "Outlet A", 1000.0, 900.0, 1, 0.0, {"bb": 300.0, "espresso": 100.0, "gs": 50.0, "transfer": -40.0}, 0.0,
+                     {"value": 200.0}, {"value": 150.0}, None)
+    assert row["cogs"] == 400 and row["gs"] == 50 and row["gsRatio"] == pytest.approx(50 / 900, abs=1e-6)
+    assert row["usage"] == 400 - 40 + 200 - 150  # the goods sent to another outlet were not used here
+    rows = [{"to_branch": "A", "from_branch": "B", "value": 100}, {"to_branch": "B", "from_branch": "A", "value": 30}]
+    monkeypatch.setattr(ratio.db, "fetch", lambda q, p=None: rows)
+    assert ratio.transfers(None, None, None) == {"A": 70.0, "B": -70.0}
+    assert ratio.transfers(None, None, ["A"]) == {"A": 70.0}

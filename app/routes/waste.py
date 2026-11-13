@@ -412,6 +412,15 @@ def daily(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query
     return {"period": {"from": start.isoformat(), "to": end.isoformat()}, **waste.daily(start, end, branches)}
 
 
+@router.get("/esb-compare")
+def esb_compare(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
+                group: Optional[str] = Query(None, max_length=60), _user: dict = Depends(require_page(MON, REV))) -> dict:
+    """Portal waste beside the ESB item journals and POS waste bills per outlet (app/waste_compare.py, 2026-11-13)."""
+    from app import waste_compare
+    start, end, branches = _period(dateFrom, dateTo, branch, group)
+    return waste_compare.compare(start, end, branches)
+
+
 @router.get("/usage")
 def usage(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
           group: Optional[str] = Query(None, max_length=60), _user: dict = Depends(require_page(MON, REV))) -> dict:

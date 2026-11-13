@@ -38,3 +38,21 @@ def test_the_cards_of_some_keys(monkeypatch):
     monkeypatch.setattr(dh._all, "get", lambda: data)
     assert [c["key"] for c in dh.health(["prices"])["cards"]] == ["prices"]
     assert len(dh.health()["cards"]) == 2
+
+
+def test_esb_integrity_counts_and_missing_details(monkeypatch):
+    """The portal holds what ESB lists: a count difference of a cost module, documents without lines, a failed sync."""
+    from datetime import date as d
+    def fetch(q, p=None):
+        if "sync_reconciliation" in q:
+            return [{"entity": "goods_receipt", "period_start": d(2026, 11, 1), "esb_count": 610, "db_count": 600, "diff": -10, "checked_at": None}]
+        if "erp_documents" in q:
+            return [{"module": "goods_receipt", "failed": 2, "waiting": 1}]
+        return [{"entity_type": "item_journal", "last_sync_at": None}]
+    monkeypatch.setattr(dh.db, "fetch", fetch)
+    monkeypatch.setattr(dh, "today", lambda: d(2026, 11, 13))
+    c = dh.esb_integrity()
+    assert c["status"] == "high" and c["diffs"] == 1 and c["details"] == 3 and c["failedRuns"] == 1
+    assert c["items"][0] == {"name": "goods_receipt 11/2026", "module": "goods_receipt", "esb": 610, "db": 600, "diff": -10}
+    monkeypatch.setattr(dh.db, "fetch", lambda q, p=None: [])
+    assert dh.esb_integrity()["status"] == "ok"

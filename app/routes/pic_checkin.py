@@ -90,6 +90,15 @@ CheckInIn.model_rebuild()
 ClockOutIn.model_rebuild()
 
 
+def _schedule(user_id: str) -> list[dict]:
+    from app import cc_schedule
+    from app.utils import today
+    try:
+        return cc_schedule.mine(user_id, today())
+    except Exception:  # before migration 108: no plan, the form works as before
+        return []
+
+
 def _refuse(exc: pic_checkin.CheckInError):
     raise HTTPException(status_code=422, detail=str(exc))
 
@@ -114,6 +123,8 @@ def _add(kind: str) -> None:
             "today": pic_checkin.done_today(str(user["id"]), kind),  # branches already checked in today
             # the Cost Control visit still open (clocked in, not out yet)
             **({"open": _open(str(user["id"]))} if kind == "surveyor" else {}),
+            # the outlets the leader of Cost Control planned for the member today (Schedule, migration 108)
+            **({"schedule": _schedule(str(user["id"]))} if kind == "surveyor" else {}),
             "serverTime": datetime.now().astimezone().isoformat(),
         }
 

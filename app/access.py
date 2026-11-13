@@ -61,6 +61,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("mon.overview", "Overview", "Operations"),
     ("mon.pic-check-in", "PIC Check In", "Operations"),
     ("mon.surveyor-check-in", "Cost Control Check In", "Cost Control · Check In"),
+    ("cc.schedule", "Cost Control Schedule", "Cost Control · Check In"),
     ("mon.product", "Product", "Operations"),
     ("mon.outlet", "Outlet", "Operations"),
     ("mon.wwwr", "WW-WR", "Operations"),

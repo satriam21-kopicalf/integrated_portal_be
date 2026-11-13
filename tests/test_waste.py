@@ -50,7 +50,8 @@ def test_entry_needs_category_photo_and_a_known_item(anon, store, fake_db, page_
     assert anon.get("/api/waste/monitor").status_code == 403 and anon.get("/api/waste/reviews").status_code == 403
     for bad, msg in (({"category": "Lainnya"}, "kategori"), ({"itemCode": "NOPE"}, "Item tidak ada"),
                      ({"branchCode": "CCI99"}, "Cabang"), ({"businessDate": "2026-10-28"}, "hari ini atau kemarin"),
-                     ({"productionDate": "2026-10-31", "expiredDate": "2026-10-01"}, "Expired date")):
+                     ({"productionDate": "2026-10-31", "expiredDate": "2026-10-01"}, "Expired date"),
+                     ({"note": None}, "Catatan / alasan"), ({"note": "  "}, "Catatan / alasan")):  # 2026-11-13: required
         r = anon.post("/api/waste/entries", json={**body, **bad})
         assert r.status_code == 422 and msg in r.json()["error"], (bad, r.json())
     assert anon.post("/api/waste/entries", json={**body, "photo": ""}).status_code == 422  # photo required

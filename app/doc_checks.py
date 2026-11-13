@@ -101,7 +101,27 @@ def _fix_view(f: dict, now: Optional[float] = None, gone: bool = False) -> dict:
             "esbChanged": now is not None and abs(abs(now) - old) > 1e-9, "docGone": gone}
 
 
+CACHE_S = 300  # kept warm per period (2026-11-13); a correction clears it (save_fix / cancel_fix)
+_views: dict = {}
+
+
+def clear() -> None:
+    _views.clear()
+
+
 def check(d_from: date, d_to: date, branches: Optional[list[str]]) -> dict:
+    """check() kept warm per period and branches (stale-while-revalidate)."""
+    from app.utils import Fresh
+    key = (d_from, d_to, tuple(sorted(branches)) if branches is not None else None)
+    f = _views.get(key)
+    if f is None:
+        if len(_views) > 40:
+            _views.clear()
+        f = _views[key] = Fresh(lambda: _check(d_from, d_to, branches), CACHE_S)
+    return f.get()
+
+
+def _check(d_from: date, d_to: date, branches: Optional[list[str]]) -> dict:
     """The lines with an unusual quantity in the period (largest value impact first) and every line corrected in it."""
     from app import menu_costing as mc
     from app.pic_checkin import _names

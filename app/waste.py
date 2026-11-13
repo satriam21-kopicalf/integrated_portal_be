@@ -462,6 +462,8 @@ def create(user: dict, body: dict, device: Optional[str], ip: Optional[str]) -> 
         raise WasteError("Item tidak ada di daftar waste")
     qty = _qty(body.get("qty"))
     unit, grams, comps = (explode(item, body.get("uom"), qty) if scope == "premix" else (item["unit"], None, None))
+    if len((body.get("note") or "").strip()) < 3:  # 2026-11-13: the note / reason of a waste is required
+        raise WasteError("Catatan / alasan waste wajib diisi")
     category = (body.get("category") or "").strip()
     if category not in catalog(facility)["categories"]:
         raise WasteError("Pilih kategori waste")

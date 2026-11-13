@@ -293,6 +293,7 @@ def doc_fix(body: DocFixIn, request: Request, user: dict = Depends(require_page(
         out = doc_checks.save_fix(user, body.model_dump())
     except doc_checks.DocFixError as exc:
         _refuse(exc)
+    doc_checks.clear()  # the panel shows the correction at once (kept warm, 2026-11-13)
     activity.record("cc.doc_fix", user=user, request=request, page="/cost-control",
                     summary=f"Koreksi {body.docNum} {body.code}: {out['oldQty']:g} → {out['newQty']:g} {body.uom}", details=out)
     return out
@@ -305,6 +306,7 @@ def doc_fix_cancel(fix_id: int, request: Request, user: dict = Depends(require_p
         out = doc_checks.cancel_fix(user, fix_id)
     except doc_checks.DocFixError as exc:
         _refuse(exc)
+    doc_checks.clear()  # the panel shows the correction at once (kept warm, 2026-11-13)
     activity.record("cc.doc_fix_cancel", user=user, request=request, page="/cost-control",
                     summary=f"Koreksi {out['doc_num']} {out['product_code']} dibatalkan", details=out)
     return out

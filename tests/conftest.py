@@ -259,6 +259,9 @@ def no_form_settings_db():
     from app import form_items, form_scope
     form_scope._cache.update(at=time.monotonic() + 3600, rows={}, groups=[], branches={})
     form_items._cache.update(at=time.monotonic() + 3600, over={}, custom=[], weights=dict(form_items.DEFAULT_WEIGHTS))
+    from app import doc_checks, outlet_cogs  # kept warm per period (2026-11-13): never across tests
+    doc_checks.clear()
+    outlet_cogs._views.clear()
     yield
 
 

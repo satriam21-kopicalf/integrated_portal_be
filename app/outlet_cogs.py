@@ -15,6 +15,7 @@ from datetime import date, timedelta
 from typing import Optional
 
 from app import database as db
+from app.utils import Fresh
 
 P = "integration_portal"
 FINAL = ("APPROVED", "EXPORTED")
@@ -24,7 +25,40 @@ def _f(v) -> float:
     return float(v) if v is not None else 0.0
 
 
+CACHE_S = 300  # kept warm: served at once and refreshed in the background after this many seconds (2026-11-13)
+_views: dict[tuple, Fresh] = {}
+
+
 def outlets(d_from: date, d_to: date, branches: Optional[list[str]]) -> dict:
+    """COGS & Usage per outlet of a period (cached per period and branches; a change of the Pricelist, the recipe cards,
+    a GR or ESB document correction makes a new key through menu_costing.stamp())."""
+    from app import menu_costing as mc
+    key = (d_from, d_to, tuple(sorted(branches)) if branches is not None else None, mc.stamp())
+    f = _views.get(key)
+    if f is None:
+        if len(_views) > 40:
+            _views.clear()
+        f = _views[key] = Fresh(lambda: _outlets(d_from, d_to, branches), CACHE_S)
+    return f.get()
+
+
+def warm() -> None:
+    """The start of a worker: the default period of the page (the last 7 days) in the background."""
+    import threading
+    from app.utils import today
+    end = today() - timedelta(days=1)
+    threading.Thread(target=lambda: _safe(lambda: outlets(end - timedelta(days=6), end, None)), name="cogs-warm", daemon=True).start()
+
+
+def _safe(fn) -> None:
+    try:
+        fn()
+    except Exception:  # noqa: BLE001 - a warm-up failing leaves the first reader to compute
+        import logging
+        logging.getLogger("integrated_portal_be").exception("cogs warm-up failed")
+
+
+def _outlets(d_from: date, d_to: date, branches: Optional[list[str]]) -> dict:
     from app import menu_costing as mc
     from app import running_stock, waste
     from app.pic_checkin import _names

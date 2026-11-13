@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from app import access, accounts
 from app import database as db
 from app.config import get_settings
-from app.routes.auth import current_user, require_superadmin
+from app.routes.auth import current_user
 from app.utils import TTLCache
 
 logger = logging.getLogger("stock_opname")
@@ -75,9 +75,11 @@ def assertion(user: dict, secret: str, company: str = "") -> str:
 
 
 @router.get("/api/so-sites")
-def so_sites(_user: dict = Depends(require_superadmin)) -> list[dict]:
+def so_sites(user: dict = Depends(current_user)) -> list[dict]:
     """Sites to assign that have no ESB branch: HUB WH, HUB CK, warehouses, kitchens and outlets outside ESB (e.g. Wasgee
-    Tea Lab, mapped by hand in kopicalf); outlets with an ESB branch come from /api/branches."""
+    Tea Lab, mapped by hand in kopicalf); outlets with an ESB branch come from /api/branches. For the account managers."""
+    if not access.account_admin(user):
+        raise HTTPException(403, detail="Hanya pengelola akun yang dapat mengakses fitur ini")
     rows = db.fetch(
         """SELECT f.code, f.name, f.facility_type FROM kc_master.facility f
            WHERE f.is_active AND f.facility_type NOT IN ('VIRTUAL', 'OFFICE')
@@ -86,6 +88,40 @@ def so_sites(_user: dict = Depends(require_superadmin)) -> list[dict]:
                              WHERE m.facility_id = f.id)
            ORDER BY f.facility_type, f.name""")
     return [{"branch_code": r["code"], "branch_name": r["name"], "facility_type": r["facility_type"]} for r in rows]
+
+
+HUB_TYPES = ("HUB_CK", "HUB_WH", "WAREHOUSE", "KITCHEN", "CENTRAL_KITCHEN", "HUB")
+
+
+def kind_of(facility_type: str | None) -> str:
+    """outlet / hub / other of a kopicalf facility type (User Accounts → Branch Access, 2026-11-13)."""
+    t = (facility_type or "").upper()
+    if t == "OUTLET":
+        return "outlet"
+    if t in HUB_TYPES or t.startswith("HUB"):
+        return "hub"
+    return "other"
+
+
+@router.get("/api/branch-kinds")
+def branch_kinds(user: dict = Depends(current_user)) -> dict:
+    """{code: outlet | hub | other} of every site an account can be given (ESB branch codes through their facility, and
+    the sites without one): the categories of Branch Access in User Accounts. An ESB branch without a facility counts as
+    an outlet. For the account managers (superadmin, admin, COTR admin)."""
+    if not access.account_admin(user):
+        raise HTTPException(403, detail="Hanya pengelola akun yang dapat mengakses fitur ini")
+    rows = db.fetch(
+        """SELECT f.code, f.facility_type, b.branch_code FROM kc_master.facility f
+             LEFT JOIN kc_master.facility_esb_map m ON m.facility_id = f.id
+             LEFT JOIN integration_esb.master_branches b ON b.company_code = m.company_code AND b.branch_id::text = m.esb_id
+            WHERE f.is_active""")
+    out: dict[str, str] = {}
+    for r in rows:
+        k = kind_of(r["facility_type"])
+        for code in (r["branch_code"], r["code"]):
+            if code and code not in out:
+                out[code] = k
+    return {"kinds": out}
 
 
 BRAND_PATHS = ("counts", "count-reports")

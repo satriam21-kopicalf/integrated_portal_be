@@ -41,9 +41,10 @@ def place(pid, name, lat, lng):
 
 def test_rating_pages_off_by_default():
     assert {f"rating.{s}" for s in SOURCES} <= set(access.PAGE_KEYS)
-    # migration 091 (2026-11-11): the outlet / HUB accounts open every Aggregator page; the other roles stay off
+    # migration 091 (2026-11-11): the outlet / HUB accounts open every Aggregator page; migration 104 (2026-11-13): the
+    # Area Supervisors (role user) too; the other roles stay off
     for role, pages in access.DEFAULT_ROLE_PAGES.items():
-        if role == "outlet":
+        if role in ("outlet", "user"):
             assert {f"rating.{s}" for s in SOURCES} <= set(pages)
         else:
             assert not any(p.startswith("rating.") for p in pages)
@@ -51,8 +52,8 @@ def test_rating_pages_off_by_default():
 
 def test_rating_endpoints_follow_their_pages(anon, store, page_access, places):
     login(anon, "kasir", "Kasir1234")  # role user, branch CCI01
-    assert all(anon.get(f"/api/rating/{s}").status_code == 403 for s in SOURCES)
-    page_access.overrides[str(store.user["id"])] = {"rating.gofood": True, "rating.google-maps": True}
+    # role user opens every Aggregator page (migration 104); an account may be taken off one
+    page_access.overrides[str(store.user["id"])] = {"rating.grabfood": False, "rating.shopeefood": False}
     r = anon.get("/api/rating/gofood")
     assert r.status_code == 200 and r.json()["branches"] == ["CCI01"]
     assert anon.get("/api/rating/grabfood").status_code == 403

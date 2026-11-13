@@ -86,12 +86,12 @@ def _from_portal(request: Request) -> bool:
 
 
 def require_account_admin(request: Request, user: dict = Depends(current_user)) -> dict:
-    """User Accounts (2026-11-13): a superadmin, or a COTR admin for the accounts of the COTR line (app/routes/users.py)."""
+    """User Accounts (2026-11-13): a superadmin, an admin (accounts of role User) or a COTR admin (the COTR line)."""
     if not access.account_admin(user):
         activity.record("access.denied", user=user, request=request, status="denied",
                         summary=f"Akses ditolak: {request.method} {request.url.path}",
                         details={"method": request.method, "path": request.url.path, "query": str(request.url.query)})
-        raise HTTPException(status_code=403, detail="Hanya superadmin atau admin COTR yang dapat mengelola akun")
+        raise HTTPException(status_code=403, detail="Hanya superadmin atau admin yang dapat mengelola akun")
     return user
 
 

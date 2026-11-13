@@ -142,7 +142,7 @@ def clean_hidden(pages) -> list[str]:
     """Pages an account leaves out of its sidebar (migration 054): known pages only; display only, never access."""
     return sorted({str(p) for p in (pages or []) if str(p) in PAGE_KEYS})
 CC_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("cc."))
-EDITABLE_ROLES = ("cost_control", "user", "outlet")
+EDITABLE_ROLES = ("admin", "cost_control", "user", "outlet")
 # the Calf On The Road line (2026-11-13, migration 099): its accounts open the COTR pages and the guide only, never the
 # Dashboard / Sales of Kopi Calf and Wasgee; the COTR admin opens every COTR page and manages the COTR accounts
 COTR_ADMIN = "cotr_admin"
@@ -153,9 +153,13 @@ def cotr_page(page: str) -> bool:
     return page.startswith(("cotr.", "driver.")) or page == "guide"
 
 
+ADMIN = "admin"
+
+
 def account_admin(user: dict) -> bool:
-    """Manages user accounts: a superadmin (every account) or a COTR admin (the COTR line)."""
-    return user.get("role") in ("superadmin", COTR_ADMIN)
+    """Manages user accounts: a superadmin (every account), an admin (accounts of role User, migration 105) or a COTR
+    admin (the COTR line)."""
+    return user.get("role") in ("superadmin", ADMIN, COTR_ADMIN)
 # the Surveyor Check In is given per account (migration 039), not to a role
 PER_USER_FORMS = ("form.surveyor-check-in", "form.wwwr")  # WW-WR: the SWAT team (2026-11-03)
 # the WW-WR team (2026-11-04): accounts assigned Form WW-WR or Monitoring WW-WR; a super admin opens every page anyway, so
@@ -167,10 +171,13 @@ def in_swat_team(user: dict) -> bool:
         return any(user_overrides(str(user["id"])).get(p) for p in TEAM_PAGES)
     return any(has_page(user, p) for p in TEAM_PAGES)
 FORM_PAGES = tuple(k for k in PAGE_KEYS if k.startswith("form.") and k not in PER_USER_FORMS)
-# role "user" = Area Supervisor / PIC: Dashboard, Sales, Stock Opname, Waste, the Guide and every form (a new form page
-# is added to the role by its migration); role "outlet" = the shared outlet / HUB CK / HUB WH accounts (2026-10-28)
+# role "user" = Area Supervisor / PIC (2026-11-13, migration 104): exactly these — the forms but Cost Control Clock In,
+# Dashboard, Sales Transactions and the Aggregator; role "outlet" = the shared outlet / HUB CK / HUB WH accounts
+USER_PAGES = ("overview", "sales", "stock-opname", "waste", "form.pengajuan", "form.damaged-equipment", "form.pic-check-in",
+              "form.product", "form.outlet", "form.stock-transfer", "rating.grabfood", "rating.google-maps", "rating.shopeefood",
+              "rating.gofood", "guide")
 DEFAULT_ROLE_PAGES = {
-    "user": ["overview", "sales", "stock-opname", "waste", "guide", *FORM_PAGES],
+    "user": list(USER_PAGES),
     # migration 091 (2026-11-11): exactly these in Operations, Kopi Calf and Wasgee alike
     "outlet": ["stock-opname", "waste", "form.stock-transfer", "form.damaged-equipment", "form.pengajuan",
                "rating.grabfood", "rating.google-maps", "rating.shopeefood", "rating.gofood", "guide"],
@@ -308,6 +315,8 @@ def so_role(user: dict) -> str:
     role = user.get("role") or "user"
     if role == "outlet":  # the outlet / hub accounts count like any crew in kopicalf
         role = "user"
+    if role == ADMIN:  # an admin (migration 105) reads every facility, as Cost Control in kopicalf; its pages limit the paths
+        return "cost_control"
     if role == "user" and any(p in CC_PAGES for p in pages_for(user)):
         return "cost_control"
     return role

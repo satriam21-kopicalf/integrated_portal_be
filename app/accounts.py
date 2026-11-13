@@ -24,10 +24,10 @@ T_USER_BRANCH = "integration_portal.user_branch"
 
 MAX_FAILED_LOGINS = 5
 LOCK_MINUTES = 15
-ROLES = ("superadmin", "cost_control", "user", "outlet", "driver", "cotr_admin")  # outlet = shared outlet / hub accounts (2026-10-28);
+ROLES = ("superadmin", "admin", "cost_control", "user", "outlet", "driver", "cotr_admin")  # outlet = shared outlet / hub accounts (2026-10-28);
 # driver = Calf On The Road driver app only (migration 046)
 # roles that see every branch (no user_branch rows); "user" sees only its branches
-GLOBAL_ROLES = ("superadmin", "cost_control")
+GLOBAL_ROLES = ("superadmin", "admin", "cost_control")
 # business lines of the accounts (migration 054) and the ESB company of their branches (cotr: pools, no ESB branch)
 LINES = ("kopicalf", "wasgee", "cotr")
 LINE_COMPANY = {"kopicalf": "CALF", "wasgee": "CALF7", "cotr": None}

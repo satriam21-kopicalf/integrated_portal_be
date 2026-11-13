@@ -37,7 +37,7 @@ DEFAULT_RADIUS_M = 50  # an outlet without its own radius (2026-11-02)
 MAX_PHOTO = 3 * 1024 * 1024
 LOW_ACCURACY_M = 100
 ACCURACY_CREDIT_M = 25  # the GPS accuracy counts at most 25 m on top of the 50 m radius (2026-11-02)
-GLOBAL_ROLES = ("superadmin", "cost_control")
+GLOBAL_ROLES = ("superadmin", "admin", "cost_control")
 # pic: PIC Check In · surveyor: Surveyor Check In (migration 039, every Kopi Calf branch whatever the account's scope)
 KINDS = ("pic", "surveyor")
 OPEN_HOURS = 24  # a visit without a clock out stays open (blocks the next clock in) this long
@@ -157,20 +157,25 @@ def face_check(value: str) -> int:
 # A web page cannot read the phone's "mock location" flag (only a native app can), so a fake position is recognised
 # by what it leaves behind. Every check-in gets risk signals; one "high" or "medium" signal shows it in Monitoring for a
 # manager to review. The PIC is not told which signal fired (that would teach how to get around it).
+# 2026-11-13: fewer false alarms — the same coordinates again at the same outlet are what a Wi-Fi / cached fix gives
+# (low; at another outlet it stays high), a GPS standing still is a fake-app pattern only with a precise accuracy (a
+# network fix never moves: low), the position may be taken up to STALE_MIN minutes before sending (selfie, note); two
+# medium signs together are high (several independent signs of one fake).
 
 RISK_LEVELS = ("none", "low", "medium", "high")
 MOVE_KMH = 150          # faster than this between two check-ins of one PIC: impossible travel
 MOVE_MIN_KM = 5         # ...over at least this distance (GPS noise, neighbouring outlets)
-STALE_MIN = 5           # position taken this long before sending
+STALE_MIN = 10          # position taken this long before sending
 SKEW_MIN = 5            # phone clock this far from the server clock
 STATIC_SAMPLES = 5      # at least this many GPS readings over STATIC_SECONDS without any movement or accuracy change
 STATIC_SECONDS = 10
+STATIC_PRECISE_M = 20   # ...with an accuracy this fine or better (a network / Wi-Fi fix is coarse and never moves)
 _MOBILE_UA = re.compile(r"Mobi|Android|iPhone|iPad|iPod", re.I)
 
 
 def previous_positions(user_id: str, limit: int = 300) -> list[dict]:
     """The PIC's latest check-ins: position and time (for repeated positions and impossible travel)."""
-    return db.fetch(f"""SELECT id::text, latitude, longitude, visited_at, branch_name FROM {T}
+    return db.fetch(f"""SELECT id::text, latitude, longitude, visited_at, branch_name, branch_code FROM {T}
                         WHERE user_id::text = %s ORDER BY visited_at DESC LIMIT %s""", (user_id, limit))
 
 
@@ -194,9 +199,10 @@ def assess(user_id: str, lat: float, lng: float, accuracy: Optional[float], outl
     same = next((h for h in history if round(float(h["latitude"]), 6) == round(lat, 6)
                  and round(float(h["longitude"]), 6) == round(lng, 6)), None)
     if same:
-        out.append(_signal("repeat_position", "high",
+        here = outlet is not None and same.get("branch_code") and same.get("branch_code") == outlet.get("code")
+        out.append(_signal("repeat_position", "low" if here else "high",
                            f"Koordinat persis sama dengan check in {same['visited_at'].astimezone(WIB_TZ):%d/%m/%Y %H:%M} "
-                           f"({same['branch_name']})"))
+                           f"({same['branch_name']})" + (" — outlet yang sama (posisi Wi-Fi / cache HP)" if here else "")))
     last = history[0] if history else None
     if last:
         km = distance_m(lat, lng, float(last["latitude"]), float(last["longitude"])) / 1000
@@ -219,12 +225,15 @@ def assess(user_id: str, lat: float, lng: float, accuracy: Optional[float], outl
         times = [r[0] for r in readings]
         span = (max(times) - min(times)) / 1000
         if span >= STATIC_SECONDS and len({(r[1], r[2], r[3]) for r in readings}) == 1:
-            out.append(_signal("static_fix", "medium",
+            precise = accuracy is not None and accuracy <= STATIC_PRECISE_M
+            out.append(_signal("static_fix", "medium" if precise else "low",
                                f"{len(readings)} pembacaan GPS selama {span:.0f} detik tanpa perubahan sedikit pun "
                                "(pola aplikasi lokasi palsu)"))
     if accuracy is not None and accuracy < 2:
         out.append(_signal("perfect_accuracy", "low", f"Akurasi GPS ±{accuracy:g} m, tidak wajar untuk browser"))
     level = max((s["level"] for s in out), key=RISK_LEVELS.index, default="none")
+    if level == "medium" and sum(1 for x in out if x["level"] == "medium") >= 2:
+        level = "high"  # several independent signs of one fake
     return {"level": level, "signals": out}
 
 
@@ -303,7 +312,7 @@ def clock_out(user: dict, checkin_id: str, photo: str, lat: float, lng: float, a
         raise CheckInError("Foto tidak dapat dibaca, ambil ulang")
     if faces == 0:
         raise CheckInError("Wajah tidak terdeteksi. Ambil ulang foto dengan wajah Anda terlihat jelas")
-    outlet = {"latitude": _num(row["outlet_latitude"]), "longitude": _num(row["outlet_longitude"]), "radius_m": row["radius_m"]}
+    outlet = {"code": row["branch_code"], "latitude": _num(row["outlet_latitude"]), "longitude": _num(row["outlet_longitude"]), "radius_m": row["radius_m"]}
     j = judge(lat, lng, accuracy, outlet)
     note = (note or "").strip()[:500] or None
     if j["outside_radius"] and not note:

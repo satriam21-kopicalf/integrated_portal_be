@@ -107,6 +107,13 @@ def test_risk_signals_of_a_faked_position():
     moving = [{**s, "lat": s["lat"] + i * 1e-6, "acc": 5 + i * 0.3} for i, s in enumerate(frozen)]
     assert _assess(samples=moving) == ("none", set())
     assert _assess(accuracy=1.0) == ("low", {"perfect_accuracy"})
+    # 2026-11-13: fewer false alarms — the same coordinates again at the same outlet (Wi-Fi / cached fix) are low, a GPS
+    # standing still with a coarse accuracy (network fix) is low, two medium signs together are high
+    assert _assess(history=[{**earlier, "branch_code": KEMANG["code"]}]) == ("low", {"repeat_position"})
+    assert _assess(history=[{**earlier, "branch_code": "CTG99"}]) == ("high", {"repeat_position"})
+    assert _assess(samples=[{**x, "acc": 35.0} for x in frozen], accuracy=35.0) == ("low", {"static_fix"})
+    assert _assess(located_at=datetime(2026, 10, 19, 9, 52, tzinfo=WIB)) == ("none", set())  # 8 minutes: the selfie and the note
+    assert _assess(device="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/141", touch=False, samples=frozen)[0] == "high"
 
 
 def test_outside_radius_needs_a_note_and_risk_is_hidden_from_the_pic(anon, store, fake_db, page_access, monkeypatch):

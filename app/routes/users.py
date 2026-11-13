@@ -34,7 +34,7 @@ class UserFields(BaseModel):
     username: Optional[str] = Field(default=None, max_length=32)
     email: Optional[str] = Field(default=None, max_length=254)
     fullName: Optional[str] = Field(default=None, max_length=120)
-    role: Optional[Literal["superadmin", "cost_control", "user", "outlet", "driver", "cotr_admin"]] = None
+    role: Optional[Literal["superadmin", "admin", "cost_control", "user", "outlet", "driver", "cotr_admin"]] = None
     isActive: Optional[bool] = None
     phoneNumber: Optional[str] = Field(default=None, max_length=32)
     jobTitle: Optional[str] = Field(default=None, max_length=80)
@@ -66,10 +66,34 @@ def _cotr_admin(actor: dict) -> bool:
     return actor.get("role") == access.COTR_ADMIN
 
 
+def _admin(actor: dict) -> bool:
+    return actor.get("role") == access.ADMIN
+
+
 def _out_of_scope(actor: dict, target: Optional[dict]) -> Optional[JSONResponse]:
-    """A COTR admin touches the accounts of the COTR line only (never a superadmin or a Cost Control account)."""
+    """A COTR admin touches the accounts of the COTR line only (never a superadmin or a Cost Control account); an admin
+    (migration 105) the accounts of role User only, never its own."""
     if target and _cotr_admin(actor) and (target.get("business_line") != "cotr" or target["role"] not in access.COTR_ROLES):
         return _error("Admin COTR hanya dapat mengelola akun lini Calf On The Road", 403)
+    if target and _admin(actor) and (target["role"] != "user" or str(target["id"]) == str(actor["id"])):
+        return _error("Admin hanya dapat mengelola akun role User (akses akun Anda sendiri diatur superadmin)", 403)
+    return None
+
+
+def _admin_fields(actor: dict, body: "UserFields", data: dict) -> Optional[JSONResponse]:
+    """What an admin may set: role User only, the pages it opens itself (it never gives more than it has)."""
+    if not _admin(actor):
+        return None
+    if data.get("role", "user") != "user":
+        return _error("Admin hanya dapat membuat akun role User", 403, "role")
+    data["role"] = "user"
+    if body.businessLine == "cotr":
+        return _error("Admin tidak mengelola akun lini Calf On The Road", 403, "businessLine")
+    if body.pageOverrides:
+        mine = set(access.pages_for(actor))
+        beyond = sorted(p for p, on in body.pageOverrides.items() if on and p not in mine)
+        if beyond:
+            return _error(f"Admin hanya dapat memberi halaman yang juga dimilikinya: {', '.join(beyond)}", 403, "pageOverrides")
     return None
 
 
@@ -156,6 +180,8 @@ def list_users(search: str = "", role: str = "", status: str = "", branch: str =
                page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100), actor: dict = Depends(require_account_admin)):
     if _cotr_admin(actor):
         line = "cotr"
+    if _admin(actor):
+        role = "user"  # an admin sees the accounts of role User only
     rows, total = accounts.list_users(search, role, status, pageSize, (page - 1) * pageSize, branch, line)
     return {"data": [_view(r) for r in rows], "total": total, "page": page, "pageSize": pageSize}
 
@@ -180,7 +206,7 @@ def create_user(body: UserFields, request: Request, actor: dict = Depends(requir
     data, error = _clean(body, creating=True)
     if error:
         return error
-    error = _cotr_fields(actor, body, data)
+    error = _cotr_fields(actor, body, data) or _admin_fields(actor, body, data)
     if error:
         return error
     password_hash, error = _password(body, required=True)
@@ -216,7 +242,7 @@ def update_user(user_id: UUID, body: UserFields, request: Request, actor: dict =
     data, error = _clean(body, creating=False, user_id=uid, current=current)
     if error:
         return error
-    error = _cotr_fields(actor, body, data)
+    error = _cotr_fields(actor, body, data) or _admin_fields(actor, body, data)
     if error:
         return error
     password_hash, error = _password(body, required=False)

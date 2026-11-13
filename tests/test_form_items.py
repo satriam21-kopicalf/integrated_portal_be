@@ -83,3 +83,15 @@ def test_saving_keeps_the_other_fields_and_a_value_equal_to_the_code_goes_back_t
         fi.add_item(vf.DEFINITIONS, "product", "nope", {"label": "x"}, "u")
     with pytest.raises(fi.FormItemError):
         fi.save_item(vf.DEFINITIONS, "product", a["key"], {"note": "maybe"}, "u")
+
+
+def test_the_order_of_a_section_by_drag_and_drop():
+    g, s, a, b = _first()
+    keys = [x["key"] for x in s["items"]]
+    _cache()
+    fi._cache["order"] = {("product", s["key"]): [keys[1], keys[0]]}  # the second first; the others after, as they were
+    sec = vf.edited("product")["groups"][0]["sections"][0]
+    assert [x["key"] for x in sec["items"]] == [keys[1], keys[0], *keys[2:]]
+    assert [x["no"] for x in sec["items"]] == list(range(1, len(keys) + 1))
+    assert [x["key"] for x in vf.DEFINITIONS["product"]["groups"][0]["sections"][0]["items"]] == keys  # the code unchanged
+    _cache()

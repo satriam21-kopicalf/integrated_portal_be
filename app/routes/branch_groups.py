@@ -252,6 +252,21 @@ def add_form_item(form: Literal["product", "outlet"], body: NewFormItemIn, reque
     return out
 
 
+class OrderIn(BaseModel):
+    section: str = Field(min_length=1, max_length=120)
+    keys: list[str] = Field(min_length=1, max_length=500)
+
+
+@router.put("/api/monitoring/form-items/{form}/order")
+def save_form_order(form: Literal["product", "outlet"], body: OrderIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    from app import form_items
+    _need(request, user, "mon.branch-groups")
+    out = _items_run(form_items.save_order, vf.DEFINITIONS, form, body.section, body.keys, str(user["id"]))
+    activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups",
+                    summary=f"Mengubah urutan butir form {form} · {body.section}", details=out)
+    return out
+
+
 @router.put("/api/monitoring/form-items/weights")
 def save_form_weights(body: WeightsIn, request: Request, user: dict = Depends(current_user)) -> dict:
     from app import form_items

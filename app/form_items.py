@@ -23,13 +23,14 @@ from app import database as db
 
 P = "integration_portal"
 T_OVER, T_CUSTOM, T_WEIGHT = f"{P}.form_item_override", f"{P}.form_item_custom", f"{P}.form_category_weight"
+T_ORDER = f"{P}.form_item_order"  # migration 109: the order of the items of a section
 FORMS = ("product", "outlet")
 LEVELS = ("required", "optional", "none")
 DEFAULT_WEIGHTS = {"Kritikal": 3.0, "Mayor": 2.0, "Minor": 1.0}
 CATEGORY_EN = {"Kritikal": "Critical", "Mayor": "Major", "Minor": "Minor"}
 FIELDS = ("category", "note", "photo", "active", "label", "label_en", "detail", "detail_en", "standard", "standard_en", "required")
 _TTL = 20
-_cache: dict = {"at": 0.0, "over": {}, "custom": [], "weights": dict(DEFAULT_WEIGHTS)}
+_cache: dict = {"at": 0.0, "over": {}, "custom": [], "weights": dict(DEFAULT_WEIGHTS), "order": {}}
 
 
 class FormItemError(ValueError):
@@ -48,7 +49,11 @@ def _load() -> dict:
             weights = {**DEFAULT_WEIGHTS, **{r["category"]: float(r["weight"]) for r in db.fetch(f"SELECT category, weight FROM {T_WEIGHT}")}}
         except Exception:  # before migration 106: the code alone
             over, custom, weights = {}, [], dict(DEFAULT_WEIGHTS)
-        _cache.update(at=time.monotonic(), over=over, custom=custom, weights=weights)
+        try:
+            order = {(r["form"], r["section_key"]): list(r["keys"] or []) for r in db.fetch(f"SELECT form, section_key, keys FROM {T_ORDER}")}
+        except Exception:  # before migration 109: the order of the code
+            order = {}
+        _cache.update(at=time.monotonic(), over=over, custom=custom, weights=weights, order=order)
     return _cache
 
 
@@ -88,7 +93,7 @@ def _apply_fields(it: dict, row: dict) -> None:
 def overlay(form: str, definition: dict) -> dict:
     """A copy of the code definition of a form with the overrides, the custom items and the inactive marks."""
     c = _load()
-    if not c["over"] and not any(r["form"] == form for r in c["custom"]):
+    if not c["over"] and not any(r["form"] == form for r in c["custom"]) and not any(f == form for f, _ in c.get("order", {})):
         return definition
     out = copy.deepcopy(definition)
     for g in out["groups"]:
@@ -104,6 +109,13 @@ def overlay(form: str, definition: dict) -> dict:
                       "custom": True}
                 _apply_fields(it, {k: r.get(k) for k in ("category", "active", "detail", "detail_en", "standard", "standard_en")})
                 s["items"].append(it)
+            keys = c.get("order", {}).get((form, s["key"]))
+            if keys:  # the order set by drag and drop; items not in it (added later) keep their place after them
+                pos = {k: i for i, k in enumerate(keys)}
+                was = {x["key"]: i for i, x in enumerate(s["items"])}
+                s["items"].sort(key=lambda x: (pos.get(x["key"], len(keys)), was[x["key"]]))
+                for i, x in enumerate(s["items"], start=1):
+                    x["no"] = i
     return out
 
 
@@ -230,6 +242,24 @@ def add_item(definitions: dict, form: str, section: str, data: dict, actor: Opti
                      (form, key, group, section, len(rows) + 1, *[vals.get(c) for c in cols], actor))
     clear()
     return {"form": form, "key": key}
+
+
+def save_order(definitions: dict, form: str, section: str, keys: list[str], actor: Optional[str]) -> dict:
+    """The order of the items of a section (every item key of the section, custom ones included)."""
+    if form not in FORMS:
+        raise FormItemError("Form tidak dikenal")
+    if section not in _section_keys(definitions, form):
+        raise FormItemError("Bagian form tidak dikenal")
+    known = {it["key"] for g in overlay(form, definitions[form])["groups"] for s in g["sections"] if s["key"] == section for it in s["items"]}
+    clean = [k for k in dict.fromkeys(keys) if k in known]
+    if not clean:
+        raise FormItemError("Urutan butir kosong")
+    with db.transaction() as conn:
+        conn.execute(f"""INSERT INTO {T_ORDER} (form, section_key, keys, updated_by) VALUES (%s, %s, %s, %s)
+                         ON CONFLICT (form, section_key) DO UPDATE SET keys = EXCLUDED.keys, updated_by = EXCLUDED.updated_by, updated_at = now()""",
+                     (form, section, clean, actor))
+    clear()
+    return {"form": form, "section": section, "keys": clean}
 
 
 def save_weights(rows: list[dict], actor: Optional[str]) -> dict:

@@ -226,7 +226,7 @@ def recipes() -> dict:
 
 def transfers() -> dict:
     from app import stock_transfer as st
-    rows = db.fetch(f"""SELECT status, count(*) AS n, min(created_at) AS oldest FROM {st.T}
+    rows = db.fetch(f"""SELECT status, count(*) AS n, min(requested_at) AS oldest FROM {st.T}
                           WHERE status IN ('submitted', 'accepted', 'approved') GROUP BY 1""")
     by = {r["status"]: int(r["n"]) for r in rows}
     n = sum(by.values())

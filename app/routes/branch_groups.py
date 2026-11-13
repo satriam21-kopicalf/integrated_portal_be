@@ -151,13 +151,13 @@ def save_outlet_setting(code: str, body: OutletSettingIn, request: Request, user
 @router.get("/api/monitoring/form-items")
 def form_items(request: Request, user: dict = Depends(current_user)) -> dict:
     _need(request, user, *MON_PAGES)
-    return form_scope.matrix(vf.DEFINITIONS)
+    return form_scope.matrix(vf.edited_all())
 
 
 @router.put("/api/monitoring/form-items")
 def save_form_items(body: ScopeIn, request: Request, user: dict = Depends(current_user)) -> dict:
     _need(request, user, "mon.branch-groups")
-    out = _run(form_scope.save, [c.model_dump() for c in body.changes], str(user["id"]), vf.DEFINITIONS)
+    out = _run(form_scope.save, [c.model_dump() for c in body.changes], str(user["id"]), vf.edited_all())
     activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups",
                     summary=f"Mengatur butir form per grup ({out['saved']} perubahan)")
     return out
@@ -178,9 +178,87 @@ class BranchScopeIn(BaseModel):
 def save_form_item_branches(body: BranchScopeIn, request: Request, user: dict = Depends(current_user)) -> dict:
     """An item shown / hidden at single outlets, apart from their group (migration 085)."""
     _need(request, user, "mon.branch-groups")
-    out = _run(form_scope.save_branches, [c.model_dump() for c in body.changes], str(user["id"]), vf.DEFINITIONS)
+    out = _run(form_scope.save_branches, [c.model_dump() for c in body.changes], str(user["id"]), vf.edited_all())
     activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups",
                     summary=f"Mengatur butir form per outlet ({out['saved']} perubahan)")
+    return out
+
+
+# ---------------------------------------------------------------- Form Items editor (2026-11-13, app/form_items.py)
+
+class FormItemIn(BaseModel):
+    category: Optional[str] = Field(None, max_length=40)
+    note: Optional[Literal["required", "optional", "none"]] = None
+    photo: Optional[Literal["required", "optional", "none"]] = None
+    required: Optional[bool] = None
+    active: Optional[bool] = None
+    label: Optional[str] = Field(None, max_length=300)
+    label_en: Optional[str] = Field(None, max_length=300)
+    detail: Optional[str] = Field(None, max_length=1000)
+    detail_en: Optional[str] = Field(None, max_length=1000)
+    standard: Optional[str] = Field(None, max_length=1000)
+    standard_en: Optional[str] = Field(None, max_length=1000)
+    reset: Optional[bool] = None
+
+
+class NewFormItemIn(FormItemIn):
+    section: str = Field(min_length=1, max_length=120)
+
+
+class WeightIn(BaseModel):
+    category: str = Field(min_length=1, max_length=40)
+    weight: float = Field(ge=0, le=100)
+
+
+class WeightsIn(BaseModel):
+    weights: list[WeightIn] = Field(min_length=1, max_length=50)
+
+
+def _items_run(fn, *args):
+    from app import form_items
+    try:
+        return fn(*args)
+    except form_items.FormItemError as exc:
+        raise HTTPException(422, detail=str(exc)) from None
+
+
+@router.get("/api/monitoring/form-items/editor")
+def form_items_editor(request: Request, user: dict = Depends(current_user)) -> dict:
+    from app import form_items
+    _need(request, user, *MON_PAGES)
+    return form_items.editor(vf.DEFINITIONS)
+
+
+@router.put("/api/monitoring/form-items/{form}/items/{key}")
+def save_form_item(form: Literal["product", "outlet"], key: str, body: FormItemIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    from app import form_items
+    _need(request, user, "mon.branch-groups")
+    out = _items_run(form_items.save_item, vf.DEFINITIONS, form, key, body.model_dump(exclude_unset=True), str(user["id"]))
+    activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups",
+                    summary=f"Mengubah butir form {form} {key}" + (" (kembali ke bawaan)" if body.reset else ""),
+                    details={"form": form, "key": key, **body.model_dump(exclude_unset=True)})
+    return out
+
+
+@router.post("/api/monitoring/form-items/{form}/items", status_code=201)
+def add_form_item(form: Literal["product", "outlet"], body: NewFormItemIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    from app import form_items
+    _need(request, user, "mon.branch-groups")
+    data = body.model_dump(exclude_unset=True)
+    section = data.pop("section")
+    out = _items_run(form_items.add_item, vf.DEFINITIONS, form, section, data, str(user["id"]))
+    activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups",
+                    summary=f"Menambah butir form {form}: {body.label}", details={"form": form, "section": section, **out, **data})
+    return out
+
+
+@router.put("/api/monitoring/form-items/weights")
+def save_form_weights(body: WeightsIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    from app import form_items
+    _need(request, user, "mon.branch-groups")
+    out = _items_run(form_items.save_weights, [w.model_dump() for w in body.weights], str(user["id"]))
+    activity.record("user.branch_group", user=user, request=request, page="/monitoring/branch-groups",
+                    summary="Mengatur bobot kategori form: " + ", ".join(f"{w.category} {w.weight:g}" for w in body.weights))
     return out
 
 

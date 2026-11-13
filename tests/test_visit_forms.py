@@ -68,7 +68,11 @@ def test_counts_and_what_blocks_the_submit():
     answers[items[0]["key"]] = {"rating": "UNDER"}
     answers[items[1]["key"]] = {"rating": "EXCEED"}
     c = vf._counts("outlet", answers)
-    assert (c["under"], c["exceed"], c["rated"], c["total"]) == (1, 1, 70, 70) and c["score"] == round(69 * 100 / 70, 1)
+    # 2026-11-13: the score is weighted by category (app/form_items.py: Kritikal 3, Mayor 2, Minor 1, none 1)
+    from app import form_items
+    w = [form_items.weight_of(i) for i in items]
+    assert (c["under"], c["exceed"], c["rated"], c["total"]) == (1, 1, 70, 70)
+    assert c["score"] == round((sum(w) - w[0]) * 100 / sum(w), 1) and c["scoreBasis"] == "weighted"
     required = [i for i in items if vf.is_required(i, "CTG") and not i.get("platform")]
     todo = vf.missing("outlet", answers, [], "CTG")
     by_key = {t["key"]: t["need"] for t in todo}

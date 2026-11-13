@@ -250,6 +250,19 @@ class MemoryAccess:
 
 
 @pytest.fixture(autouse=True)
+def no_form_settings_db():
+    """The settings of the forms (form_scope: items per branch group / outlet; form_items: the Form Items editor) read
+    from no database in the tests: an empty, fresh cache — a test that needs rows sets the cache itself. Without this a
+    test without the fake database would try the real one (2026-11-13: the stale local credentials tripped the pooler's
+    circuit breaker and the tests hung)."""
+    import time
+    from app import form_items, form_scope
+    form_scope._cache.update(at=time.monotonic() + 3600, rows={}, groups=[], branches={})
+    form_items._cache.update(at=time.monotonic() + 3600, over={}, custom=[], weights=dict(form_items.DEFAULT_WEIGHTS))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def page_access(monkeypatch):
     from app import access
     mem = MemoryAccess()

@@ -360,11 +360,12 @@ DEFINITIONS: dict[str, dict] = {
 PARTS = {"product": "Product", "outlet": "Outlet"}
 
 
-def _combined() -> dict:
+def _combined(defs: Optional[dict] = None) -> dict:
     """WW-WR: the groups of Monitoring Product then Monitoring Outlet, every key prefixed with its form ("product:…")."""
+    defs = defs or DEFINITIONS
     groups = []
     for form, label in PARTS.items():
-        for g in DEFINITIONS[form]["groups"]:
+        for g in defs[form]["groups"]:
             groups.append({**g, "key": f"{form}:{g['key']}", "part": form, "title": f"{label} · {g['title']}",
                            "titleEn": f"{label} · {g.get('titleEn', g['title'])}",
                            "sections": [{**sec, "key": f"{form}:{sec['key']}",
@@ -397,7 +398,22 @@ def definition(form: str) -> dict:
     """The definition of a form with the items each branch group is asked after Monitoring OPS → Branch groups
     (app/form_scope.py, 2026-11-04): what the screens and the scores use."""
     from app import form_scope
-    return form_scope.apply(form, DEFINITIONS[form])
+    return form_scope.apply(form, edited(form))
+
+
+def edited(form: str) -> dict:
+    """The definition of a form after the Form Items editor (app/form_items.py: changed items, new items, inactive
+    ones), before the branch groups; WW-WR is built from the edited Product and Outlet."""
+    from app import form_items
+    if form == "wwwr":
+        return _combined({f: edited(f) for f in PARTS})
+    return form_items.overlay(form, DEFINITIONS[form])
+
+
+def edited_all() -> dict:
+    """Product and Outlet after the Form Items editor (what Branch groups → Form Items lists and checks keys against)."""
+    from app import form_items
+    return {f: form_items.overlay(f, DEFINITIONS[f]) for f in form_items.FORMS}
 
 
 def all_items(form: str, retired: bool = False) -> list[dict]:
@@ -414,12 +430,18 @@ def all_items(form: str, retired: bool = False) -> list[dict]:
 
 
 def _counts(form: str, answers: dict, group: Optional[str] = None, branch: Optional[str] = None) -> dict:
-    """UNDER / MEET / EXCEED of a visit over the items asked at its outlet (branch group); score = MEET + EXCEED of the rated."""
-    rated = [answers.get(it["key"], {}).get("rating") for it in all_items(form) if it["kind"] == "rating" and applies(it, group, branch)]
-    c = {r: sum(1 for x in rated if x == r) for r in RATINGS}
+    """UNDER / MEET / EXCEED of a visit over the items asked at its outlet (branch group). Score (2026-11-13): weighted by
+    the category of every item (app/form_items.py: Kritikal 3, Mayor 2, Minor 1, none 1 by default) — Σ weight of
+    MEET / EXCEED ÷ Σ weight of the rated items; an inactive item is not asked, so not counted."""
+    from app import form_items
+    asked = [it for it in all_items(form) if it["kind"] == "rating" and applies(it, group, branch)]
+    rated = [(answers.get(it["key"], {}).get("rating"), form_items.weight_of(it)) for it in asked]
+    c = {r: sum(1 for x, _ in rated if x == r) for r in RATINGS}
     done = sum(c.values())
+    w_done = sum(w for x, w in rated if x in RATINGS)
+    w_good = sum(w for x, w in rated if x in ("MEET", "EXCEED"))
     return {"under": c["UNDER"], "meet": c["MEET"], "exceed": c["EXCEED"], "rated": done, "total": len(rated),
-            "score": round((c["MEET"] + c["EXCEED"]) * 100 / done, 1) if done else None}
+            "score": round(w_good * 100 / w_done, 1) if w_done else None, "scoreBasis": "weighted"}
 
 
 # ---------------------------------------------------------------- visits
@@ -440,6 +462,8 @@ def group_of(branch_code: str) -> Optional[str]:
 def applies(item: dict, group: Optional[str], branch: Optional[str] = None) -> bool:
     """Is the item asked at this outlet? Its own setting first (migration 085: shown / hidden at this outlet), then its
     branch group (an outlet without a group is asked everything)."""
+    if item.get("active") is False:  # made inactive in the Form Items editor (2026-11-13): not asked, not scored
+        return False
     if branch and branch in (item.get("hiddenAt") or []):
         return False
     if branch and branch in (item.get("addedAt") or []):

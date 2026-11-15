@@ -93,4 +93,6 @@ def clean_profile(data: dict) -> dict:
 
 
 def is_complete(row: dict) -> bool:
-    return all(row.get(c) for c in REQUIRED_FOR_COMPLETE)
+    """An account linked to HRMS (migration 110) takes job title / department from HRMS: not asked of the user."""
+    keys = ("full_name", "phone_number") if row.get("hrms_employee_id") else REQUIRED_FOR_COMPLETE
+    return all(row.get(c) for c in keys)

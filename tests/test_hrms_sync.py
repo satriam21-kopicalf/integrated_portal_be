@@ -49,3 +49,34 @@ def test_employee_number_and_none():
 def test_saved_link_wins():
     m = match(acc("Budi Santoso", linked="e8"), IDX)
     assert (m["by"], m["employee"]["id"]) == ("linked", "e8")
+
+
+def test_fill_out_of_scope_role_unlinks_and_refuses():
+    from app.hrms_sync import fill
+    data = {}
+    assert fill(data, {"hrms_employee_id": "e1"}, "outlet") is None
+    assert data == {"hrmsEmployeeId": None, "hrmsLinkedBy": None}
+    assert fill({"hrmsEmployeeId": "e1"}, None, "superadmin")
+
+
+def test_fill_linked_account_ignores_typed_values():
+    from app.hrms_sync import fill
+    data = {"jobTitle": "Typed", "department": "Typed", "fullName": "X"}
+    assert fill(data, {"hrms_employee_id": "e1"}, "user") is None
+    assert data == {"fullName": "X"}
+
+
+def test_fill_unlinked_account_keeps_typed_values_and_unlink():
+    from app.hrms_sync import fill
+    data = {"jobTitle": "Barista"}
+    assert fill(data, {}, "user") is None and data == {"jobTitle": "Barista"}
+    data = {"hrmsEmployeeId": " "}
+    assert fill(data, {"hrms_employee_id": "e1"}, "user") is None
+    assert data == {"hrmsEmployeeId": None, "hrmsLinkedBy": None}
+
+
+def test_profile_complete_without_job_title_when_linked():
+    from app.profile import is_complete
+    row = {"full_name": "A", "phone_number": "0812", "job_title": None, "department": None}
+    assert not is_complete(row)
+    assert is_complete({**row, "hrms_employee_id": "e1"})

@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app import access, accounts, activity, avatars
+from app import access, accounts, activity, avatars, hrms_sync
 from app.profile import ProfileError, clean_profile
 from app.routes.auth import AvatarUpload, forget_sessions, require_account_admin
 from app.security import EMAIL_RE, USERNAME_RE, hash_password, password_problem
@@ -56,6 +56,8 @@ class UserFields(BaseModel):
     hiddenPages: Optional[list[str]] = Field(default=None, max_length=200)
     # Calf On The Road (2026-11-12): the employee of Master Driver the account belongs to ("" = none)
     cotrDriver: Optional[str] = Field(default=None, max_length=40)
+    # the HRMS employee of a person account (migration 110): job title / department follow HRMS ("" = unlink)
+    hrmsEmployeeId: Optional[str] = Field(default=None, max_length=64)
 
 
 def _error(message: str, status: int = 422, field: Optional[str] = None) -> JSONResponse:
@@ -152,6 +154,9 @@ def _clean(body: UserFields, creating: bool, user_id: Optional[str] = None,
             return None, _error(f"Cabang tidak dikenal: {', '.join(sorted(unknown))}", field="branches")
         data["branches"] = codes
     role = data.get("role") or (current or {}).get("role") or "user"
+    problem = hrms_sync.fill(data, current, role)
+    if problem:
+        return None, _error(problem, field="hrmsEmployeeId")
     if role == access.COTR_ADMIN:
         data["businessLine"] = "cotr"  # a COTR admin is of the COTR line (migration 099)
     if role in accounts.GLOBAL_ROLES or role == "driver":  # superadmin / cost_control see every branch; drivers none (COTR)

@@ -184,6 +184,46 @@ def link(account_id: str, employee_id: Optional[str], actor: dict, request=None)
     return apply([account_id], actor, request) if employee_id else {"updated": 0, "skipped": 0}
 
 
+def fill(data: dict, current: Optional[dict], role: str) -> Optional[str]:
+    """User Accounts create / edit: an HRMS employee given fills job title, department (and an empty name / employee
+    number) from HRMS; a linked account keeps the HRMS values (typed ones are ignored); a role outside the scope
+    (outlet / hub, superadmin) is unlinked. Returns an error message or None."""
+    if role not in SCOPE_ROLES:
+        if data.get("hrmsEmployeeId"):
+            return "Hanya akun orang (User / Cost Control / Admin / Driver COTR) yang ditautkan ke HRMS."
+        if (current or {}).get("hrms_employee_id") or "hrmsEmployeeId" in data:
+            data.update(hrmsEmployeeId=None, hrmsLinkedBy=None)
+        return None
+    if "hrmsEmployeeId" not in data:
+        if (current or {}).get("hrms_employee_id"):
+            data.pop("jobTitle", None)
+            data.pop("department", None)
+        return None
+    emp_id = (data["hrmsEmployeeId"] or "").strip() or None
+    data["hrmsEmployeeId"] = emp_id
+    if not emp_id:
+        data["hrmsLinkedBy"] = None
+        return None
+    if not available():
+        return "Data HRMS (sk_hrms) tidak tersedia di database ini."
+    e = db.fetchrow("""SELECT e.id, e.full_name, e.employee_no, p.title AS job_title, o.name AS department
+                         FROM sk_hrms.employees e
+                         LEFT JOIN sk_hrms.positions p ON p.id = e.position_id
+                         LEFT JOIN sk_hrms.org_units o ON o.id = e.org_unit_id WHERE e.id = %s""", (emp_id,))
+    if not e:
+        return "Karyawan HRMS tidak ditemukan."
+    other = db.fetchrow(f"SELECT username FROM {P}.user_account WHERE hrms_employee_id = %s AND id::text <> %s",
+                        (emp_id, str((current or {}).get("id") or "")))
+    if other:
+        return f"Karyawan ini sudah ditautkan ke akun {other['username']}."
+    data.update(jobTitle=e["job_title"], department=e["department"], hrmsLinkedBy="manual")
+    if not (data.get("fullName") or (current or {}).get("full_name")):
+        data["fullName"] = e["full_name"]
+    if not (data.get("employeeNumber") or (current or {}).get("employee_number")) and e["employee_no"]:
+        data["employeeNumber"] = e["employee_no"]
+    return None
+
+
 def search(q: str) -> list[dict]:
     like = f"%{q.strip()}%"
     rows = db.fetch("""SELECT e.id, e.employee_no, e.full_name, e.email, e.status, p.title AS job_title,

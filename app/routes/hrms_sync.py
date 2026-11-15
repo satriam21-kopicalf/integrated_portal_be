@@ -3,7 +3,7 @@
     GET  /api/hrms-sync/preview                    every User / Cost Control / Admin account with its HRMS match
     POST /api/hrms-sync/apply      {"ids": [...]}  write the HRMS values (ids omitted = every matched account)
     PUT  /api/hrms-sync/link/{id}  {"employeeId"}  link by hand ("" / null removes the link), then apply that account
-    GET  /api/hrms-sync/employees?q=               HRMS employees for the manual link
+    GET  /api/hrms-sync/employees?q=               HRMS employees: manual link, and the User Accounts form (account admins)
 """
 from typing import Optional
 
@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app import hrms_sync
-from app.routes.auth import require_superadmin
+from app.routes.auth import require_account_admin, require_superadmin
 
 router = APIRouter(prefix="/api/hrms-sync", tags=["hrms-sync"])
 
@@ -54,5 +54,5 @@ def link(account_id: str, body: LinkBody, request: Request, user: dict = Depends
 
 
 @router.get("/employees")
-def employees(q: str = Query(min_length=2, max_length=80), user: dict = Depends(require_superadmin)):
+def employees(q: str = Query(min_length=2, max_length=80), user: dict = Depends(require_account_admin)):
     return hrms_sync.search(q)

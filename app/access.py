@@ -112,6 +112,7 @@ def page_platforms() -> dict[str, list[str]]:
     """{page: [platforms]} of the pages the superadmins set (no entry = the default of each app). Display only: when
     the table cannot be read the apps keep their default menus (cached 60 s)."""
     import time
+    fresh()
     if _platforms and time.monotonic() - _platforms["at"] < 60:
         return _platforms["value"]
     try:
@@ -136,6 +137,7 @@ def set_page_platforms(user_id: str, config: dict[str, Optional[list[str]]]) -> 
                              ON CONFLICT (page) DO UPDATE SET platforms = EXCLUDED.platforms, updated_at = now(),
                                                               updated_by = EXCLUDED.updated_by""", (page, keep, user_id))
     _platforms.clear()
+    bump()
     return page_platforms()
 
 
@@ -193,10 +195,42 @@ OPERATIONS_PAGES = frozenset({"overview", "sales", "rating.grabfood", "rating.go
 APP_HEADER = "x-kopicalf-app"
 
 _cache = TTLCache()
+_gen: dict = {"value": None, "checked": 0.0}
+_drop_hooks: list = []  # other caches to drop when the access generation moves (the session cache of auth)
+
+
+def fresh() -> None:
+    """Drop this worker's access caches when another worker saved a change (migration 111; read at most every 2 s)."""
+    import time
+    now = time.monotonic()
+    if now - _gen["checked"] < 2:
+        return
+    _gen["checked"] = now
+    try:
+        row = db.fetchrow(f"SELECT gen FROM {P}.access_generation WHERE id = 1")
+        gen = (row or {}).get("gen", 0) if isinstance(row, dict) else 0
+    except Exception:  # noqa: BLE001 - before migration 111 / database hiccup: the TTLs still apply
+        return
+    if _gen["value"] is not None and gen != _gen["value"]:
+        _cache._data.clear()
+        _platforms.clear()
+        for hook in _drop_hooks:
+            hook()
+    _gen["value"] = gen
+
+
+def bump() -> None:
+    """A change of access or of an account: every worker drops its caches within 2 s."""
+    try:
+        db.fetchrow(f"""UPDATE {P}.access_generation SET gen = gen + 1, changed_at = now() WHERE id = 1
+                        RETURNING gen""")
+    except Exception:  # noqa: BLE001 - before migration 111: the TTLs still apply
+        pass
 
 
 def role_pages() -> dict[str, list[str]]:
-    """{role: [page, ...]} (cached 30 s; cleared on change)."""
+    """{role: [page, ...]} (cached 30 s; cleared on change, on every worker: fresh)."""
+    fresh()
     hit = _cache.get("roles")
     if hit is None:
         hit = {r: [] for r in EDITABLE_ROLES}
@@ -210,6 +244,7 @@ def role_pages() -> dict[str, list[str]]:
 def user_overrides(user_id: str) -> dict[str, bool]:
     """{page: allowed} exceptions of one user."""
     key = f"user:{user_id}"
+    fresh()
     hit = _cache.get(key)
     if hit is None:
         hit = {r["page"]: r["allowed"] for r in db.fetch(
@@ -333,6 +368,7 @@ def set_role_pages(role: str, pages: list[str], actor_id: Optional[str]) -> None
         for page in pages:
             conn.execute(f"INSERT INTO {T_ROLE_PAGE} (role, page, updated_by) VALUES (%s, %s, %s)", (role, page, actor_id))
     _cache._data.clear()
+    bump()
 
 
 def set_user_overrides(user_id: str, overrides: dict[str, bool], actor_id: Optional[str]) -> None:
@@ -342,6 +378,7 @@ def set_user_overrides(user_id: str, overrides: dict[str, bool], actor_id: Optio
             conn.execute(f"INSERT INTO {T_USER_PAGE} (user_id, page, allowed, updated_by) VALUES (%s, %s, %s, %s)",
                          (user_id, page, bool(allowed), actor_id))
     _cache._data.clear()
+    bump()
 
 
 def clean_overrides(role: str, overrides: dict) -> dict[str, bool]:

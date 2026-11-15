@@ -53,6 +53,7 @@ def session_lookup(request: Request) -> Optional[dict]:
     if not token:
         return None
     key = token_hash(token)
+    access.fresh()
     user = _sessions.get(key)
     if user is None:
         user = accounts.session_user(key)
@@ -133,8 +134,12 @@ def signed_in_user(row: dict) -> dict:
 
 
 def forget_sessions() -> None:
-    """Drop cached session lookups (after a user or role change)."""
+    """Drop cached session lookups (after a user or role change), on every worker (access.bump, migration 111)."""
     _sessions._data.clear()
+    access.bump()
+
+
+access._drop_hooks.append(_sessions._data.clear)
 
 
 # ---------------------------------------------------------------- routes

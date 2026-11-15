@@ -1,10 +1,12 @@
 """Job title and department of the person accounts from HRMS (2026-11-15, migration 110).
 
-The accounts of role user / cost_control / admin are linked once to their HRMS employee (sk_hrms.employees): by the
+The accounts of role user / cost_control / admin, and of Calf On The Road driver / cotr_admin (same company in
+HRMS; the employee id of Master Driver is their employee number), are linked once to their HRMS employee (sk_hrms.employees): by the
 saved link, else by name (an employee still working first), else by email, else by employee number; a name shared by
 several employees, or no match, is linked by hand by a superadmin. Applying writes job title = positions.title and
 department = org_units.name of the employee. Outlet / hub, driver and superadmin accounts are never touched, and
-nothing here changes username, password, role, pages or branches: login is not affected.
+nothing here changes username, password, role, pages or branches: login is not affected. The department of Master
+Driver (cotr_driver, which COTR logic reads) is not changed either.
 """
 import re
 import unicodedata
@@ -14,7 +16,7 @@ from app import access, activity
 from app import database as db
 
 P = "integration_portal"
-SCOPE_ROLES = ("user", "cost_control", "admin")
+SCOPE_ROLES = ("user", "cost_control", "admin", "driver", "cotr_admin")
 GONE = "keluar"
 
 
@@ -44,9 +46,13 @@ def employees() -> list[dict]:
 
 
 def accounts() -> list[dict]:
-    return db.fetch(f"""SELECT id::text, username, full_name, email, employee_number, role, is_active, job_title,
-                               department, hrms_employee_id, hrms_linked_by, hrms_synced_at
-                          FROM {P}.user_account WHERE role = ANY(%s) ORDER BY full_name NULLS LAST, username""",
+    return db.fetch(f"""SELECT u.id::text, u.username, u.full_name, u.email, u.role, u.is_active, u.job_title,
+                               u.department, u.business_line, u.hrms_employee_id, u.hrms_linked_by, u.hrms_synced_at,
+                               COALESCE(NULLIF(u.employee_number, ''),
+                                        (SELECT d.employee_id FROM {P}.cotr_driver d WHERE d.user_id = u.id LIMIT 1))
+                                   AS employee_number
+                          FROM {P}.user_account u WHERE u.role = ANY(%s)
+                         ORDER BY u.full_name NULLS LAST, u.username""",
                     (list(SCOPE_ROLES),))
 
 
@@ -102,7 +108,7 @@ def _row(a: dict, m: dict) -> dict:
     changes = bool(e) and ((e["job_title"] or "") != (a["job_title"] or "")
                            or (e["department"] or "") != (a["department"] or ""))
     return {"id": a["id"], "username": a["username"], "name": a["full_name"], "role": a["role"],
-            "isActive": a["is_active"], "jobTitle": a["job_title"], "department": a["department"],
+            "businessLine": a.get("business_line"), "isActive": a["is_active"], "jobTitle": a["job_title"], "department": a["department"],
             "linkedBy": a["hrms_linked_by"], "syncedAt": a["hrms_synced_at"], "match": m["by"],
             "employee": _emp_out(e), "candidates": [_emp_out(c) for c in m["candidates"][:10]],
             "changes": changes, "employeeLeft": bool(e) and _norm(e["status"]) == GONE}
@@ -162,7 +168,7 @@ def link(account_id: str, employee_id: Optional[str], actor: dict, request=None)
     """Manual link (name shared by several employees, or no match); None removes the link."""
     acc = db.fetchrow(f"SELECT id::text, username, role FROM {P}.user_account WHERE id = %s", (account_id,))
     if not acc or acc["role"] not in SCOPE_ROLES:
-        raise HrmsSyncError("Akun tidak ditemukan atau bukan akun orang (User / Cost Control / Admin).")
+        raise HrmsSyncError("Akun tidak ditemukan atau bukan akun orang (User / Cost Control / Admin / Driver COTR).")
     if employee_id:
         if not db.fetchrow("SELECT 1 AS ok FROM sk_hrms.employees WHERE id = %s", (employee_id,)):
             raise HrmsSyncError("Karyawan HRMS tidak ditemukan.")

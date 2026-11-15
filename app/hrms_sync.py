@@ -191,11 +191,11 @@ def apply(ids: Optional[list[str]], actor: dict, request=None) -> dict:
             vals = {k: v for k, v in values(e).items() if v is not None}
             fields = diff(_own(a), e)
             sets = "".join(f", {PROFILE_FIELDS[k]} = %({k})s" for k in vals)
-            conn.execute(f"""UPDATE {P}.user_account SET hrms_employee_id = %(emp)s,
+            conn.execute(f"""UPDATE {P}.user_account SET hrms_employee_id = %(emp)s, hrms_status = %(st)s,
                                     hrms_linked_by = COALESCE(CASE WHEN %(by)s = 'linked' THEN hrms_linked_by END,
                                                               %(by)s),
                                     hrms_synced_at = now(), updated_at = now(){sets}
-                              WHERE id = %(id)s""", {**vals, "emp": e["id"], "by": m["by"], "id": a["id"]})
+                              WHERE id = %(id)s""", {**vals, "emp": e["id"], "st": e["status"], "by": m["by"], "id": a["id"]})
             taken[e["id"]] = a["id"]
             if fields:
                 done.append({"id": a["id"], "username": a["username"], "fields": fields,
@@ -204,6 +204,9 @@ def apply(ids: Optional[list[str]], actor: dict, request=None) -> dict:
         for v in {d["to"][i] for d in done}:
             if v and v.strip():
                 access.add_master(kind, v, str(actor["id"]))
+    if done:
+        from app.routes.auth import forget_sessions
+        forget_sessions()
     activity.record("user.hrms_sync", user=actor, request=request,
                     summary=f"Sinkron HRMS: {len(done)} akun diperbarui, {skipped} dilewati",
                     details={"changed": done[:200], "skipped": skipped})
@@ -275,3 +278,58 @@ def search(q: str) -> list[dict]:
     rows = employees("WHERE e.full_name ILIKE %s OR e.email ILIKE %s OR e.employee_no ILIKE %s "
                      "ORDER BY (e.status = 'keluar'), e.full_name LIMIT 30", (like, like, like))
     return [_emp_out(r) for r in rows]
+
+
+def sync_linked() -> dict:
+    """Hourly (scripts/hrms-sync.cron): the SYNCED values and the HRMS status of every account already linked to an
+    employee. Never links new accounts (a match by name is confirmed by a superadmin) and never deactivates one: an
+    employee who left HRMS is only marked (hrms_status = keluar)."""
+    if not available():
+        return {"skipped": "sk_hrms not available"}
+    linked = [a for a in accounts() if a["hrms_employee_id"]]
+    emps = {e["id"]: e for e in employees("WHERE e.id = ANY(%s)", ([a["hrms_employee_id"] for a in linked],))}         if linked else {}
+    status = {r["id"]: r["hrms_status"] for r in db.fetch(
+        f"SELECT id::text, hrms_status FROM {P}.user_account WHERE hrms_employee_id IS NOT NULL")}
+    changed, left, missing = [], [], 0
+    with db.transaction() as conn:
+        for a in linked:
+            e = emps.get(a["hrms_employee_id"])
+            if not e:
+                missing += 1
+                continue
+            fields = diff(_own(a), e)
+            if status.get(a["id"]) != e["status"]:
+                fields.append("hrmsStatus")
+                if _norm(e["status"]) == GONE:
+                    left.append(a["username"])
+            if not fields:
+                continue
+            vals = {k: v for k, v in values(e).items() if v is not None}
+            sets = "".join(f", {PROFILE_FIELDS[k]} = %({k})s" for k in vals)
+            conn.execute(f"""UPDATE {P}.user_account SET hrms_status = %(st)s, hrms_synced_at = now(),
+                                    updated_at = now(){sets} WHERE id = %(id)s""",
+                         {**vals, "st": e["status"], "id": a["id"]})
+            changed.append({"username": a["username"], "fields": fields})
+    for kind in ("jobTitle", "department"):
+        for v in {values(emps[a["hrms_employee_id"]])[kind] for a in linked if a["hrms_employee_id"] in emps}:
+            if v:
+                access.add_master(kind, v, None)
+    if changed:
+        from app.routes.auth import forget_sessions
+        forget_sessions()
+        activity.record("user.hrms_sync", username="system",
+                        summary=f"Sinkron HRMS otomatis: {len(changed)} akun diperbarui"
+                                + (f", {len(left)} karyawan keluar ditandai" if left else ""),
+                        details={"changed": changed[:200], "left": left, "missing": missing})
+    return {"linked": len(linked), "updated": len(changed), "left": left, "missing": missing}
+
+
+if __name__ == "__main__":
+    import json
+    from datetime import datetime, timezone
+
+    db.open_pool(wait=True)
+    try:
+        print(datetime.now(timezone.utc).isoformat(timespec="seconds"), json.dumps(sync_linked(), default=str))
+    finally:
+        db.close_pool()

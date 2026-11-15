@@ -1,0 +1,2 @@
+# /etc/cron.d/integrated-portal-hrms-sync: profile of the accounts linked to HRMS, every hour (app/hrms_sync.py)
+40 * * * * root docker exec integrated-portal-be python -m app.hrms_sync >> /var/log/integrated-portal-hrms-sync.log 2>&1

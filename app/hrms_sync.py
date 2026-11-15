@@ -1,12 +1,14 @@
-"""Job title and department of the person accounts from HRMS (2026-11-15, migration 110).
+"""Profile of the person accounts from HRMS (2026-11-15, migration 110): name, employee number, gender, birth date,
+phone, address, work location (the ESB branch of the HRMS site), job title and department (SYNCED).
 
-The accounts of role user / cost_control / admin, and of Calf On The Road driver / cotr_admin (same company in
-HRMS; the employee id of Master Driver is their employee number), are linked once to their HRMS employee (sk_hrms.employees): by the
-saved link, else by name (an employee still working first), else by email, else by employee number; a name shared by
-several employees, or no match, is linked by hand by a superadmin. Applying writes job title = positions.title and
-department = org_units.name of the employee. Outlet / hub, driver and superadmin accounts are never touched, and
-nothing here changes username, password, role, pages or branches: login is not affected. The department of Master
-Driver (cotr_driver, which COTR logic reads) is not changed either.
+The accounts of role user / cost_control / admin, and of Calf On The Road driver / cotr_admin (same company in HRMS;
+the employee id of Master Driver is their employee number), are linked once to their HRMS employee
+(sk_hrms.employees): by the saved link, else by name (an employee still working first), else by email, else by employee
+number; a name shared by several employees, or no match, is linked by hand by a superadmin. Applying writes the SYNCED
+values (job title = positions.title, department = org_units.name); a value HRMS does not have keeps the portal one.
+Outlet / hub and superadmin accounts are never touched. Email, username, password, role, pages and branches are never
+synced: sign-in is not affected. Sensitive HRMS data (NIK, NPWP, BPJS, salary, bank) is not copied to the portal. The
+department of Master Driver (cotr_driver, which COTR logic reads) is not changed either.
 """
 import re
 import unicodedata
@@ -14,10 +16,14 @@ from typing import Optional
 
 from app import access, activity
 from app import database as db
+from app.profile import PROFILE_FIELDS
 
 P = "integration_portal"
 SCOPE_ROLES = ("user", "cost_control", "admin", "driver", "cotr_admin")
 GONE = "keluar"
+SYNCED = ("fullName", "employeeNumber", "gender", "birthDate", "phoneNumber", "address", "workBranchCode", "jobTitle",
+          "department")
+GENDER = {"L": "male", "P": "female"}
 
 
 class HrmsSyncError(ValueError):
@@ -37,23 +43,53 @@ def available() -> bool:
     return bool(db.fetchrow("SELECT to_regclass('sk_hrms.employees') IS NOT NULL AS ok")["ok"])
 
 
-def employees() -> list[dict]:
-    return db.fetch("""SELECT e.id, e.employee_no, e.full_name, e.email, e.status,
-                              p.title AS job_title, o.name AS department
-                         FROM sk_hrms.employees e
-                         LEFT JOIN sk_hrms.positions p ON p.id = e.position_id
-                         LEFT JOIN sk_hrms.org_units o ON o.id = e.org_unit_id""")
+def employees(where: str = "", params: tuple = ()) -> list[dict]:
+    return db.fetch(f"""SELECT e.id, e.employee_no, e.full_name, e.email, e.status, e.gender, e.birth_date, e.phone,
+                               e.address, e.join_date, s.name AS site_name, b.branch_code AS work_branch_code,
+                               p.title AS job_title, o.name AS department
+                          FROM sk_hrms.employees e
+                          LEFT JOIN sk_hrms.positions p ON p.id = e.position_id
+                          LEFT JOIN sk_hrms.org_units o ON o.id = e.org_unit_id
+                          LEFT JOIN sk_hrms.sites s ON s.id = e.site_id
+                          LEFT JOIN LATERAL (SELECT mb.branch_code FROM integration_esb.master_branches mb
+                                              WHERE mb.branch_code = s.esb_branch_code LIMIT 1) b ON true
+                          {where}""", params)
+
+
+def _txt(v) -> Optional[str]:
+    return (str(v).strip() or None) if v is not None else None
+
+
+def values(e: dict) -> dict:
+    """The portal profile values of an HRMS employee (keys of SYNCED; None = HRMS has none: keep the portal one)."""
+    return {"fullName": _txt(e.get("full_name")), "employeeNumber": _txt(e.get("employee_no")),
+            "gender": GENDER.get((e.get("gender") or "").strip().upper()), "birthDate": e.get("birth_date"),
+            "phoneNumber": _txt(e.get("phone")), "address": _txt(e.get("address")),
+            "workBranchCode": e.get("work_branch_code"), "jobTitle": _txt(e.get("job_title")),
+            "department": _txt(e.get("department"))}
+
+
+def diff(a: dict, e: dict) -> list[str]:
+    """The SYNCED keys whose HRMS value differs from the account's (a: user_account row)."""
+    return [k for k, v in values(e).items() if v is not None and str(v) != str(a.get(PROFILE_FIELDS[k]) or "")]
 
 
 def accounts() -> list[dict]:
     return db.fetch(f"""SELECT u.id::text, u.username, u.full_name, u.email, u.role, u.is_active, u.job_title,
-                               u.department, u.business_line, u.hrms_employee_id, u.hrms_linked_by, u.hrms_synced_at,
+                               u.department, u.gender, u.birth_date, u.phone_number, u.address, u.work_branch_code,
+                               u.business_line, u.hrms_employee_id, u.hrms_linked_by, u.hrms_synced_at,
+                               u.employee_number AS own_employee_number,
                                COALESCE(NULLIF(u.employee_number, ''),
                                         (SELECT d.employee_id FROM {P}.cotr_driver d WHERE d.user_id = u.id LIMIT 1))
                                    AS employee_number
                           FROM {P}.user_account u WHERE u.role = ANY(%s)
                          ORDER BY u.full_name NULLS LAST, u.username""",
                     (list(SCOPE_ROLES),))
+
+
+def _own(a: dict) -> dict:
+    """The account as stored (the employee number of Master Driver only helps the match)."""
+    return {**a, "employee_number": a.get("own_employee_number", a.get("employee_number"))}
 
 
 def _index(emps: list[dict]) -> dict:
@@ -96,22 +132,29 @@ def match(account: dict, idx: dict) -> dict:
     return {"employee": None, "by": "ambiguous" if candidates else "none", "candidates": candidates}
 
 
+def _iso(v) -> Optional[str]:
+    return v.isoformat() if v else None
+
+
 def _emp_out(e: Optional[dict]) -> Optional[dict]:
     if not e:
         return None
     return {"id": e["id"], "employeeNo": e["employee_no"], "name": e["full_name"], "email": e["email"],
-            "status": e["status"], "jobTitle": e["job_title"], "department": e["department"]}
+            "status": e["status"], "jobTitle": e["job_title"], "department": e["department"],
+            "gender": GENDER.get((e.get("gender") or "").strip().upper()), "birthDate": _iso(e.get("birth_date")),
+            "phone": e.get("phone"), "address": e.get("address"), "workBranchCode": e.get("work_branch_code"),
+            "site": e.get("site_name"), "joinDate": _iso(e.get("join_date"))}
 
 
 def _row(a: dict, m: dict) -> dict:
     e = m["employee"]
-    changes = bool(e) and ((e["job_title"] or "") != (a["job_title"] or "")
-                           or (e["department"] or "") != (a["department"] or ""))
+    fields = diff(_own(a), e) if e else []
     return {"id": a["id"], "username": a["username"], "name": a["full_name"], "role": a["role"],
-            "businessLine": a.get("business_line"), "isActive": a["is_active"], "jobTitle": a["job_title"], "department": a["department"],
-            "linkedBy": a["hrms_linked_by"], "syncedAt": a["hrms_synced_at"], "match": m["by"],
-            "employee": _emp_out(e), "candidates": [_emp_out(c) for c in m["candidates"][:10]],
-            "changes": changes, "employeeLeft": bool(e) and _norm(e["status"]) == GONE}
+            "businessLine": a.get("business_line"), "isActive": a["is_active"], "jobTitle": a["job_title"],
+            "department": a["department"], "linkedBy": a["hrms_linked_by"], "syncedAt": a["hrms_synced_at"],
+            "match": m["by"], "employee": _emp_out(e), "candidates": [_emp_out(c) for c in m["candidates"][:10]],
+            "changes": bool(fields), "changedFields": fields,
+            "employeeLeft": bool(e) and _norm(e["status"]) == GONE}
 
 
 def preview() -> dict:
@@ -128,7 +171,7 @@ def preview() -> dict:
 
 
 def apply(ids: Optional[list[str]], actor: dict, request=None) -> dict:
-    """Link and write job title / department of the matched accounts (ids None = every matched account)."""
+    """Link and write the HRMS profile values (SYNCED) of the matched accounts (ids None = every matched account)."""
     if not available():
         raise HrmsSyncError("Data HRMS (sk_hrms) tidak tersedia di database ini.")
     idx = _index(employees())
@@ -145,17 +188,20 @@ def apply(ids: Optional[list[str]], actor: dict, request=None) -> dict:
             if not e or taken.get(e["id"], a["id"]) != a["id"]:
                 skipped += 1
                 continue
-            conn.execute(f"""UPDATE {P}.user_account SET hrms_employee_id = %s,
-                                    hrms_linked_by = COALESCE(CASE WHEN %s = 'linked' THEN hrms_linked_by END, %s),
-                                    job_title = %s, department = %s, hrms_synced_at = now(), updated_at = now()
-                              WHERE id = %s""",
-                         (e["id"], m["by"], m["by"], e["job_title"], e["department"], a["id"]))
+            vals = {k: v for k, v in values(e).items() if v is not None}
+            fields = diff(_own(a), e)
+            sets = "".join(f", {PROFILE_FIELDS[k]} = %({k})s" for k in vals)
+            conn.execute(f"""UPDATE {P}.user_account SET hrms_employee_id = %(emp)s,
+                                    hrms_linked_by = COALESCE(CASE WHEN %(by)s = 'linked' THEN hrms_linked_by END,
+                                                              %(by)s),
+                                    hrms_synced_at = now(), updated_at = now(){sets}
+                              WHERE id = %(id)s""", {**vals, "emp": e["id"], "by": m["by"], "id": a["id"]})
             taken[e["id"]] = a["id"]
-            if (e["job_title"] or "") != (a["job_title"] or "") or (e["department"] or "") != (a["department"] or ""):
-                done.append({"id": a["id"], "username": a["username"], "from": [a["job_title"], a["department"]],
-                             "to": [e["job_title"], e["department"]]})
-    for kind in ("jobTitle", "department"):
-        for v in {d["to"][0 if kind == "jobTitle" else 1] for d in done}:
+            if fields:
+                done.append({"id": a["id"], "username": a["username"], "fields": fields,
+                             "to": [vals.get("jobTitle"), vals.get("department")]})
+    for i, kind in enumerate(("jobTitle", "department")):
+        for v in {d["to"][i] for d in done}:
             if v and v.strip():
                 access.add_master(kind, v, str(actor["id"]))
     activity.record("user.hrms_sync", user=actor, request=request,
@@ -168,7 +214,7 @@ def link(account_id: str, employee_id: Optional[str], actor: dict, request=None)
     """Manual link (name shared by several employees, or no match); None removes the link."""
     acc = db.fetchrow(f"SELECT id::text, username, role FROM {P}.user_account WHERE id = %s", (account_id,))
     if not acc or acc["role"] not in SCOPE_ROLES:
-        raise HrmsSyncError("Akun tidak ditemukan atau bukan akun orang (User / Cost Control / Admin / Driver COTR).")
+        raise HrmsSyncError("Akun tidak ditemukan atau bukan akun orang (User / Inventory Surveyor / Admin / Driver COTR).")
     if employee_id:
         if not db.fetchrow("SELECT 1 AS ok FROM sk_hrms.employees WHERE id = %s", (employee_id,)):
             raise HrmsSyncError("Karyawan HRMS tidak ditemukan.")
@@ -184,20 +230,27 @@ def link(account_id: str, employee_id: Optional[str], actor: dict, request=None)
     return apply([account_id], actor, request) if employee_id else {"updated": 0, "skipped": 0}
 
 
+def locked(row: dict) -> list[str]:
+    """The SYNCED keys a linked account cannot type: those holding a value (HRMS had one); an empty one stays
+    editable, so a profile is never stuck incomplete."""
+    if not row.get("hrms_employee_id"):
+        return []
+    return [k for k in SYNCED if row.get(PROFILE_FIELDS[k]) not in (None, "")]
+
+
 def fill(data: dict, current: Optional[dict], role: str) -> Optional[str]:
-    """User Accounts create / edit: an HRMS employee given fills job title, department (and an empty name / employee
-    number) from HRMS; a linked account keeps the HRMS values (typed ones are ignored); a role outside the scope
-    (outlet / hub, superadmin) is unlinked. Returns an error message or None."""
+    """User Accounts create / edit: an HRMS employee given fills the SYNCED values from HRMS; a linked account keeps
+    them (typed ones are ignored); a role outside the scope (outlet / hub, superadmin) is unlinked. Returns an error
+    message or None."""
     if role not in SCOPE_ROLES:
         if data.get("hrmsEmployeeId"):
-            return "Hanya akun orang (User / Cost Control / Admin / Driver COTR) yang ditautkan ke HRMS."
+            return "Hanya akun orang (User / Inventory Surveyor / Admin / Driver COTR) yang ditautkan ke HRMS."
         if (current or {}).get("hrms_employee_id") or "hrmsEmployeeId" in data:
             data.update(hrmsEmployeeId=None, hrmsLinkedBy=None)
         return None
     if "hrmsEmployeeId" not in data:
-        if (current or {}).get("hrms_employee_id"):
-            data.pop("jobTitle", None)
-            data.pop("department", None)
+        for k in locked(current or {}):
+            data.pop(k, None)
         return None
     emp_id = (data["hrmsEmployeeId"] or "").strip() or None
     data["hrmsEmployeeId"] = emp_id
@@ -206,31 +259,19 @@ def fill(data: dict, current: Optional[dict], role: str) -> Optional[str]:
         return None
     if not available():
         return "Data HRMS (sk_hrms) tidak tersedia di database ini."
-    e = db.fetchrow("""SELECT e.id, e.full_name, e.employee_no, p.title AS job_title, o.name AS department
-                         FROM sk_hrms.employees e
-                         LEFT JOIN sk_hrms.positions p ON p.id = e.position_id
-                         LEFT JOIN sk_hrms.org_units o ON o.id = e.org_unit_id WHERE e.id = %s""", (emp_id,))
-    if not e:
+    found = employees("WHERE e.id = %s", (emp_id,))
+    if not found:
         return "Karyawan HRMS tidak ditemukan."
     other = db.fetchrow(f"SELECT username FROM {P}.user_account WHERE hrms_employee_id = %s AND id::text <> %s",
                         (emp_id, str((current or {}).get("id") or "")))
     if other:
         return f"Karyawan ini sudah ditautkan ke akun {other['username']}."
-    data.update(jobTitle=e["job_title"], department=e["department"], hrmsLinkedBy="manual")
-    if not (data.get("fullName") or (current or {}).get("full_name")):
-        data["fullName"] = e["full_name"]
-    if not (data.get("employeeNumber") or (current or {}).get("employee_number")) and e["employee_no"]:
-        data["employeeNumber"] = e["employee_no"]
+    data.update({k: v for k, v in values(found[0]).items() if v is not None}, hrmsLinkedBy="manual")
     return None
 
 
 def search(q: str) -> list[dict]:
     like = f"%{q.strip()}%"
-    rows = db.fetch("""SELECT e.id, e.employee_no, e.full_name, e.email, e.status, p.title AS job_title,
-                              o.name AS department
-                         FROM sk_hrms.employees e
-                         LEFT JOIN sk_hrms.positions p ON p.id = e.position_id
-                         LEFT JOIN sk_hrms.org_units o ON o.id = e.org_unit_id
-                        WHERE e.full_name ILIKE %s OR e.email ILIKE %s OR e.employee_no ILIKE %s
-                        ORDER BY (e.status = 'keluar'), e.full_name LIMIT 30""", (like, like, like))
+    rows = employees("WHERE e.full_name ILIKE %s OR e.email ILIKE %s OR e.employee_no ILIKE %s "
+                     "ORDER BY (e.status = 'keluar'), e.full_name LIMIT 30", (like, like, like))
     return [_emp_out(r) for r in rows]

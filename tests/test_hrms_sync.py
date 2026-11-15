@@ -61,9 +61,24 @@ def test_fill_out_of_scope_role_unlinks_and_refuses():
 
 def test_fill_linked_account_ignores_typed_values():
     from app.hrms_sync import fill
-    data = {"jobTitle": "Typed", "department": "Typed", "fullName": "X"}
-    assert fill(data, {"hrms_employee_id": "e1"}, "user") is None
-    assert data == {"fullName": "X"}
+    data = {"jobTitle": "Typed", "department": "Typed", "fullName": "X", "city": "Bogor", "phoneNumber": "0812"}
+    current = {"hrms_employee_id": "e1", "job_title": "SS", "department": "Op", "full_name": "Budi", "phone_number": None}
+    assert fill(data, current, "user") is None
+    assert data == {"city": "Bogor", "phoneNumber": "0812"}  # an empty synced field stays editable
+
+
+def test_values_and_diff():
+    from datetime import date
+
+    from app.hrms_sync import diff, values
+    e = {"full_name": " Budi ", "employee_no": "K-1", "gender": "l", "birth_date": date(1990, 1, 2), "phone": "",
+         "address": None, "work_branch_code": "CTG18", "job_title": "Store Supervisor", "department": "Operation"}
+    v = values(e)
+    assert v["fullName"] == "Budi" and v["gender"] == "male" and v["phoneNumber"] is None
+    acc_row = {"full_name": "Budi", "employee_number": "K-1", "gender": "male", "birth_date": date(1990, 1, 2),
+               "phone_number": "0812", "work_branch_code": "CTG18", "job_title": "Area Supervisor",
+               "department": "Operation"}
+    assert diff(acc_row, e) == ["jobTitle"]  # an empty HRMS phone keeps the portal one
 
 
 def test_fill_unlinked_account_keeps_typed_values_and_unlink():

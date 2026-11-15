@@ -241,9 +241,10 @@ def update_me(body: dict, request: Request, user: dict = Depends(current_user)):
         data = clean_profile(body)
     except ProfileError as exc:
         return JSONResponse({"error": str(exc), "field": exc.field}, status_code=422)
-    if user.get("hrms_employee_id"):  # job title / department follow HRMS (migration 110)
-        data.pop("jobTitle", None)
-        data.pop("department", None)
+    if user.get("hrms_employee_id"):  # the profile follows HRMS (migration 110, app/hrms_sync.py SYNCED)
+        from app.hrms_sync import locked
+        for k in locked(user):
+            data.pop(k, None)
     if "fullName" in data and not data["fullName"]:
         return JSONResponse({"error": "Nama lengkap wajib diisi", "field": "fullName"}, status_code=422)
     updated = accounts.update_profile(str(user["id"]), data)

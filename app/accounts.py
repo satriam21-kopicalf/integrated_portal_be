@@ -59,6 +59,11 @@ def _iso(v: Any) -> Any:
     return v.isoformat() if isinstance(v, (datetime, date)) else v
 
 
+def _hrms_locked(row: dict) -> list[str]:
+    from app.hrms_sync import locked
+    return locked(row)
+
+
 def public_user(row: Optional[dict]) -> Optional[dict]:
     """API shape of a user (never includes the password hash)."""
     if not row:
@@ -94,6 +99,8 @@ def public_user(row: Optional[dict]) -> Optional[dict]:
         # the HRMS employee the account follows (migration 110): job title / department come from HRMS
         "hrmsEmployeeId": row.get("hrms_employee_id"),
         "hrmsLinkedBy": row.get("hrms_linked_by"),
+        # the profile fields that follow HRMS and are shown read-only (app/hrms_sync.py locked)
+        "hrmsLocked": _hrms_locked(row),
         "profileComplete": is_complete(row),
         "profileUpdatedAt": _iso(row.get("profile_updated_at")),
         "mustChangePassword": row.get("must_change_password", False),

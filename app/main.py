@@ -24,6 +24,7 @@ from app.routes import (auth_router, avatars_router, branches_router, exports_ro
                         summary_router, transactions_router, users_router)
 from app.access import require_page
 from app.routes.access import router as access_router
+from app.routes.hrms_sync import router as hrms_sync_router
 from app.routes.ratio import router as ratio_router
 from app.routes.menu_costing import router as menu_costing_router
 from app.routes.goods_receipt import router as goods_receipt_router
@@ -155,6 +156,7 @@ app.include_router(cotr_router)  # Calf On The Road: driver app (role driver) an
 app.include_router(cotr_public_router)  # /api/public/fleet/{token}: the label QR of an armada (no sign-in)
 app.include_router(alerts_router)  # the notification bell (Cost Control, migration 098)
 app.include_router(access_router)  # pages of roles & users, job titles, departments
+app.include_router(hrms_sync_router)  # job title / department of person accounts from HRMS (migration 110)
 app.include_router(activity_router)  # superadmin reads; any signed-in user reports page views
 app.include_router(realtime_router)
 app.include_router(xlsx_router)  # a table a page shows, as an Excel file

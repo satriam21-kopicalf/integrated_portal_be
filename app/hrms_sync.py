@@ -280,6 +280,12 @@ def search(q: str) -> list[dict]:
     return [_emp_out(r) for r in rows]
 
 
+def employee(employee_id: str) -> Optional[dict]:
+    """One HRMS employee as the User Accounts detail shows it (status, site, join date …)."""
+    rows = employees("WHERE e.id = %s", (employee_id,))
+    return _emp_out(rows[0]) if rows else None
+
+
 def sync_linked() -> dict:
     """Hourly (scripts/hrms-sync.cron): the SYNCED values and the HRMS status of every account already linked to an
     employee. Never links new accounts (a match by name is confirmed by a superadmin) and never deactivates one: an

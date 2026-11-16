@@ -34,16 +34,13 @@ class AuditError(vf.VisitError):
 # ---------------------------------------------------------------- team and schedule
 
 def team() -> list[dict]:
-    """Who may be in an audit team (2026-11-04): the active accounts assigned Form WW-WR or Monitoring WW-WR in User
-    Accounts, and the super admins marked for those pages there (a super admin opens every page, so only its marker
-    counts). The job title alone no longer counts."""
-    from app import access
-
-    member = access.in_swat_team
+    """Who may be in an audit team: every active person account (2026-11-16, asked by the user: the schedule lists all
+    users, no SWAT-only list). The shared Outlet / HUB accounts and the COTR drivers are left out. A member who does
+    not open Form WW-WR yet gets the page when the audit is saved (_grant)."""
     users = db.fetch(f"""SELECT id, username, full_name, role, job_title FROM {P}.user_account
-                          WHERE is_active ORDER BY coalesce(full_name, username)""")
+                          WHERE is_active AND role NOT IN ('outlet', 'driver') ORDER BY coalesce(full_name, username)""")
     return [{"id": str(u["id"]), "username": u["username"], "name": u["full_name"] or u["username"], "jobTitle": u["job_title"]}
-            for u in users if member(u)]
+            for u in users]
 
 
 def _grant(conn: Any, user_ids: Iterable[str], by: Any) -> None:

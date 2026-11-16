@@ -48,7 +48,7 @@ def test_status_follows_the_follow_up():
     assert wwwr._status({"status": "scheduled", "visit_status": "SUBMITTED", "completed_at": "x"}) == "completed"
 
 
-def test_the_team_is_the_assigned_accounts_and_the_marked_super_admins(monkeypatch):
+def test_the_team_is_every_active_person_account(monkeypatch):
     from app import access
     users = [{"id": "a", "username": "swat", "full_name": "SWAT", "role": "user", "job_title": "SWAT"},          # Form WW-WR
              {"id": "b", "username": "mon", "full_name": "Mon", "role": "cost_control", "job_title": None},       # Monitoring WW-WR
@@ -59,5 +59,9 @@ def test_the_team_is_the_assigned_accounts_and_the_marked_super_admins(monkeypat
     monkeypatch.setattr(wwwr.db, "fetch", lambda sql, params=None: users)
     monkeypatch.setattr(access, "has_page", lambda u, p: p in pages.get(str(u["id"]), []))
     monkeypatch.setattr(access, "user_overrides", lambda uid: {"mon.wwwr": True} if uid == "d" else {})
-    assert [t["id"] for t in wwwr.team()] == ["a", "b", "d"]
+    seen = {}
+    monkeypatch.setattr(wwwr.db, "fetch", lambda sql, params=None: seen.setdefault("sql", sql) and users)
+    # 2026-11-16: every active person account, whatever its pages or job title (the SQL leaves out outlet / driver)
+    assert [t["id"] for t in wwwr.team()] == ["a", "b", "c", "d", "e"]
+    assert "role NOT IN ('outlet', 'driver')" in seen["sql"] and "is_active" in seen["sql"]
     assert access.clean_overrides("superadmin", {"form.wwwr": True, "mon.wwwr": False, "users": True}) == {"form.wwwr": True}

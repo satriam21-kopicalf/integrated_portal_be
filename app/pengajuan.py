@@ -321,7 +321,7 @@ def set_flow(user: dict, kind: str, steps: list[dict], form: str = "pengajuan") 
     if form == "pengajuan" and (not appr or len(pay) != 1):
         raise PengajuanError("Minimal satu tahap approval dan tepat satu tahap pembayaran")
     if form != "pengajuan" and pay:
-        raise PengajuanError("Damaged Equipment tidak memiliki tahap pembayaran")
+        raise PengajuanError("Maintenance Request tidak memiliki tahap pembayaran")
     if len(appr) > MAX_STEPS:
         raise PengajuanError(f"Maksimal {MAX_STEPS} tahap approval")
     ids = {str(i) for s in steps for i in (s.get("userIds") or [])}

@@ -32,7 +32,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("form.surveyor-check-in", "Cost Control Check In (form)", "Form"),
     ("form.product", "Product (form)", "Form"),
     ("form.outlet", "Outlet (form)", "Form"),
-    ("form.damaged-equipment", "Damaged Equipment (form)", "Form"),
+    ("form.damaged-equipment", "Maintenance Request (form)", "Form"),
     ("form.pengajuan", "Pengajuan (form)", "Form"),
     ("form.wwwr", "WW-WR (form, SWAT)", "Form"),
     ("form.stock-transfer", "Transfer Stock (form, TITO)", "Form"),
@@ -65,7 +65,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("mon.product", "Product", "Operations"),
     ("mon.outlet", "Outlet", "Operations"),
     ("mon.wwwr", "WW-WR", "Operations"),
-    ("mon.damaged-equipment", "Damaged Equipment", "Operations"),
+    ("mon.damaged-equipment", "Maintenance Request", "Operations"),
     ("mon.branch-groups", "Branch groups", "Operations"),
     # Form Pengajuan (2026-10-28): the monitoring and its two approval steps (not menu entries of their own)
     ("mon.pengajuan", "Pengajuan", "Operations"),

@@ -225,7 +225,7 @@ def build(request_id: str, share_url: Optional[str] = None, public: bool = False
     s = _S()
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=MARGIN, rightMargin=MARGIN, topMargin=30 * mm, bottomMargin=18 * mm,
-                            title=f"{r['number']} - Damaged Equipment", author="Kopi Calf Integrated Portal")
+                            title=f"{r['number']} - Maintenance Request", author="Kopi Calf Integrated Portal")
     story: list = []
 
     # title: kind + number, status and urgency pills
@@ -412,7 +412,7 @@ def _finish(doc, story, r: dict, s: _S, public: bool, doc_title: str, share_url:
         canvas.drawString(MARGIN + 30 * mm, h - 11.5 * mm, doc_title)
         canvas.setFillColor(MUTED)
         canvas.setFont("Helvetica", 7.5)
-        canvas.drawString(MARGIN + 30 * mm, h - 15.5 * mm, "Damaged Equipment · Maintenance & Pengadaan")
+        canvas.drawString(MARGIN + 30 * mm, h - 15.5 * mm, "Maintenance Request · Maintenance & Pengadaan")
         canvas.setFillColor(INK)
         canvas.setFont("Helvetica-Bold", 12)
         canvas.drawRightString(w - MARGIN, h - 11.5 * mm, r["number"] or "")

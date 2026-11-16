@@ -718,6 +718,6 @@ def set_approvals(kind: str, body: DeFlowIn, request: Request, user: dict = Depe
     except CheckInError as e:
         raise HTTPException(422, detail=str(e)) from None
     activity.record("de", user=user, request=request, page="/monitoring/damaged-equipment",
-                    summary=f"Mengatur approval Damaged Equipment {kind}", details={"kind": kind, "steps": steps})
+                    summary=f"Mengatur approval Maintenance Request {kind}", details={"kind": kind, "steps": steps})
     return {"flow": out}
 

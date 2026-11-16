@@ -26,11 +26,32 @@ def test_pages_replace_the_tools_skeleton():
 
 
 def test_flow_and_resume_after_hold():
-    assert de.allowed_next(_row(status="PENDING")) == ["VALIDATION", "ON_HOLD", "REJECTED"]
+    # 2026-11-16 (migration 114): Validation and Review are one approval on Pending
+    assert de.allowed_next(_row(status="PENDING")) == ["ACCEPTED", "ON_HOLD", "REJECTED"]
     assert de.allowed_next(_row(status="IN_PROGRESS")) == ["HANDOVER", "ON_HOLD"]
     assert de.allowed_next(_row(status="HANDOVER")) == ["DONE", "IN_PROGRESS", "ON_HOLD"]
-    assert de.allowed_next(_row(status="ON_HOLD", hold_from="REVIEW")) == ["REVIEW", "REJECTED"]  # resumes where it stopped
+    assert de.allowed_next(_row(status="ON_HOLD", hold_from="ACCEPTED")) == ["ACCEPTED", "REJECTED"]  # resumes where it stopped
     assert de.allowed_next(_row(status="DONE")) == []
+
+
+def test_procurement_has_its_own_flow():
+    p = _row(kind="PROCUREMENT")
+    assert de.allowed_next({**p, "status": "ACCEPTED"}) == ["ORDERED", "ON_HOLD", "REJECTED"]
+    assert de.allowed_next({**p, "status": "ORDERED"}) == ["HANDOVER", "ON_HOLD"]
+    assert de.allowed_next({**p, "status": "HANDOVER"}) == ["DONE", "ORDERED", "ON_HOLD"]  # wrong goods: ordered again
+    assert de.status_label("PROCUREMENT", "HANDOVER") == "Diterima PIC" and de.status_label("REPAIR", "HANDOVER") == "Serah terima"
+    assert de.STEPS_BY_KIND["PROCUREMENT"] == ("PENDING", "ACCEPTED", "ORDERED", "HANDOVER", "DONE")
+
+
+def test_priority_from_impact_and_sales_tier(monkeypatch):
+    monkeypatch.setattr(de, "branch_tiers", lambda: {"TOP": "A", "MID": "B", "LOW": "C"})
+    assert de.priority("REPAIR", "LOW", "STOPS", None) == ("HIGH", "C")       # a stopped small outlet still comes first
+    assert de.priority("REPAIR", "TOP", "MINOR", None) == ("NORMAL", "A")     # a scratch at the top outlet is not critical
+    assert de.priority("REPAIR", "MID", "STOPS", None) == ("CRITICAL", "B")
+    assert de.priority("REPAIR", "NEW", "DEGRADED", None) == ("HIGH", "B")    # a branch without sales yet: tier B
+    assert de.priority("PROCUREMENT", "TOP", None, "REPLACE") == ("HIGH", "A")
+    assert de.priority("PROCUREMENT", "LOW", None, "OTHER") == ("PLANNED", "C")
+    assert de.priority("REPAIR", "TOP", None, None) == ("NORMAL", "A")       # not chosen yet
 
 
 def test_status_rules(monkeypatch):
@@ -54,23 +75,25 @@ def test_status_rules(monkeypatch):
 
 def test_time_tracker_counts_hold_apart_and_sla():
     ev = [{"kind": "SUBMIT", "at": T0.isoformat(), "to": "PENDING"},
-          {"kind": "STATUS", "at": (T0 + timedelta(hours=2)).isoformat(), "to": "VALIDATION"},
+          {"kind": "STATUS", "at": (T0 + timedelta(hours=2)).isoformat(), "to": "ACCEPTED"},
           {"kind": "STATUS", "at": (T0 + timedelta(hours=3)).isoformat(), "to": "ON_HOLD"},
-          {"kind": "STATUS", "at": (T0 + timedelta(hours=13)).isoformat(), "to": "VALIDATION"},
-          {"kind": "STATUS", "at": (T0 + timedelta(hours=14)).isoformat(), "to": "REVIEW"}]
-    t = de.tracker(_row(status="REVIEW", closed_at=T0 + timedelta(hours=40)), ev)  # closed_at = "now" of the test
+          {"kind": "STATUS", "at": (T0 + timedelta(hours=13)).isoformat(), "to": "ACCEPTED"},
+          {"kind": "STATUS", "at": (T0 + timedelta(hours=14)).isoformat(), "to": "IN_PROGRESS"}]
+    t = de.tracker(_row(status="IN_PROGRESS", closed_at=T0 + timedelta(hours=40)), ev)  # closed_at = "now" of the test
     hours = {s["status"]: s["hours"] for s in t["stages"]}
-    assert hours == {"PENDING": 2.0, "VALIDATION": 2.0, "ON_HOLD": 10.0, "REVIEW": 26.0}
+    assert hours == {"PENDING": 2.0, "ACCEPTED": 2.0, "ON_HOLD": 10.0, "IN_PROGRESS": 26.0}
     assert t["totalHours"] == 40 and t["holdHours"] == 10 and t["workHours"] == 30
-    assert t["slaHours"] == 24 and t["overdue"] is True and t["progress"] == 33  # critical: 24 h without the hold
+    assert t["slaHours"] == 24 and t["overdue"] is True and t["progress"] == 50  # critical: 24 h without the hold; step 3 of 5
     assert t["dueAt"] == (T0 + timedelta(hours=34)).isoformat() and t["targetAdjusted"] is False
-    adj = de.tracker(_row(status="REVIEW", closed_at=T0 + timedelta(hours=40), target_at=T0 + timedelta(hours=60)), ev)
+    adj = de.tracker(_row(status="IN_PROGRESS", closed_at=T0 + timedelta(hours=40), target_at=T0 + timedelta(hours=60)), ev)
     assert adj["overdue"] is False and adj["targetAdjusted"] is True and adj["slaHours"] == 50  # 60 h to the target minus 10 h hold
 
 
 def test_checks_before_sending_and_video_types():
-    assert de.missing(_row(analysis=" "), [], []) == ["Tambahkan minimal satu item", "Isi analisis kerusakan", "Lampirkan minimal satu foto"]
-    assert de.missing(_row(kind="PROCUREMENT"), [{"x": 1}], [{"kind": "VIDEO"}]) == ["Lampirkan minimal satu foto area di outlet"]
+    assert de.missing(_row(analysis=" "), [], []) == ["Tambahkan minimal satu item", "Pilih dampak ke operasional",
+                                                       "Isi keterangan kerusakan", "Lampirkan minimal satu foto"]
+    assert de.missing(_row(kind="PROCUREMENT", reason="REPLACE"), [{"x": 1}], [{"kind": "VIDEO"}]) == ["Lampirkan minimal satu foto area di outlet"]
+    assert de.missing(_row(impact="STOPS"), [{"x": 1}], [{"kind": "PHOTO"}]) == []
     assert de._video_type(b"\x00\x00\x00\x18ftypisom" + b"\x00" * 8, "a.mp4") == ("video/mp4", "mp4")
     assert de._video_type(b"\x00\x00\x00\x14ftypqt  " + b"\x00" * 8, "a.mov") == ("video/quicktime", "mov")
     try:
@@ -186,7 +209,7 @@ def test_handover_and_vendor_rules(monkeypatch):
             raise AssertionError(why)
         except de.DeError as e:
             assert why in str(e)
-    rows["r"] = _row(status="REVIEW", mode="VENDOR", est_cost=None)
+    rows["r"] = _row(status="PENDING", mode="VENDOR", est_cost=None)
     try:
         de.change_status(u, "r", "ACCEPTED", None)
         raise AssertionError("vendor estimate")
@@ -247,7 +270,7 @@ def test_review_waits_for_the_approval_steps(monkeypatch):
     steps = [{"id": 1, "position": 1, "label": "Ops Manager", "type": "APPROVE", "users": [{"id": "om", "name": "OM"}]},
              {"id": 2, "position": 2, "label": "Management", "type": "APPROVE", "users": [{"id": "mg", "name": "MG"}]}]
     monkeypatch.setattr(pg, "flow", lambda kind, form="pengajuan": steps if kind == "REPAIR" else [])
-    row = {"status": "REVIEW", "kind": "REPAIR", "approval_step": 1}
+    row = {"status": "PENDING", "kind": "REPAIR", "approval_step": 1}
     st = de.approval_state(row)
     assert st["label"] == "Ops Manager" and st["position"] == 1 and st["total"] == 2
     assert de.approval_state({**row, "approval_step": 2})["userIds"] == ["mg"]

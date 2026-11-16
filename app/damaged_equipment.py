@@ -6,7 +6,11 @@ master of 6 groups, name, qty, location, urgency), an analysis, up to MAX_PHOTOS
 MAX_VIDEO_BYTES, a preview and the PIC's signature (required). Sending gives it a number (DE-YYMM-NNNN), a PDF and a
 share link (read-only, no login, SHARE days).
 
-The team moves it through FLOW: PENDING → VALIDATION → REVIEW → ACCEPTED → IN_PROGRESS → HANDOVER → DONE, with
+2026-11-16 (migration 114): Maintenance and Procurement are two forms with their own categories and flows (FLOW per
+kind; Validation and Review became one approval on Pending). Maintenance: PENDING → ACCEPTED → IN_PROGRESS → HANDOVER →
+DONE; Procurement: PENDING → ACCEPTED → ORDERED → HANDOVER (the PIC receives the goods) → DONE. The urgency is no longer
+picked: priority() sets it from the PIC's impact (Maintenance) or reason (Procurement) and the branch's sales tier.
+The team moves a request through its FLOW, with
 ON_HOLD (resumes where it stopped) and REJECTED; a note is required to hold, reject, swap or mark a duplicate.
 Technicians are assigned (several per request, all INTERNAL or all VENDOR: the request's mode) and can be moved to a
 request that needs them first. INTERNAL: the technician sends the work photos through a link (AFTER) before the
@@ -48,26 +52,74 @@ WAGE_UNIT = {"HOURLY": "jam", "DAILY": "hari", "WEEKLY": "minggu", "MONTHLY": "h
 COST_KINDS = ("MATERIAL", "SERVICE", "TRANSPORT", "OTHER")
 MAX_VIDEO_BYTES = 10 * 1024 * 1024
 MAX_ITEMS = 50
-KINDS = {"REPAIR": "Maintenance", "PROCUREMENT": "Pengadaan (Dekorasi, Tools & Merchandise)"}
+KINDS = {"REPAIR": "Maintenance", "PROCUREMENT": "Procurement"}
 MERCH_GROUP = "Merchandise"  # category group whose items come from the ESB menu (MERCH; sizes MERCH SIZE)
 URGENCY = ("CRITICAL", "HIGH", "NORMAL", "LOW", "PLANNED")  # most urgent first
 URGENCY_LABEL = {"CRITICAL": "Kritis", "HIGH": "Tinggi", "NORMAL": "Normal", "LOW": "Rendah", "PLANNED": "Dijadwalkan"}
-# hours from sending to done (on hold not counted); PLANNED has no target
-SLA_HOURS = {"CRITICAL": 24, "HIGH": 72, "NORMAL": 168, "LOW": 336}
+# hours from sending to done (on hold not counted); PLANNED has no target. Buying takes longer than repairing.
+SLA_BY_KIND = {"REPAIR": {"CRITICAL": 24, "HIGH": 72, "NORMAL": 168, "LOW": 336},
+               "PROCUREMENT": {"CRITICAL": 72, "HIGH": 168, "NORMAL": 336, "LOW": 720}}
+SLA_HOURS = SLA_BY_KIND["REPAIR"]
+# priority (2026-11-16): what the PIC says (impact of a repair / reason of a purchase) × the branch's sales tier
+IMPACT = {"STOPS": "Berhenti jualan", "DEGRADED": "Terganggu", "MINOR": "Tidak mengganggu"}
+REASON = {"REPLACE": "Ganti alat rusak", "CAPACITY": "Tambah kapasitas", "OTHER": "Dekorasi & lainnya"}
+PRIORITY = {"STOPS": {"A": "CRITICAL", "B": "CRITICAL", "C": "HIGH"}, "DEGRADED": {"A": "HIGH", "B": "HIGH", "C": "NORMAL"},
+            "MINOR": {"A": "NORMAL", "B": "LOW", "C": "LOW"}, "REPLACE": {"A": "HIGH", "B": "NORMAL", "C": "NORMAL"},
+            "CAPACITY": {"A": "NORMAL", "B": "LOW", "C": "LOW"}, "OTHER": {"A": "PLANNED", "B": "PLANNED", "C": "PLANNED"}}
+TIER_LABEL = {"A": "Tier A · sales 20% teratas", "B": "Tier B · sales menengah", "C": "Tier C · sales 20% terbawah"}
 CAUSES = ("WEAR", "MISUSE", "AGE", "OTHER")
-STATUS_LABEL = {"DRAFT": "Draf", "PENDING": "Pending", "VALIDATION": "Validasi", "REVIEW": "Review", "ON_HOLD": "On hold",
-                "ACCEPTED": "Accept", "IN_PROGRESS": "Dikerjakan", "HANDOVER": "Serah terima", "DONE": "Done", "REJECTED": "Reject"}
-OPEN = ("PENDING", "VALIDATION", "REVIEW", "ON_HOLD", "ACCEPTED", "IN_PROGRESS", "HANDOVER")
-STEPS = ("PENDING", "VALIDATION", "REVIEW", "ACCEPTED", "IN_PROGRESS", "HANDOVER", "DONE")
-FLOW = {
-    "PENDING": ("VALIDATION", "ON_HOLD", "REJECTED"),
-    "VALIDATION": ("REVIEW", "ON_HOLD", "REJECTED"),
-    "REVIEW": ("ACCEPTED", "ON_HOLD", "REJECTED"),
-    "ACCEPTED": ("IN_PROGRESS", "ON_HOLD", "REJECTED"),
-    "IN_PROGRESS": ("HANDOVER", "ON_HOLD"),
-    "HANDOVER": ("DONE", "IN_PROGRESS", "ON_HOLD"),  # back to In progress: the work is redone
-    "ON_HOLD": ("REJECTED",),  # + resume to hold_from
+STATUS_LABEL = {"DRAFT": "Draf", "PENDING": "Diajukan", "ON_HOLD": "On hold", "ACCEPTED": "Disetujui", "IN_PROGRESS": "Dikerjakan",
+                "ORDERED": "Dipesan", "HANDOVER": "Serah terima", "DONE": "Selesai", "REJECTED": "Ditolak"}
+# a purchase is handed over as "received" and done as "received"
+STATUS_LABEL_PROCUREMENT = {**STATUS_LABEL, "HANDOVER": "Diterima PIC", "DONE": "Selesai"}
+OPEN = ("PENDING", "ON_HOLD", "ACCEPTED", "IN_PROGRESS", "ORDERED", "HANDOVER")
+STEPS_BY_KIND = {"REPAIR": ("PENDING", "ACCEPTED", "IN_PROGRESS", "HANDOVER", "DONE"),
+                 "PROCUREMENT": ("PENDING", "ACCEPTED", "ORDERED", "HANDOVER", "DONE")}
+STEPS = STEPS_BY_KIND["REPAIR"]
+FLOW_BY_KIND = {
+    "REPAIR": {
+        "PENDING": ("ACCEPTED", "ON_HOLD", "REJECTED"),  # the approval steps of the kind (038) sit here
+        "ACCEPTED": ("IN_PROGRESS", "ON_HOLD", "REJECTED"),
+        "IN_PROGRESS": ("HANDOVER", "ON_HOLD"),
+        "HANDOVER": ("DONE", "IN_PROGRESS", "ON_HOLD"),  # back to In progress: the work is redone
+        "ON_HOLD": ("REJECTED",),  # + resume to hold_from
+    },
+    "PROCUREMENT": {
+        "PENDING": ("ACCEPTED", "ON_HOLD", "REJECTED"),
+        "ACCEPTED": ("ORDERED", "ON_HOLD", "REJECTED"),
+        "ORDERED": ("HANDOVER", "ON_HOLD"),  # the goods are on their way: the PIC confirms the receipt
+        "HANDOVER": ("DONE", "ORDERED", "ON_HOLD"),  # back to Ordered: wrong or missing goods
+        "ON_HOLD": ("REJECTED",),
+    },
 }
+FLOW = FLOW_BY_KIND["REPAIR"]
+
+
+def status_label(kind: str, status: str) -> str:
+    return (STATUS_LABEL_PROCUREMENT if kind == "PROCUREMENT" else STATUS_LABEL).get(status, status)
+
+
+_tiers: dict = {}
+
+
+def branch_tiers() -> dict[str, str]:
+    """Sales tier of every branch (once a day): A = the top 20 % of the last 30 days' sales, C = the bottom 20 %."""
+    today = date.today()
+    if _tiers.get("day") != today:
+        rows = db.fetch(f"""SELECT branch_code, sum(nett_sales) AS s FROM {P}.agg_sales_daily
+                            WHERE tx_type = 'sales' AND sales_date >= current_date - 30 GROUP BY 1 HAVING sum(nett_sales) > 0
+                            ORDER BY 2 DESC""")
+        n = len(rows)
+        _tiers.update(day=today, map={r["branch_code"]: ("A" if i < math.ceil(n * 0.2) else "C" if i >= n - math.ceil(n * 0.2) else "B")
+                                      for i, r in enumerate(rows)})
+    return _tiers["map"]
+
+
+def priority(kind: str, branch_code: str, impact: Optional[str], reason: Optional[str]) -> tuple[str, str]:
+    """(urgency, tier) of a request: the PIC's impact (Maintenance) / reason (Procurement) × the branch's sales tier."""
+    tier = branch_tiers().get(branch_code, "B")
+    key = impact if kind == "REPAIR" else reason
+    return PRIORITY.get(key or "", {}).get(tier, "NORMAL" if kind == "REPAIR" else "PLANNED"), tier
 NOTE_REQUIRED = ("ON_HOLD", "REJECTED")
 VIDEO_TYPES = {"mp4": "video/mp4", "m4v": "video/mp4", "mov": "video/quicktime", "webm": "video/webm", "3gp": "video/3gpp"}
 
@@ -91,9 +143,9 @@ def _num(v: Any) -> Optional[float]:
 # ---------------------------------------------------------------- master: categories & technicians
 
 def categories(active_only: bool = True) -> list[dict]:
-    rows = db.fetch(f"""SELECT id, grp, name, default_urgency, examples, sort, is_active, branch_groups FROM {P}.de_category
+    rows = db.fetch(f"""SELECT id, kind, grp, name, default_urgency, examples, sort, is_active, branch_groups FROM {P}.de_category
                         {"WHERE is_active" if active_only else ""} ORDER BY sort, name""")
-    return [{"id": r["id"], "group": r["grp"], "name": r["name"], "defaultUrgency": r["default_urgency"],
+    return [{"id": r["id"], "kind": r["kind"], "group": r["grp"], "name": r["name"], "defaultUrgency": r["default_urgency"],
              "examples": list(r["examples"] or []), "sort": r["sort"], "isActive": r["is_active"],
              "branchGroups": list(r["branch_groups"] or [])} for r in rows]  # [] = every branch
 
@@ -103,17 +155,20 @@ def save_category(category_id: Optional[int], body: dict) -> dict:
         raise DeError("Urgensi tidak dikenal")
     examples = [e.strip()[:80] for e in body.get("examples") or [] if e and e.strip()][:30]
     groups = sorted({str(g)[:40] for g in body.get("branchGroups") or [] if g})[:20]
+    kind = body.get("kind") or "REPAIR"
+    if kind not in KINDS:
+        raise DeError("Jenis form tidak dikenal")
     params = (body["group"].strip()[:60], body["name"].strip()[:80], body["defaultUrgency"], examples,
               int(body.get("sort") or 0), bool(body.get("isActive", True)), groups)
     try:
         if category_id is None:
-            row = db.fetchrow(f"""INSERT INTO {P}.de_category (grp, name, default_urgency, examples, sort, is_active, branch_groups)
-                                  VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""", params)
+            row = db.fetchrow(f"""INSERT INTO {P}.de_category (grp, name, default_urgency, examples, sort, is_active, branch_groups, kind)
+                                  VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""", (*params, kind))
         else:
             row = db.fetchrow(f"""UPDATE {P}.de_category SET grp = %s, name = %s, default_urgency = %s, examples = %s, sort = %s,
                                   is_active = %s, branch_groups = %s, updated_at = now() WHERE id = %s RETURNING id""", (*params, category_id))
     except Exception as e:  # noqa: BLE001 - unique name
-        if "de_category_name_key" in str(e):
+        if "de_category_kind_name" in str(e) or "de_category_name_key" in str(e):
             raise DeError("Nama kategori sudah dipakai") from None
         raise
     if row is None:
@@ -308,7 +363,8 @@ def assignments_of(request_id: str) -> list[dict]:
 def tracker(row: dict, events: list[dict]) -> dict:
     """Time per status from sending to now / closing, on hold kept apart. Due time: the team's adjusted target, else
     sending + the urgency's hours + the time on hold."""
-    sla = SLA_HOURS.get(row["urgency"])
+    sla = SLA_BY_KIND.get(row["kind"], SLA_HOURS).get(row["urgency"])
+    steps = STEPS_BY_KIND.get(row["kind"], STEPS)
     adjusted = row.get("target_at")
     if not row["submitted_at"]:
         return {"stages": [], "totalHours": None, "holdHours": 0, "workHours": None, "slaHours": sla, "dueAt": _iso(adjusted),
@@ -325,9 +381,9 @@ def tracker(row: dict, events: list[dict]) -> dict:
     due = adjusted or (row["submitted_at"] + timedelta(hours=sla + hold) if sla else None)
     target_h = None if due is None else max(0.0, (due - row["submitted_at"]).total_seconds() / 3600 - hold)
     current = row["hold_from"] if row["status"] == "ON_HOLD" else row["status"]
-    progress = 100 if row["status"] == "DONE" else (round(STEPS.index(current) * 100 / (len(STEPS) - 1)) if current in STEPS else 0)
+    progress = 100 if row["status"] == "DONE" else (round(steps.index(current) * 100 / (len(steps) - 1)) if current in steps else 0)
     late = due is not None and end > due
-    return {"stages": [{"status": s_, "label": STATUS_LABEL[s_], "hours": round(h, 2)} for s_, h in stages.items()],
+    return {"stages": [{"status": s_, "label": status_label(row["kind"], s_), "hours": round(h, 2)} for s_, h in stages.items()],
             "totalHours": round(total, 2), "holdHours": round(hold, 2), "workHours": round(total - hold, 2),
             "slaHours": None if target_h is None else round(target_h, 2), "dueAt": _iso(due), "targetAdjusted": adjusted is not None,
             "overdue": bool(late and row["status"] in OPEN), "late": bool(late and row["status"] == "DONE"), "progress": progress}
@@ -336,9 +392,10 @@ def tracker(row: dict, events: list[dict]) -> dict:
 def view(row: dict, full: bool = False) -> dict:
     out = {
         "id": row["id"], "number": row["number"], "kind": row["kind"], "kindLabel": KINDS[row["kind"]], "status": row["status"],
-        "statusLabel": STATUS_LABEL[row["status"]], "holdFrom": row["hold_from"], "userId": row["user_id"], "username": row["username"],
+        "statusLabel": status_label(row["kind"], row["status"]), "holdFrom": row["hold_from"], "userId": row["user_id"], "username": row["username"],
         "picName": row["full_name"] or row["username"], "branchCode": row["branch_code"], "branchName": row["branch_name"],
         "analysis": row["analysis"], "cause": row["cause"], "urgency": row["urgency"], "urgencyLabel": URGENCY_LABEL[row["urgency"]],
+        "impact": row.get("impact"), "reason": row.get("reason"), "tier": row.get("branch_tier"), "orderedAt": _iso(row.get("ordered_at")),
         "distanceM": row["distance_m"], "outsideRadius": row["outside_radius"],
         "signature": {"name": row["signed_name"], "signedAt": _iso(row["signed_at"])} if row["has_signature"] else None,
         "estCost": _num(row["est_cost"]), "actualCost": _num(row["actual_cost"]), "vendor": row["vendor"],
@@ -385,6 +442,8 @@ def form_state(user: dict) -> dict:
     return {"user": {"id": str(user["id"]), "name": user.get("full_name") or user["username"]}, "branches": branches,
             "branchGroups": {b["code"]: groups.get(b["code"]) for b in branches},
             "categories": categories(), "kinds": KINDS, "urgency": URGENCY_LABEL, "requests": out, "merchandise": merchandise(),
+            "impacts": IMPACT, "reasons": REASON, "tiers": {b["code"]: branch_tiers().get(b["code"], "B") for b in branches},
+            "tierLabels": TIER_LABEL, "priority": PRIORITY, "steps": {k: list(v) for k, v in STEPS_BY_KIND.items()},
             "limits": {"photos": MAX_PHOTOS, "videoBytes": MAX_VIDEO_BYTES, "items": MAX_ITEMS}}
 
 
@@ -444,12 +503,20 @@ def save_draft(user: dict, request_id: str, body: dict) -> dict:
         if body["cause"] not in (None, "", *CAUSES):
             raise DeError("Penyebab tidak dikenal")
         sets["cause"] = body["cause"] or None
+    if "impact" in body:
+        if body["impact"] not in (None, "", *IMPACT):
+            raise DeError("Dampak tidak dikenal")
+        sets["impact"] = body["impact"] or None
+    if "reason" in body:
+        if body["reason"] not in (None, "", *REASON):
+            raise DeError("Alasan pengadaan tidak dikenal")
+        sets["reason"] = body["reason"] or None
     with db.transaction() as conn:
         if "items" in body:
             items = body["items"] or []
             if len(items) > MAX_ITEMS:
                 raise DeError(f"Maksimal {MAX_ITEMS} item per pengajuan")
-            known = {c["id"]: c for c in categories()}
+            known = {c["id"]: c for c in categories() if c["kind"] == row["kind"]}  # the categories of this form
             conn.execute(f"DELETE FROM {P}.de_item WHERE request_id::text = %s", (request_id,))
             for n, it in enumerate(items):
                 cat = known.get(int(it.get("categoryId") or 0))
@@ -458,15 +525,13 @@ def save_draft(user: dict, request_id: str, body: dict) -> dict:
                 name = " ".join((it.get("name") or "").split())[:120]
                 if not name:
                     raise DeError("Nama item wajib diisi")
-                urgency = it.get("urgency") or cat["defaultUrgency"]
-                if urgency not in URGENCY:
-                    raise DeError("Urgensi tidak dikenal")
+                urgency = "NORMAL"  # the request's priority is set below from the impact / reason and the tier
                 conn.execute(f"""INSERT INTO {P}.de_item (request_id, category_id, name, qty, location, urgency, note, sort)
                                  VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                              (request_id, cat["id"], name, max(1, min(9999, int(it.get("qty") or 1))),
                               (it.get("location") or "").strip()[:120] or None, urgency, (it.get("note") or "").strip()[:1000] or None, n))
-            levels = [it.get("urgency") or known[int(it["categoryId"])]["defaultUrgency"] for it in items]
-            sets["urgency"] = min(levels, key=URGENCY.index) if levels else "NORMAL"
+        merged = {**row, **sets}
+        sets["urgency"], sets["branch_tier"] = priority(row["kind"], merged["branch_code"], merged.get("impact"), merged.get("reason"))
         if sets:
             cols = ", ".join(f"{k} = %s" for k in sets)
             conn.execute(f"UPDATE {P}.de_request SET {cols}, updated_at = now() WHERE id::text = %s", (*sets.values(), request_id))
@@ -517,8 +582,12 @@ def missing(row: dict, items: list[dict], media: list[dict]) -> list[str]:
     out = []
     if not items:
         out.append("Tambahkan minimal satu item")
+    if row["kind"] == "REPAIR" and not row.get("impact"):
+        out.append("Pilih dampak ke operasional")
+    if row["kind"] == "PROCUREMENT" and not row.get("reason"):
+        out.append("Pilih alasan pengadaan")
     if not (row["analysis"] or "").strip():
-        out.append("Isi analisis kerusakan" if row["kind"] == "REPAIR" else "Isi alasan pengadaan")
+        out.append("Isi keterangan kerusakan" if row["kind"] == "REPAIR" else "Isi keterangan pengadaan")
     if not any(m["kind"] == "PHOTO" for m in media):
         out.append("Lampirkan minimal satu foto" if row["kind"] == "REPAIR" else "Lampirkan minimal satu foto area di outlet")
     return out
@@ -598,7 +667,9 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]]) -> di
         v["technicians"] = te_by.get(r["id"], [])
         v["tracker"] = tracker(r, ev_by.get(r["id"], []))
         data.append(v)
-    return {"data": data, "statuses": STATUS_LABEL, "urgency": URGENCY_LABEL, "kinds": KINDS, "sla": SLA_HOURS,
+    return {"data": data, "statuses": STATUS_LABEL, "statusesProcurement": STATUS_LABEL_PROCUREMENT, "urgency": URGENCY_LABEL,
+            "kinds": KINDS, "sla": SLA_HOURS, "slaByKind": SLA_BY_KIND, "steps": {k: list(v) for k, v in STEPS_BY_KIND.items()},
+            "impacts": IMPACT, "reasons": REASON, "tierLabels": TIER_LABEL,
             "categories": categories(False), "technicians": [t for t in technicians() if t["isActive"]]}
 
 
@@ -614,7 +685,7 @@ def team_full(request_id: str) -> dict:
                     (request_id, row["branch_code"], row["user_id"], list(OPEN)))
     out["related"] = [{**view(r), "items": items_of(r["id"])} for r in rows]
     out["allowed"] = allowed_next(row)
-    out["approval"] = approval_state(row) if row["status"] == "REVIEW" else None
+    out["approval"] = approval_state(row) if row["status"] == "PENDING" else None
     out["workLinks"] = work_links(request_id)
     out["costItems"] = cost_items(request_id)
     out["labor"] = labor(request_id)
@@ -624,7 +695,7 @@ def team_full(request_id: str) -> dict:
 def allowed_next(row: dict) -> list[str]:
     if row["status"] == "ON_HOLD":
         return [row["hold_from"], "REJECTED"] if row["hold_from"] else ["REJECTED"]
-    return list(FLOW.get(row["status"], ()))
+    return list(FLOW_BY_KIND.get(row["kind"], FLOW).get(row["status"], ()))
 
 
 def approval_state(row: dict) -> Optional[dict]:
@@ -646,12 +717,12 @@ def change_status(user: dict, request_id: str, to: str, note: Optional[str]) -> 
     if row is None or row["status"] == "DRAFT":
         raise LookupError("Pengajuan tidak ditemukan")
     if to not in allowed_next(row):
-        raise DeError(f"Status {STATUS_LABEL[row['status']]} tidak bisa langsung ke {STATUS_LABEL.get(to, to)}")
+        raise DeError(f"Status {status_label(row['kind'], row['status'])} tidak bisa langsung ke {status_label(row['kind'], to)}")
     note = (note or "").strip()[:2000] or None
     if to in NOTE_REQUIRED and not note:
-        raise DeError(f"Alasan wajib diisi untuk {STATUS_LABEL[to]}")
+        raise DeError(f"Alasan wajib diisi untuk {status_label(row['kind'], to)}")
     # Review → Accept / Reject: the approver of the step waiting; the steps before the last keep it in Review
-    approval = approval_state(row) if row["status"] == "REVIEW" and to in ("ACCEPTED", "REJECTED") else None
+    approval = approval_state(row) if row["status"] == "PENDING" and to in ("ACCEPTED", "REJECTED") else None
     if approval is not None:
         from app import pengajuan as pg
         step = {"users": [{"id": i} for i in approval["userIds"]]}
@@ -661,37 +732,42 @@ def change_status(user: dict, request_id: str, to: str, note: Optional[str]) -> 
             with db.transaction() as conn:
                 conn.execute(f"UPDATE {P}.de_request SET approval_step = %s, updated_at = now() WHERE id::text = %s",
                              (approval["position"] + 1, request_id))
-                _event(conn, request_id, user, "STATUS", "REVIEW", "REVIEW", note, {"action": "APPROVE", "step": approval["label"]})
+                _event(conn, request_id, user, "STATUS", "PENDING", "PENDING", note, {"action": "APPROVE", "step": approval["label"]})
             return team_full(request_id)
     active = db.fetchrow(f"SELECT count(*)::int AS n FROM {P}.de_assignment WHERE request_id::text = %s AND status = 'ACTIVE'", (request_id,))["n"]
     vendor = row.get("mode") == "VENDOR" and active > 0
     count = lambda kind: db.fetchrow(f"SELECT count(*)::int AS n FROM {P}.de_media WHERE request_id::text = %s AND kind = %s",  # noqa: E731
                                      (request_id, kind))["n"]
-    if to in ("IN_PROGRESS", "HANDOVER") and not active:
+    procurement = row["kind"] == "PROCUREMENT"
+    if to in ("IN_PROGRESS", "HANDOVER") and not active and not procurement:
         raise DeError("Tugaskan tukang dulu sebelum mulai dikerjakan")
+    if procurement and to == "ORDERED" and (not (row.get("vendor") or "").strip() or row["est_cost"] is None):
+        raise DeError("Isi toko / vendor dan perkiraan harga dulu (Biaya & invoice) sebelum menandai Dipesan")
     if to in ("ACCEPTED", "IN_PROGRESS") and vendor and row["est_cost"] is None:
         raise DeError("Isi estimasi biaya vendor dulu (Biaya & invoice)")
-    if to == "HANDOVER" and row.get("mode") == "INTERNAL" and not count("AFTER"):
+    if to == "HANDOVER" and not procurement and row.get("mode") == "INTERNAL" and not count("AFTER"):
         raise DeError("Foto hasil pekerjaan dari tukang belum masuk: kirim link foto ke tukang dulu")
     if to == "DONE":
         if not row.get("handover_at"):
             raise DeError("Serah terima dari PIC belum dikirim")
-        if row.get("mode") == "VENDOR" and (row["actual_cost"] is None or not count("INVOICE")):
+        if (procurement or row.get("mode") == "VENDOR") and (row["actual_cost"] is None or not count("INVOICE")):
             raise DeError("Pekerjaan vendor: isi biaya aktual dan lampirkan invoice sebelum Done")
-    reopen = to == "IN_PROGRESS" and row["status"] == "HANDOVER"
+    reopen = to in ("IN_PROGRESS", "ORDERED") and row["status"] == "HANDOVER"
     with db.transaction() as conn:
         conn.execute(f"""UPDATE {P}.de_request SET status = %s, hold_from = %s, updated_at = now(),
                          closed_at = CASE WHEN %s IN ('DONE', 'REJECTED') THEN now() END WHERE id::text = %s""",
                      (to, row["status"] if to == "ON_HOLD" else None, to, request_id))
         if to == "HANDOVER" and row["status"] != "ON_HOLD":
             conn.execute(f"UPDATE {P}.de_request SET handover_requested_at = now() WHERE id::text = %s", (request_id,))
+        if to == "ORDERED" and row["status"] != "ON_HOLD":
+            conn.execute(f"UPDATE {P}.de_request SET ordered_at = now() WHERE id::text = %s", (request_id,))
         if reopen:  # redo: a new handover is needed (the photos stay as history)
             conn.execute(f"""UPDATE {P}.de_request SET handover_at = NULL, pic_sign = NULL, pic_sign_type = NULL, pic_sign_name = NULL,
                              vendor_sign = NULL, vendor_sign_type = NULL, vendor_sign_name = NULL, handover_note = NULL WHERE id::text = %s""",
                          (request_id,))
         if to == "DONE":
             conn.execute(f"UPDATE {P}.de_request SET approved_by = %s WHERE id::text = %s", (user.get("full_name") or user["username"], request_id))
-        if to == "REVIEW" and row["status"] != "ON_HOLD":  # a new review starts at the first approval step
+        if to == "PENDING" and row["status"] != "ON_HOLD":  # a new approval starts at the first step
             conn.execute(f"UPDATE {P}.de_request SET approval_step = 1 WHERE id::text = %s", (request_id,))
         if row["status"] == "IN_PROGRESS" or to in ("DONE", "REJECTED"):  # the work stops: open technician links close
             conn.execute(f"""UPDATE {P}.de_work_link SET revoked_at = now() WHERE request_id::text = %s AND submitted_at IS NULL
@@ -716,7 +792,7 @@ def add_note(user: dict, request_id: str, note: str) -> dict:
 
 def assign(user: dict, request_id: str, technician_id: int, scheduled_for: Optional[date], note: Optional[str]) -> dict:
     row = get_row(request_id)
-    if row is None or row["status"] not in ("REVIEW", "ACCEPTED", "IN_PROGRESS", "ON_HOLD"):
+    if row is None or row["status"] not in ("PENDING", "ACCEPTED", "IN_PROGRESS", "ON_HOLD"):
         raise DeError("Tukang ditugaskan setelah pengajuan di-review (Review, Accept atau Dikerjakan)")
     tech = db.fetchrow(f"SELECT id, name, kind FROM {P}.de_technician WHERE id = %s AND is_active", (technician_id,))
     if tech is None:
@@ -778,7 +854,7 @@ def swap(user: dict, assignment_id: int, to_request_id: str, scheduled_for: Opti
         raise DeError("Alasan pergeseran tukang wajib diisi")
     a = _assignment(assignment_id)
     target = get_row(to_request_id)
-    if target is None or target["status"] not in ("REVIEW", "ACCEPTED", "IN_PROGRESS", "ON_HOLD"):
+    if target is None or target["status"] not in ("PENDING", "ACCEPTED", "IN_PROGRESS", "ON_HOLD"):
         raise DeError("Pengajuan tujuan harus sudah di-review (Review, Accept atau Dikerjakan)")
     if target["id"] == a["rid"]:
         raise DeError("Pengajuan tujuan sama dengan pengajuan asal")

@@ -30,13 +30,13 @@ EVENT = {"SUBMIT": "Pengajuan dikirim", "ASSIGN": "Tukang ditugaskan", "RELEASE"
          "COST": "Biaya diperbarui", "NOTE": "Catatan tim", "DUPLICATE": "Ditandai duplikat", "WORK": "Link foto tukang",
          "TARGET": "Target waktu disesuaikan", "HANDOVER": "Serah terima dari PIC"}
 # (background, text) of the status / urgency pills
-STATUS_PILL = {"PENDING": ("#f1f5f9", "#334155"), "VALIDATION": ("#e0f2fe", "#075985"), "REVIEW": ("#ede9fe", "#5b21b6"),
+STATUS_PILL = {"PENDING": ("#f1f5f9", "#334155"), "ORDERED": ("#e0f2fe", "#075985"),
                "ON_HOLD": ("#fef3c7", "#92400e"), "ACCEPTED": ("#dbeafe", "#1e40af"), "IN_PROGRESS": ("#dbeafe", "#1e3a8a"),
                "DONE": ("#dcfce7", "#166534"), "REJECTED": ("#fee2e2", "#991b1b")}
 URGENCY_PILL = {"CRITICAL": ("#fee2e2", "#991b1b"), "HIGH": ("#ffedd5", "#9a3412"), "NORMAL": ("#dbeafe", "#1e40af"),
                 "LOW": ("#f1f5f9", "#334155"), "PLANNED": ("#ede9fe", "#5b21b6")}
 STATUS_PILL["HANDOVER"] = ("#cffafe", "#155e75")
-STEPS = list(de.STEPS)
+STEPS = list(de.STEPS)  # Maintenance; a purchase uses de.STEPS_BY_KIND["PROCUREMENT"] (see the strip)
 LOGO = Path(__file__).parent / "static" / "calf-logo.png"
 MARGIN = 16 * mm
 WIDTH = A4[0] - 2 * MARGIN
@@ -132,6 +132,7 @@ def _grid(cells: list[tuple[str, str]], s: _S, cols: int = 4) -> Table:
 
 
 def _steps(r: dict, s: _S) -> Table:
+    STEPS = list(de.STEPS_BY_KIND.get(r["kind"], de.STEPS))  # noqa: N806 - the steps of the request's form
     at = r["holdFrom"] if r["status"] == "ON_HOLD" else r["status"]
     idx = len(STEPS) - 1 if r["status"] == "DONE" else (STEPS.index(at) if at in STEPS else -1)
     cells, style = [], [("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
@@ -139,7 +140,7 @@ def _steps(r: dict, s: _S) -> Table:
     for i, st in enumerate(STEPS):
         done, here = i < idx or r["status"] == "DONE", i == idx and r["status"] != "DONE"
         bg, fg = ("#1d4ed8", "#ffffff") if done else (STATUS_PILL.get(r["status"], ("#dbeafe", "#1e3a8a")) if here else ("#f1f5f9", "#94a3b8"))
-        cells.append(Paragraph(f"<font color='{fg}'><b>{i + 1}. {_esc(de.STATUS_LABEL[st])}</b></font>", s.center))
+        cells.append(Paragraph(f"<font color='{fg}'><b>{i + 1}. {_esc(de.status_label(r['kind'], st))}</b></font>", s.center))
         style.append(("BACKGROUND", (i, 0), (i, 0), colors.HexColor(bg)))
     style += [("LINEAFTER", (i, 0), (i, 0), 2, colors.white) for i in range(len(STEPS) - 1)]
     return Table([cells], colWidths=[WIDTH / len(STEPS)] * len(STEPS), style=TableStyle(style))

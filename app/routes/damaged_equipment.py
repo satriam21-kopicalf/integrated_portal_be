@@ -138,6 +138,8 @@ class DraftIn(BaseModel):
     branchCode: Optional[str] = Field(None, max_length=40)
     analysis: Optional[str] = Field(None, max_length=4000)
     cause: Optional[str] = None
+    impact: Optional[Literal["STOPS", "DEGRADED", "MINOR", ""]] = None   # Maintenance (migration 114)
+    reason: Optional[Literal["REPLACE", "CAPACITY", "OTHER", ""]] = None  # Procurement
     items: Optional[list[ItemIn]] = Field(None, max_length=de.MAX_ITEMS)
 
 
@@ -560,6 +562,7 @@ class CategoryIn(BaseModel):
     sort: int = Field(0, ge=0, le=9999)
     isActive: bool = True
     branchGroups: list[str] = Field(default_factory=list, max_length=20)  # [] = every branch
+    kind: Literal["REPAIR", "PROCUREMENT"] = "REPAIR"  # the form the category belongs to (migration 114)
 
 
 class TechnicianIn(BaseModel):

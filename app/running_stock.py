@@ -108,8 +108,7 @@ def system_usage(starts: dict[str, date], d_to: date, cutoffs: Optional[dict[str
     from app import test_branches
     branches, d_from = list(starts), min(starts.values())
     source = {b: test_branches.sources().get(b, b) for b in branches}  # a test branch sells what its source sells
-    cards = {k: c for k, c in mc.resolve({r["code"]: r for r in mc.recipes()}).items() if c["isActive"]}
-    mapped = {m["id"]: code for code, c in cards.items() for m in c["menus"]}
+    cards, mapped = mc.costing_cards()  # the stored cards + the bundles costed from the ESB master (2026-11-17)
     wip = mc.wips()
     br = {"a": d_from, "b": d_to, "br": sorted(set(source.values())), "main": MAIN_COMPANY}
     company = f"coalesce(br.company, %(main)s)"

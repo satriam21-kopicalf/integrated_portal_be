@@ -387,6 +387,75 @@ def resolve(cards: dict[str, dict]) -> dict[str, dict]:
             for code, c in cards.items()}
 
 
+AUTO_PREFIX = "ESB-BUNDLE:"  # the code of a bundle card made from the ESB menu master (never stored)
+
+
+def esb_bundles(mapped: dict[str, str]) -> list[dict]:
+    """The bundles of the ESB POS menu master (menuPackages) without a card of their own (2026-11-17, Cost Control: the
+    bundles change every month, a card for each is too much work). Each: its package groups and whether it can be costed
+    from the master (`ok`): every group holds exactly one active menu with a fixed quantity (min = max > 0) and every one
+    of those menus has a card; else `reason` says what to fix (in ESB, or a card for the bundle)."""
+    try:
+        # also a menu named as a bundle without package groups (BUNDLING PROMO GOFOOD 3 ES KOPI …: the contents only in
+        # its name), so it is listed to check instead of silently costing nothing
+        rows = db.fetch(f"""SELECT company_code || ':' || menu_id AS id, menu_name AS name, raw_data->'menuPackages'->'menuGroup' AS groups
+                              FROM {SCHEMA}.master_pos_menu
+                             WHERE (jsonb_typeof(raw_data->'menuPackages'->'menuGroup') = 'array'
+                                    AND jsonb_array_length(raw_data->'menuPackages'->'menuGroup') > 0)
+                                OR menu_name ILIKE '%%bundl%%'""")
+    except Exception:  # noqa: BLE001 - the menu master unreachable: the stored cards alone
+        return []
+    out = []
+    for r in rows:
+        if r["id"] in mapped:
+            continue
+        company = r["id"].split(":", 1)[0]
+        if not r["groups"]:  # named as a bundle, no contents in ESB
+            out.append({"id": r["id"], "name": r["name"], "contents": [], "ok": False,
+                        "reasons": ["isi bundling belum diatur di ESB (paket kosong): atur isinya di ESB atau buat recipe card"]})
+            continue
+        groups = [[m for m in g.get("menus") or [] if str(m.get("flagActive", 1)) == "1"] for g in r["groups"] or []]
+        # a bundle holds menus that have a card of their own; a menu with only modifiers (cup, sugar …: no card) is none
+        if not any(f"{company}:{m.get('menuID')}" in mapped for ms in groups for m in ms):
+            continue
+        contents, reasons = [], []
+        for g, menus_ in zip(r["groups"] or [], groups):
+            if not menus_:
+                continue
+            lo, hi = _f(g.get("minQty")), _f(g.get("maxQty"))
+            if len(menus_) > 1:
+                reasons.append(f"{g.get('menuGroupName') or 'Grup'}: pilihan {len(menus_)} menu, isi hanya dari transaksi")
+                continue
+            m = menus_[0]
+            mid = f"{company}:{m.get('menuID')}"
+            if lo <= 0 or hi != lo:
+                reasons.append(f"{m.get('menuName')}: jumlah di ESB tidak pasti (min {lo:g}, max {hi:g})")
+            elif mid not in mapped:
+                reasons.append(f"{m.get('menuName')}: belum punya recipe card")
+            contents.append({"id": mid, "name": m.get("menuName") or mid, "qty": lo, "card": mapped.get(mid)})
+        out.append({"id": r["id"], "name": r["name"], "contents": contents, "ok": bool(contents) and not reasons, "reasons": reasons})
+    return out
+
+
+def costing_cards() -> tuple[dict[str, dict], dict[str, str]]:
+    """(cards, mapped): the active cards (bundles flattened) and the card of every menu, plus a card made from the ESB
+    master for every bundle without one whose contents are fixed (esb_bundles ok): its lines are the lines of the
+    content cards x their quantity, so a new bundle costs right without a card (2026-11-17). Used by the calculator, the
+    breakdown and the running stock alike."""
+    every = resolve({r["code"]: r for r in recipes()})
+    cards = {k: c for k, c in every.items() if c["isActive"]}
+    mapped = {m["id"]: code for code, c in cards.items() for m in c["menus"]}
+    for b in esb_bundles(mapped):
+        if not b["ok"]:
+            continue
+        code = AUTO_PREFIX + b["id"]
+        lines = [{**ln, "qty": ln["qty"] * c["qty"]} for c in b["contents"] for ln in every[c["card"]]["lines"]]
+        cards[code] = {"code": code, "name": b["name"], "category": "Bundling (ESB)", "lines": lines, "note": None,
+                       "isActive": True, "menus": [{"id": b["id"], "name": b["name"]}], "bundle": True, "auto": True}
+        mapped[b["id"]] = code
+    return cards, mapped
+
+
 def _channel(template: str) -> str:
     t = template.strip().upper()
     return "dine-in" if t.startswith("DI") else "online" if t.startswith(("OL", "ONLINE")) else "other"
@@ -465,7 +534,10 @@ def menus(days: int = 90) -> list[dict]:
         rows = _menus_sold(days)
         _cache.set(f"menus:{days}:{date.today()}", rows, MENUS_S)
     mapped = {r["menu_id"]: r["recipe_code"] for r in db.fetch(f"SELECT menu_id, recipe_code FROM {P}.cc_menu_recipe_map")}
-    out = [{"id": r["menu_id"], "name": r["name"] or r["menu_id"], "category": r["category"] or "",
+    # a bundle without a card: costed from the ESB master when its contents are fixed, else what to fix (2026-11-17)
+    bundles = {b["id"]: {"auto": b["ok"], "contents": [{"name": c["name"], "qty": c["qty"], "card": c["card"]} for c in b["contents"]],
+                         "reasons": b["reasons"]} for b in esb_bundles(mapped)}
+    out = [{"id": r["menu_id"], "name": r["name"] or r["menu_id"], "category": r["category"] or "", "bundle": bundles.get(r["menu_id"]),
             "detail": r["detail"] or "", "kinds": sorted((r["kinds"] or "menu").split(",")),
             "companies": [{"code": c, "name": COMPANY_NAMES.get(c, c)} for c in sorted((r["companies"] or MAIN_COMPANY).split(","))],
             "qty": _f(r["qty"]), "lastSold": (r["last_day"] or r["last_month"]).isoformat() if (r["last_day"] or r["last_month"]) else None,
@@ -731,8 +803,7 @@ def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int
 
 def _report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int = 7, buffer_pct: float = 10) -> dict:
     days = (d_to - d_from).days + 1
-    cards = {k: c for k, c in resolve({r["code"]: r for r in recipes()}).items() if c["isActive"]}  # a bundle may hold an inactive card
-    mapped = {m["id"]: code for code, c in cards.items() for m in c["menus"]}
+    cards, mapped = costing_cards()  # the stored cards + the bundles costed from the ESB master (2026-11-17)
     wip = wips()
     got = _sold(d_from, d_to, branches, cards, mapped, wip, horizon, buffer_pct)
     system, plan, per_menu, extra_rows = got["system"], got["plan"], got["menus"], got["extras"]

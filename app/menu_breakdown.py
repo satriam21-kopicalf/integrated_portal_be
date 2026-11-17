@@ -68,8 +68,7 @@ def _f(v: Any) -> float:
 def rows(d_from: date, d_to: date, branches: Optional[list[str]], per_branch: bool = True, per_month: bool = True) -> dict:
     """{rows: [...], prices, names}: one row per (month?, outlet?, menu, additional, material) with the portions and the
     quantity, as the Excel Data sheet; `per_branch` / `per_month` False fold the outlets / months together."""
-    cards = {k: c for k, c in mc.resolve({r["code"]: r for r in mc.recipes()}).items() if c["isActive"]}
-    mapped = {m["id"]: code for code, c in cards.items() for m in c["menus"]}
+    cards, mapped = mc.costing_cards()  # the stored cards + the bundles costed from the ESB master (2026-11-17)
     wip = mc.wips()
     rules = mo.rules()
     grams = mo.card_rules()

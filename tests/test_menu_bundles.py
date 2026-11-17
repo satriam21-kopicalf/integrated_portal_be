@@ -89,3 +89,80 @@ def test_fixed_bundle_contents():
     assert menu_options._fixed_contents([one]) == [("1", "Es Kopi", 3.0)]
     assert menu_options._fixed_contents([pair]) == [("5", "Choco", 1.0), ("1", "Es Kopi", 1.0)]
     assert menu_options._fixed_contents([one, pick]) is None
+
+
+# ---- bundles costed from the ESB menu master (2026-11-17) ----
+def _master(groups_by_menu):
+    return [{"id": f"CALF:{mid}", "name": name, "groups": groups} for mid, (name, groups) in groups_by_menu.items()]
+
+
+def _g(name, menus, lo, hi):
+    return {"menuGroupName": name, "minQty": lo, "maxQty": hi,
+            "menus": [{"menuID": m, "menuName": n, "flagActive": 1} for m, n in menus]}
+
+
+MASTER = {
+    "500": ("2 Premium + 1 Chocolate", [_g("Premium", [("1", "Es Kopi Calf Premium")], 2, 2),
+                                         _g("Chocolate", [("9", "Iced Chocolate")], 1, 1)]),
+    "501": ("Pilih 2", [_g("PACKAGE", [("1", "Es Kopi Calf Premium"), ("9", "Iced Chocolate")], 2, 2)]),
+    "502": ("2 Kopi Disc", [_g("PACKAGE", [("1", "Es Kopi Calf Premium")], 0, 2)]),
+    "503": ("Kopi + Dimsum", [_g("A", [("1", "Es Kopi Calf Premium")], 1, 1), _g("B", [("7", "Dimsum")], 1, 1)]),
+    "600": ("Es Kopi Regular", [_g("Sugar", [("80", "Less Sugar"), ("81", "No Sugar")], 0, 1)]),  # modifiers only
+    "171": ("BUNDLING PROMO GOFOOD 3 ES KOPI CALF PREMIUM", []),  # the contents only in its name
+}
+CARDS = [
+    {"code": "P", "name": "Premium", "category": None, "lines": [{"type": "item", "code": "MILK", "qty": 100}], "note": None,
+     "is_active": True, "updated_by": None},
+    {"code": "C", "name": "Chocolate", "category": None, "lines": [{"type": "item", "code": "CHOCO", "qty": 30}], "note": None,
+     "is_active": True, "updated_by": None},
+]
+
+
+def _db(monkeypatch, mapped):
+    def fetch(q, p=None):
+        if "master_pos_menu" in q:
+            return _master(MASTER)
+        if "cc_menu_recipe_map" in q:
+            return [{"menu_id": k, "menu_name": k, "recipe_code": v} for k, v in mapped.items()]
+        if "cc_menu_recipe" in q:
+            from datetime import datetime
+            return [{**c, "updated_at": datetime(2026, 11, 17)} for c in CARDS]
+        return []
+    monkeypatch.setattr(mc.db, "fetch", fetch)
+
+
+def test_fixed_bundle_is_costed_from_the_master(monkeypatch):
+    mapped = {"CALF:1": "P", "CALF:9": "C"}
+    _db(monkeypatch, mapped)
+    found = {b["id"]: b for b in mc.esb_bundles(mapped)}
+    assert found["CALF:500"]["ok"] and [(c["qty"], c["card"]) for c in found["CALF:500"]["contents"]] == [(2, "P"), (1, "C")]
+    assert "CALF:600" not in found  # sugar choices are no bundle
+    cards, m = mc.costing_cards()
+    auto = cards[m["CALF:500"]]
+    assert auto["bundle"] and auto["auto"]
+    assert sorted((ln["code"], ln["qty"]) for ln in auto["lines"]) == [("CHOCO", 30), ("MILK", 200)]
+
+
+def test_bundles_that_cannot_be_costed_say_why(monkeypatch):
+    mapped = {"CALF:1": "P", "CALF:9": "C"}
+    _db(monkeypatch, mapped)
+    found = {b["id"]: b for b in mc.esb_bundles(mapped)}
+    assert not found["CALF:501"]["ok"] and "pilihan" in found["CALF:501"]["reasons"][0]      # a choice: from the bills
+    assert not found["CALF:502"]["ok"] and "tidak pasti" in found["CALF:502"]["reasons"][0]  # min 0
+    assert not found["CALF:503"]["ok"] and "belum punya recipe card" in found["CALF:503"]["reasons"][0]
+    cards, m = mc.costing_cards()
+    assert not {"CALF:501", "CALF:502", "CALF:503"} & set(m)
+
+
+def test_a_bundle_with_its_own_card_keeps_it(monkeypatch):
+    mapped = {"CALF:1": "P", "CALF:9": "C", "CALF:500": "C"}
+    _db(monkeypatch, mapped)
+    assert "CALF:500" not in {b["id"] for b in mc.esb_bundles(mapped)}
+
+
+def test_a_bundle_named_without_contents_is_listed_to_check(monkeypatch):
+    mapped = {'CALF:1': 'P', 'CALF:9': 'C'}
+    _db(monkeypatch, mapped)
+    found = {b['id']: b for b in mc.esb_bundles(mapped)}
+    assert not found['CALF:171']['ok'] and 'paket kosong' in found['CALF:171']['reasons'][0]
+    assert 'CALF:171' not in mc.costing_cards()[1]

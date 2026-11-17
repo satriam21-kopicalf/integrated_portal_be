@@ -212,7 +212,7 @@ def review(body: ReviewIn, request: Request, user: dict = Depends(require_page(R
 
 class CorrectIn(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
-    qty: Optional[float] = Field(None, gt=0, le=1_000_000)
+    qty: Optional[float] = Field(None, ge=0, le=1_000_000)  # Cost Control may correct to 0 (2026-11-17); the outlet enters more than 0
     uom: Optional[str] = Field(None, max_length=40)
     itemCode: Optional[str] = Field(None, min_length=1, max_length=80)
     category: Optional[str] = Field(None, min_length=1, max_length=120)

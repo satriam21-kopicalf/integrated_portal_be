@@ -298,3 +298,16 @@ def test_recipe_line_of_counted_item_keeps_its_base_unit():
     assert [waste.base_qty(units, c, q, u, rec) for c, q, u, rec in parts] == [2.0, 30.0]
     # an item entered by itself in a unit that cannot be converted stays without a quantity
     assert waste.base_qty(units, "PCPB-00008", 1, "KG", False) is None
+
+
+def test_zero_quantity_only_in_a_cost_control_correction():
+    # 2026-11-17: the outlet enters more than 0; Cost Control may correct an entry to 0
+    import pytest
+    from decimal import Decimal
+    from app import waste as w
+    with pytest.raises(w.WasteError):
+        w._qty(0)
+    assert w._qty(0, allow_zero=True) == Decimal('0.000')
+    assert w._qty('2,5') == Decimal('2.500')
+    with pytest.raises(w.WasteError):
+        w._qty(-1, allow_zero=True)

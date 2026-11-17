@@ -200,13 +200,15 @@ def _item(scope: str, code: str, facility: str = "OUTLET", branch: Optional[str]
     return next((i for i in catalog(facility, branch)["items"].get(scope, []) if i["code"] == code), None)
 
 
-def _qty(value: Any) -> Decimal:
+def _qty(value: Any, allow_zero: bool = False) -> Decimal:
+    """An entered quantity: more than 0 for the outlet; Cost Control may correct it to 0 (allow_zero, 2026-11-17) when
+    the attached photo shows nothing was wasted."""
     try:
         q = Decimal(str(value).replace(",", ".")).quantize(Decimal("0.001"))
     except (InvalidOperation, ValueError):
         raise WasteError("Jumlah harus angka") from None
-    if q <= 0 or q > MAX_QTY:
-        raise WasteError("Jumlah harus lebih dari 0")
+    if q > MAX_QTY or q < 0 or (q == 0 and not allow_zero):
+        raise WasteError("Jumlah tidak boleh kurang dari 0" if allow_zero else "Jumlah harus lebih dari 0")
     return q
 
 
@@ -595,7 +597,7 @@ def correct(entry_id: str, body: dict, user: dict, branches: Optional[tuple]) ->
         log: list[tuple[str, Any, Any]] = []
         scope, facility = row["scope"], (facility_type(row["branch_code"]) if row["scope"] == "premix" else "OUTLET")
         code = body.get("itemCode") or row["item_code"]
-        qty = _qty(body["qty"]) if body.get("qty") is not None else row["qty"]
+        qty = _qty(body["qty"], allow_zero=True) if body.get("qty") is not None else row["qty"]
         uom = body.get("uom") or row["unit"]
         if code != row["item_code"] or qty != row["qty"] or uom != row["unit"]:
             item = _item(scope, code, facility, row["branch_code"])

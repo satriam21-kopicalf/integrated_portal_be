@@ -528,7 +528,9 @@ def save_draft(user: dict, request_id: str, body: dict) -> dict:
                     raise DeError("Nama item wajib diisi")
                 # a category with a list: the item is picked from it, never typed (user, 2026-11-17)
                 listed = {x.lower(): x for x in (cat.get("examples") or [])}
-                if listed and cat.get("group") != "Merchandise":
+                if cat.get("group") != "Merchandise":  # no typed items: the team makes the list in Categories
+                    if not listed:
+                        raise DeError(f"Kategori {cat['name']} belum punya daftar item")
                     if name.lower() not in listed:
                         raise DeError(f"Pilih item {cat['name']} dari daftar")
                     name = listed[name.lower()]

@@ -131,16 +131,40 @@ def _grid(cells: list[tuple[str, str]], s: _S, cols: int = 4) -> Table:
                                    ("LEFTPADDING", (0, 0), (-1, -1), 8)]))
 
 
+def _reached(r: dict) -> dict:
+    """When each step was reached: sending, then the last move to each status (the handover by the PIC)."""
+    out = {"PENDING": r.get("submittedAt")} if r.get("submittedAt") else {}
+    for e in r.get("events") or []:
+        if e.get("kind") == "STATUS" and e.get("to"):
+            out[e["to"]] = e["at"]
+    ho = r.get("handover") or {}
+    if ho.get("at"):
+        out.setdefault("HANDOVER", ho["at"])
+    return out
+
+
+def summary(r: dict) -> str:
+    """The title of a request: its items ("Freezer 310L, Chiller × 2 +1"), else the form."""
+    items = r.get("items") or []
+    if not items:
+        return r["kindLabel"]
+    head = ", ".join(f"{i['name']} × {i['qty']}" if (i.get("qty") or 1) > 1 else i["name"] for i in items[:2])
+    return head + (f" +{len(items) - 2}" if len(items) > 2 else "")
+
+
 def _steps(r: dict, s: _S) -> Table:
     STEPS = list(de.STEPS_BY_KIND.get(r["kind"], de.STEPS))  # noqa: N806 - the steps of the request's form
     at = r["holdFrom"] if r["status"] == "ON_HOLD" else r["status"]
     idx = len(STEPS) - 1 if r["status"] == "DONE" else (STEPS.index(at) if at in STEPS else -1)
     cells, style = [], [("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
                         ("ROUNDEDCORNERS", [4, 4, 4, 4])]
+    when = _reached(r)
     for i, st in enumerate(STEPS):
         done, here = i < idx or r["status"] == "DONE", i == idx and r["status"] != "DONE"
         bg, fg = ("#1d4ed8", "#ffffff") if done else (STATUS_PILL.get(r["status"], ("#dbeafe", "#1e3a8a")) if here else ("#f1f5f9", "#94a3b8"))
-        cells.append(Paragraph(f"<font color='{fg}'><b>{i + 1}. {_esc(de.status_label(r['kind'], st))}</b></font>", s.center))
+        # the date each step was reached, under its name (2026-11-17, as on the screen)
+        date = f"<br/><font size=6.5>{_wib(when[st])[:16]}</font>" if (done or here) and when.get(st) else ""
+        cells.append(Paragraph(f"<font color='{fg}'><b>{i + 1}. {_esc(de.status_label(r['kind'], st))}</b>{date}</font>", s.center))
         style.append(("BACKGROUND", (i, 0), (i, 0), colors.HexColor(bg)))
     style += [("LINEAFTER", (i, 0), (i, 0), 2, colors.white) for i in range(len(STEPS) - 1)]
     return Table([cells], colWidths=[WIDTH / len(STEPS)] * len(STEPS), style=TableStyle(style))
@@ -230,8 +254,9 @@ def build(request_id: str, share_url: Optional[str] = None, public: bool = False
     story: list = []
 
     # title: kind + number, status and urgency pills
-    story.append(Table([[[Paragraph(f"<font color='{HEX['brand']}'><b>{_esc(doc_title).upper()}</b></font>", s.label),
-                          Paragraph(_esc(r["kindLabel"]), s.title),
+    # the title is what is asked, like an issue (2026-11-17): "MAINTENANCE · LAPORAN PENGAJUAN" then the items
+    story.append(Table([[[Paragraph(f"<font color='{HEX['brand']}'><b>{_esc(r['kindLabel']).upper()} · {_esc(doc_title).upper()}</b></font>", s.label),
+                          Paragraph(_esc(summary(r)), s.title),
                           Paragraph(f"{_esc(r['branchName'])} ({_esc(r['branchCode'])}) · PIC {_esc(r['picName'])}", s.small)],
                          [_pill(r["statusLabel"], STATUS_PILL.get(r["status"], ("#f1f5f9", "#334155")), s, 34 * mm), Spacer(1, 3),
                           _pill(f"Urgensi {r['urgencyLabel']}", URGENCY_PILL.get(r["urgency"], ("#f1f5f9", "#334155")), s, 34 * mm)]]],
@@ -413,7 +438,7 @@ def _finish(doc, story, r: dict, s: _S, public: bool, doc_title: str, share_url:
         canvas.drawString(MARGIN + 30 * mm, h - 11.5 * mm, doc_title)
         canvas.setFillColor(MUTED)
         canvas.setFont("Helvetica", 7.5)
-        canvas.drawString(MARGIN + 30 * mm, h - 15.5 * mm, "Maintenance Request · Maintenance & Pengadaan")
+        canvas.drawString(MARGIN + 30 * mm, h - 15.5 * mm, f"{r['kindLabel']} · {r['branchName']}")
         canvas.setFillColor(INK)
         canvas.setFont("Helvetica-Bold", 12)
         canvas.drawRightString(w - MARGIN, h - 11.5 * mm, r["number"] or "")

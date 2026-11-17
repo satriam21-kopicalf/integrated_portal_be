@@ -311,3 +311,15 @@ def test_zero_quantity_only_in_a_cost_control_correction():
     assert w._qty('2,5') == Decimal('2.500')
     with pytest.raises(w.WasteError):
         w._qty(-1, allow_zero=True)
+
+
+def test_rejecting_an_approved_entry_needs_a_reason(monkeypatch):
+    # 2026-11-17: Cost Control may reject an approved entry, with the reason
+    import pytest
+    from app import waste as w
+    monkeypatch.setattr(w.db, 'fetchrow', lambda q, p=None: {'?column?': 1})  # one of the entries is approved
+    monkeypatch.setattr(w.db, 'fetch', lambda q, p=None: [{'id': 'a', 'branch_name': 'X', 'item_name': 'Y'}])
+    with pytest.raises(w.WasteError):
+        w.review(['a'], 'rejected', ' ', {'username': 'cc'}, None)
+    assert w.review(['a'], 'rejected', 'foto tidak sesuai', {'username': 'cc'}, None)
+    assert w.review(['a'], 'approved', None, {'username': 'cc'}, None)  # approving needs no reason

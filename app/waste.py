@@ -565,6 +565,10 @@ def review(ids: list[str], status: str, note: Optional[str], user: dict, branche
     """Approve / reject entries in the reviewer's branches; returns the rows changed (the running stock takes the
     approved waste at once)."""
     from app import running_stock
+    # an approved entry is already in the COGS and the stock: rejecting it later needs the reason (2026-11-17)
+    if status == "rejected" and len((note or "").strip()) < 3 and db.fetchrow(
+            f"SELECT 1 FROM {T} WHERE id::text = ANY(%s) AND status = 'approved' LIMIT 1", (ids,)):
+        raise WasteError("Tulis alasan menolak waste yang sudah disetujui")
     running_stock.clear()
     return db.fetch(
         f"""UPDATE {T} SET status = %(s)s, review_note = %(n)s, reviewed_by = %(by)s, reviewed_at = now()

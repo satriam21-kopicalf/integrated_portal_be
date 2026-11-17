@@ -199,7 +199,10 @@ def reviews(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Que
 
 @router.post("/reviews")
 def review(body: ReviewIn, request: Request, user: dict = Depends(require_page(REV))) -> dict:
-    rows = waste.review(body.ids, body.status, body.note, user, allowed_branches())
+    try:
+        rows = waste.review(body.ids, body.status, body.note, user, allowed_branches())
+    except waste.CheckInError as exc:
+        _refuse(exc)
     if not rows:
         raise HTTPException(404, detail="Waste tidak ditemukan")
     verdict = "disetujui" if body.status == "approved" else "ditolak"

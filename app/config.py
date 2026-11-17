@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     # Equipment (document link printed on the PDF, technician photo link). Links made earlier on the portal keep working.
     operations_url: str = "https://operations.kopicalf.co.id"
     cotr_url: str = "https://cotr.kopicalf.co.id"  # the driver app (role driver, migration 046)
+    # the HRMS API (be-kopicalf-hrms, same VPS): verifies the attendance app's HRMS token for /api/auth/hrms-exchange
+    hrms_api_url: str = "http://host.docker.internal:8001"
     # Daily housekeeping (app/maintenance.py); 0 = keep forever
     activity_retention_days: int = 90
     gsheet_retention_days: int = 30

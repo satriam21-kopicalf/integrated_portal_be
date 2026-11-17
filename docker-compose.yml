@@ -6,6 +6,9 @@ services:
     env_file: .env
     ports:
       - "8002:8002"
+    # the HRMS API (kopicalf-hr-api, port 8001 of this VPS) for /api/auth/hrms-exchange
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       # Generated Excel exports (auto-deleted after EXPORT_TTL_HOURS)
       - exports:/data/exports

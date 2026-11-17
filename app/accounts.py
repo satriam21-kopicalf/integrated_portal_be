@@ -137,6 +137,14 @@ def find_for_login(identifier: str, method: str) -> Optional[dict]:
         f"WHERE lower(u.{column}) = lower(%s)", (identifier.strip(),))
 
 
+def find_by_hrms_employee(employee_id: str) -> Optional[dict]:
+    """The person account linked to an HRMS employee (the attendance app sign-in, routes/auth.py hrms_exchange);
+    shared and test accounts are never linked (migration 115)."""
+    return db.fetchrow(
+        f"SELECT u.id, u.username, u.role, u.is_active FROM {T_USER} u "
+        f"WHERE u.hrms_employee_id = %s AND u.account_kind = 'person' LIMIT 1", (str(employee_id),))
+
+
 def get_user(user_id: str) -> Optional[dict]:
     return db.fetchrow(f"SELECT {USER_COLUMNS} FROM {USER_FROM} WHERE u.id = %s", (user_id,))
 

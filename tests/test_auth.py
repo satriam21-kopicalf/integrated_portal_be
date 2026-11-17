@@ -487,3 +487,40 @@ def test_activity_reset_is_superadmin_only_and_logged(anon, store, fake_db, monk
     assert calls == [date(2026, 10, 1), None]
     entry = [e for e in fake_db.activity if e["action"] == "system.logs_reset"]
     assert len(entry) == 2 and entry[0]["username"] == "superadmin" and entry[0]["details"]["removed"] == 42
+
+
+# ---------------------------------------------------------------- attendance app sign-in (HRMS token, 2026-11-17)
+def _hrms(monkeypatch, store, employees):
+    """HRMS answers: token -> employee id (None = refused); the store finds the person account of an employee."""
+    from fastapi import HTTPException
+    from app.routes import auth as auth_routes
+
+    def employee_of(token):
+        if token == "hrms-down-token":
+            raise HTTPException(status_code=503, detail="HRMS tidak dapat dihubungi")
+        return employees.get(token)
+    monkeypatch.setattr(auth_routes, "hrms_employee_of", employee_of)
+    monkeypatch.setattr(accounts, "find_by_hrms_employee", lambda e: next(
+        (u for u in store.users.values() if u.get("hrms_employee_id") == str(e) and u.get("account_kind", "person") == "person"), None))
+
+
+def test_hrms_exchange_gives_a_session_of_the_linked_account(monkeypatch, store, anon):
+    store.users[store.user["id"]]["hrms_employee_id"] = "77"
+    _hrms(monkeypatch, store, {"valid-hrms-token": "77"})
+    r = anon.post("/api/auth/hrms-exchange", json={"accessToken": "valid-hrms-token"})
+    assert r.status_code == 200 and r.json()["user"]["username"] == "kasir" and r.json()["token"]
+    anon.cookies.clear()  # the app sends the token as Bearer, no cookie
+    me = anon.get("/api/auth/me", headers={"Authorization": f"Bearer {r.json()['token']}", "X-Kopicalf-App": "attendance"})
+    assert me.status_code == 200 and me.json()["user"]["username"] == "kasir"
+
+
+def test_hrms_exchange_refuses_without_a_linked_person_account(monkeypatch, store, anon):
+    store.add("bersama", "bersama@kopicalf.co.id", "Akun Bersama", "Bersama123", hrms_employee_id="88", account_kind="shared")
+    store.users[store.user["id"]].update(hrms_employee_id="99", is_active=False)
+    _hrms(monkeypatch, store, {"token-unlinked": "55", "token-shared": "88", "token-inactive": "99"})
+    assert anon.post("/api/auth/hrms-exchange", json={"accessToken": "token-refused"}).status_code == 401
+    for token, code in (("token-unlinked", "not_linked"), ("token-shared", "not_linked"), ("token-inactive", "inactive")):
+        r = anon.post("/api/auth/hrms-exchange", json={"accessToken": token})
+        assert r.status_code == 403 and r.json()["code"] == code
+    assert anon.post("/api/auth/hrms-exchange", json={"accessToken": "hrms-down-token"}).status_code == 503
+    assert not store.sessions  # nothing signed in

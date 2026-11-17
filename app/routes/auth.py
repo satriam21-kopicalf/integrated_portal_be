@@ -217,6 +217,54 @@ def login(req: LoginRequest, request: Request):
     return response
 
 
+class HrmsExchange(BaseModel):
+    accessToken: str = Field(min_length=10, max_length=4000)
+
+
+NOT_LINKED = "Akun HRMS Anda belum terhubung ke akun portal. Hubungi admin untuk menautkannya."
+
+
+def hrms_employee_of(access_token: str) -> Optional[str]:
+    """The HRMS employee id of an HRMS access token, asked to the HRMS API (it refuses an expired token or an inactive
+    user); None when HRMS refuses it. Raises HTTPException 503 when HRMS cannot be reached."""
+    import requests
+    try:
+        r = requests.get(f"{get_settings().hrms_api_url.rstrip('/')}/api/v1/auth/me",
+                         headers={"Authorization": f"Bearer {access_token}"}, timeout=8)
+    except requests.RequestException as exc:
+        logger.warning("hrms exchange: HRMS unreachable: %s", exc)
+        raise HTTPException(status_code=503, detail="HRMS tidak dapat dihubungi, coba lagi sebentar.") from None
+    if r.status_code != 200:
+        return None
+    emp = (r.json() or {}).get("employee_id")
+    return str(emp) if emp not in (None, "") else None
+
+
+@router.post("/hrms-exchange")
+def hrms_exchange(body: HrmsExchange, request: Request):
+    """The attendance app (kopicalf-attandance, 2026-11-17): its HRMS token for a portal session of the person account
+    linked to the same employee (user_account.hrms_employee_id, account_kind person, active). The forms it sends are
+    then owned and scored like those of Operations. No password is involved; the session is short (session_hours) and
+    returned as a Bearer token (the app sends X-Kopicalf-App: attendance)."""
+    employee = hrms_employee_of(body.accessToken)
+    if not employee:
+        return JSONResponse({"error": "Sesi HRMS tidak valid, silakan login ulang."}, status_code=401)
+    row = accounts.find_by_hrms_employee(employee)
+    if not row or not row["is_active"]:
+        activity.record("auth.login_failed", user=row, request=request, status="failed",
+                        summary="Login aplikasi attendance ditolak: karyawan belum terhubung ke akun portal",
+                        details={"reason": "not_linked" if not row else "inactive", "hrmsEmployeeId": employee})
+        return JSONResponse({"error": NOT_LINKED if not row else "Akun portal Anda dinonaktifkan. Hubungi administrator.",
+                             "code": "not_linked" if not row else "inactive"}, status_code=403)
+    ttl = timedelta(hours=get_settings().session_hours)
+    token = new_token()
+    ip = request.client.host if request.client else None
+    accounts.create_session(str(row["id"]), token_hash(token), ttl, ip, request.headers.get("user-agent"))
+    activity.record("auth.login", user=row, request=request, summary="Login aplikasi attendance (HRMS)",
+                    details={"method": "hrms", "app": "attendance"})
+    return {"token": token, "expiresIn": int(ttl.total_seconds()), "user": signed_in_user(accounts.get_user(str(row["id"])))}
+
+
 @router.post("/logout")
 def logout(request: Request):
     token = _token(request)

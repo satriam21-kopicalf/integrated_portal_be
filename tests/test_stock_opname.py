@@ -81,7 +81,7 @@ def test_gateway_down_is_reported(anon, store, monkeypatch):
 
 def test_superadmin_creates_cost_control_without_branches(anon, store):
     login(anon, "superadmin", "Admin1234")
-    r = anon.post("/api/users", json={"username": "cc.two", "email": "cc2@kopicalf.co.id", "password": "Control1234",
+    r = anon.post("/api/users", json={"accountKind": "test", "username": "cc.two", "email": "cc2@kopicalf.co.id", "password": "Control1234",
                                       "role": "cost_control", "branches": ["CCI01"]})
     user = r.json()["user"]
     assert r.status_code == 201 and user["role"] == "cost_control" and user["branches"] == []

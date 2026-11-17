@@ -54,7 +54,7 @@ def test_role_pages_are_edited_by_superadmins_only(anon, store):
 
 def test_user_form_sets_pages_and_registers_new_names(anon, store, page_access):
     login(anon, "superadmin", "Admin1234")
-    r = anon.post("/api/users", json={"username": "pic.baru", "email": "pic.baru@kopicalf.co.id", "role": "user",
+    r = anon.post("/api/users", json={"accountKind": "test", "username": "pic.baru", "email": "pic.baru@kopicalf.co.id", "role": "user",
                                       "branches": ["CCI01"], "password": "Rahasia1234", "jobTitle": "Area  Manager",
                                       "department": "Operations", "pageOverrides": {"cc.ratio": True}})
     assert r.status_code == 201, r.text

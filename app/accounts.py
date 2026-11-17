@@ -36,7 +36,7 @@ USER_COLUMNS = """u.id, u.username, u.email, u.full_name, u.role, u.is_active, u
     u.department, u.notes, u.must_change_password, u.last_login_at, u.last_login_ip,
     u.failed_login_attempts, u.locked_until, u.password_changed_at, u.created_at, u.updated_at, u.avatar_updated_at,
     u.employee_number, u.gender, u.birth_date, u.address, u.city, u.work_branch_code, u.profile_updated_at,
-    u.business_line, u.hidden_pages, u.hrms_employee_id, u.hrms_linked_by, u.hrms_status, u.hrms_synced_at,
+    u.business_line, u.hidden_pages, u.hrms_employee_id, u.hrms_linked_by, u.hrms_status, u.hrms_synced_at, u.account_kind,
     (SELECT b.branch_name FROM integration_esb.master_branches b WHERE b.branch_code = u.work_branch_code
      ORDER BY COALESCE(b.is_deleted, false) LIMIT 1) AS work_branch_name,
     (SELECT array_agg(x.branch_code ORDER BY x.branch_code) FROM integration_portal.user_branch x
@@ -51,6 +51,7 @@ EDITABLE = {
     "username": "username", "email": "email", "role": "role", "isActive": "is_active", "notes": "notes",
     "mustChangePassword": "must_change_password", "businessLine": "business_line", "hiddenPages": "hidden_pages",
     "hrmsEmployeeId": "hrms_employee_id", "hrmsLinkedBy": "hrms_linked_by",  # migration 110, app/hrms_sync.py
+    "accountKind": "account_kind",  # person | shared | test (migration 115)
     **PROFILE_FIELDS,
 }
 
@@ -103,6 +104,7 @@ def public_user(row: Optional[dict]) -> Optional[dict]:
         # the HRMS employee the account follows (migration 110): job title / department come from HRMS
         "hrmsEmployeeId": row.get("hrms_employee_id"),
         "hrmsLinkedBy": row.get("hrms_linked_by"),
+        "accountKind": row.get("account_kind") or "person",
         # the employee left in HRMS: only marked, a superadmin deactivates the account (migration 112)
         "hrmsLeft": (row.get("hrms_status") or "").strip().lower() == "keluar",
         "hrmsStatus": row.get("hrms_status"),

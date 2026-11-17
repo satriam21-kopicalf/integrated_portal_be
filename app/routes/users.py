@@ -58,6 +58,8 @@ class UserFields(BaseModel):
     cotrDriver: Optional[str] = Field(default=None, max_length=40)
     # the HRMS employee of a person account (migration 110): job title / department follow HRMS ("" = unlink)
     hrmsEmployeeId: Optional[str] = Field(default=None, max_length=64)
+    # person (made from its HRMS employee) | shared (a team sign-in) | test (migration 115)
+    accountKind: Optional[Literal["person", "shared", "test"]] = None
 
 
 def _error(message: str, status: int = 422, field: Optional[str] = None) -> JSONResponse:
@@ -244,6 +246,11 @@ def update_user(user_id: UUID, body: UserFields, request: Request, actor: dict =
     error = _out_of_scope(actor, current)
     if error:
         return error
+    # the last active superadmin first: it says more than any field of the form (e.g. the HRMS employee, 115)
+    leaves_superadmin = current["role"] == "superadmin" and current["is_active"] and (
+        (body.role or "superadmin") != "superadmin" or body.isActive is False)
+    if leaves_superadmin and accounts.count_active_superadmins(exclude_id=uid) == 0:
+        return _error("Minimal harus ada satu superadmin aktif", 409, "role")
     data, error = _clean(body, creating=False, user_id=uid, current=current)
     if error:
         return error
@@ -256,10 +263,6 @@ def update_user(user_id: UUID, body: UserFields, request: Request, actor: dict =
     is_self = uid == str(actor["id"])
     if is_self and data.get("isActive") is False:
         return _error("Anda tidak dapat menonaktifkan akun Anda sendiri", 409, "isActive")
-    leaves_superadmin = current["role"] == "superadmin" and current["is_active"] and (
-        data.get("role", "superadmin") != "superadmin" or data.get("isActive", True) is False)
-    if leaves_superadmin and accounts.count_active_superadmins(exclude_id=uid) == 0:
-        return _error("Minimal harus ada satu superadmin aktif", 409, "role")
     user = accounts.update_user(uid, data, str(actor["id"]), password_hash)
     error = _after_save(user, body, actor)
     if error:

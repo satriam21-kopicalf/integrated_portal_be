@@ -81,13 +81,27 @@ def test_values_and_diff():
     assert diff(acc_row, e) == ["jobTitle"]  # an empty HRMS phone keeps the portal one
 
 
-def test_fill_unlinked_account_keeps_typed_values_and_unlink():
+def test_fill_person_account_needs_its_hrms_employee():
+    # migration 115: a person account is made from HRMS; it cannot be created or left without its employee
     from app.hrms_sync import fill
-    data = {"jobTitle": "Barista"}
-    assert fill(data, {}, "user") is None and data == {"jobTitle": "Barista"}
-    data = {"hrmsEmployeeId": " "}
+    assert fill({"jobTitle": "Barista"}, {}, "user")                                   # new person, no employee
+    assert fill({"hrmsEmployeeId": " "}, {"hrms_employee_id": "e1"}, "user")           # unlink a person
+    assert fill({"role": "user"}, {"id": "a", "role": "outlet"}, "user")                # outlet turned into a person
+    assert fill({}, {"id": "a", "role": "user", "account_kind": "test"}, "user") is None  # stays test (kind kept)
+    assert fill({"accountKind": "person"}, {"id": "a", "role": "user", "account_kind": "shared"}, "user")
+    # an existing unlinked account can still be edited, deactivated or get a new password
+    assert fill({"isActive": False}, {"id": "a", "role": "user", "account_kind": "person"}, "user") is None
+    assert fill({"notes": "x"}, {"hrms_employee_id": "e1", "account_kind": "person"}, "user") is None
+
+
+def test_fill_shared_and_test_accounts_are_never_linked():
+    from app.hrms_sync import fill
+    data = {"accountKind": "shared", "jobTitle": "Admin"}
+    assert fill(data, {}, "cotr_admin") is None and data == {"accountKind": "shared", "jobTitle": "Admin"}
+    data = {"accountKind": "test"}
     assert fill(data, {"hrms_employee_id": "e1"}, "user") is None
-    assert data == {"hrmsEmployeeId": None, "hrmsLinkedBy": None}
+    assert data == {"accountKind": "test", "hrmsEmployeeId": None, "hrmsLinkedBy": None}
+    assert fill({"accountKind": "test", "hrmsEmployeeId": "e1"}, {}, "user")
 
 
 def test_profile_complete_without_job_title_when_linked():

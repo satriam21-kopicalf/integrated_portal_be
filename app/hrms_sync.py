@@ -82,7 +82,7 @@ def accounts() -> list[dict]:
                                COALESCE(NULLIF(u.employee_number, ''),
                                         (SELECT d.employee_id FROM {P}.cotr_driver d WHERE d.user_id = u.id LIMIT 1))
                                    AS employee_number
-                          FROM {P}.user_account u WHERE u.role = ANY(%s)
+                          FROM {P}.user_account u WHERE u.role = ANY(%s) AND u.account_kind = 'person'
                          ORDER BY u.full_name NULLS LAST, u.username""",
                     (list(SCOPE_ROLES),))
 
@@ -251,15 +251,29 @@ def fill(data: dict, current: Optional[dict], role: str) -> Optional[str]:
         if (current or {}).get("hrms_employee_id") or "hrmsEmployeeId" in data:
             data.update(hrmsEmployeeId=None, hrmsLinkedBy=None)
         return None
+    # a person account is made from its HRMS employee; a shared / test account is never linked (migration 115)
+    kind = data.get("accountKind") or (current or {}).get("account_kind") or "person"
+    if kind != "person":
+        if data.get("hrmsEmployeeId"):
+            return "Akun bersama / testing tidak ditautkan ke karyawan HRMS."
+        if (current or {}).get("hrms_employee_id") or "hrmsEmployeeId" in data:
+            data.update(hrmsEmployeeId=None, hrmsLinkedBy=None)
+        return None
+    need = "Pilih karyawan HRMS untuk akun orang (atau tandai sebagai akun bersama / testing)."
     if "hrmsEmployeeId" not in data:
+        # only a new account, one turned into a person role or into a person: editing, deactivating or resetting
+        # the password of an existing account is never blocked
+        cur = current or {}
+        becomes = not cur or cur.get("role") not in SCOPE_ROLES or (cur.get("account_kind") or "person") != "person"
+        if not cur.get("hrms_employee_id") and becomes:
+            return need
         for k in locked(current or {}):
             data.pop(k, None)
         return None
     emp_id = (data["hrmsEmployeeId"] or "").strip() or None
     data["hrmsEmployeeId"] = emp_id
     if not emp_id:
-        data["hrmsLinkedBy"] = None
-        return None
+        return need
     if not available():
         return "Data HRMS (sk_hrms) tidak tersedia di database ini."
     found = employees("WHERE e.id = %s", (emp_id,))

@@ -210,7 +210,7 @@ def test_user_role_has_no_user_management(anon, store):
 
 def test_user_crud(anon, store):
     login(anon, "superadmin", "Admin1234")
-    body = {"username": "Budi.S", "email": "Budi@Kopicalf.co.id", "fullName": "  Budi   Santoso ", "role": "user",
+    body = {"accountKind": "test", "username": "Budi.S", "email": "Budi@Kopicalf.co.id", "fullName": "  Budi   Santoso ", "role": "user",
             "password": "Budi12345", "phoneNumber": "0812-3456-789", "department": "Operations",
             "branches": ["TGP17", "CCI01", "CCI01"]}
     res = anon.post("/api/users", json=body)
@@ -346,7 +346,7 @@ def test_admin_creates_login_only_and_user_completes_profile(anon, store, monkey
     from app import profile
     monkeypatch.setattr(profile, "branch_exists", lambda code: code == "CCI01")
     login(anon, "superadmin", "Admin1234")
-    res = anon.post("/api/users", json={"username": "baru", "email": "baru@kopicalf.co.id", "password": "Baru12345", "branches": ["CCI01"]})
+    res = anon.post("/api/users", json={"accountKind": "test", "username": "baru", "email": "baru@kopicalf.co.id", "password": "Baru12345", "branches": ["CCI01"]})
     assert res.status_code == 201, res.text
     created = res.json()["user"]
     assert created["fullName"] is None and created["displayName"] == "baru" and created["profileComplete"] is False
@@ -452,7 +452,7 @@ def test_user_changes_are_recorded(anon, store, fake_db):
 
 def test_create_with_identity_and_filter_by_branch(anon, store):
     login(anon, "superadmin", "Admin1234")
-    body = {"username": "okta.fajri", "email": "okta@kopicalf.co.id", "password": "Okta12345", "role": "user",
+    body = {"accountKind": "test", "username": "okta.fajri", "email": "okta@kopicalf.co.id", "password": "Okta12345", "role": "user",
             "branches": ["TGP17"], "fullName": "Okta Fajri", "phoneNumber": "0812-3456-7890", "jobTitle": "PIC Outlet",
             "department": "Operations", "notes": "Area Tangerang"}
     created = anon.post("/api/users", json=body).json()["user"]

@@ -166,3 +166,20 @@ def test_a_bundle_named_without_contents_is_listed_to_check(monkeypatch):
     found = {b['id']: b for b in mc.esb_bundles(mapped)}
     assert not found['CALF:171']['ok'] and 'paket kosong' in found['CALF:171']['reasons'][0]
     assert 'CALF:171' not in mc.costing_cards()[1]
+
+
+def test_bundle_contents_set_in_assign_menus(monkeypatch):
+    # 2026-11-17: BUNDLING PROMO GOFOOD 3 ES KOPI has no contents in ESB; Cost Control sets 3 x the Premium card
+    import pytest
+    saved, deleted = [], []
+    monkeypatch.setattr(mc.db, 'fetch', lambda q, p=None: [{'code': 'P', 'name': 'Premium'}, {'code': 'C', 'name': 'Chocolate'}])
+    monkeypatch.setattr(mc, 'save_recipe', lambda key, data, user: saved.append((key, data)) or {'code': data['code']})
+    monkeypatch.setattr(mc, 'delete_recipe', lambda code: deleted.append(code) or True)
+    out = mc.set_bundle('CALF:171', 'BUNDLING PROMO GOFOOD 3 ES KOPI', [{'card': 'P', 'qty': 3}], {'username': 'cc'})
+    key, data = saved[0]
+    assert out == {'code': 'BND-CALF-171'} and key is None and data['code'] == 'BND-CALF-171'
+    assert data['lines'] == [{'type': 'menu', 'code': 'P', 'name': 'Premium', 'qty': 3.0}]
+    assert data['menus'] == [{'id': 'CALF:171', 'name': 'BUNDLING PROMO GOFOOD 3 ES KOPI'}]
+    with pytest.raises(mc.CostingError):
+        mc.set_bundle('CALF:171', 'X', [{'card': 'NOPE', 'qty': 1}], {'username': 'cc'})
+    assert mc.set_bundle('CALF:171', 'X', [], {'username': 'cc'}) is None and deleted == ['BND-CALF-171']

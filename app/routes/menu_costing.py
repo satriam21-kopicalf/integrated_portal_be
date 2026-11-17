@@ -136,6 +136,29 @@ def menus(days: int = Query(90, ge=7, le=365), _: dict = Depends(require_page(CA
     return {"data": mc.menus(days)}
 
 
+class BundleLine(BaseModel):
+    card: str = Field(min_length=1, max_length=60)
+    qty: float = Field(gt=0, le=1000)
+
+
+class BundleIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    contents: list[BundleLine] = Field(default_factory=list, max_length=20)
+
+
+@router.put("/sales-calc/menus/{menu_id}/bundle")
+def set_bundle(menu_id: str, body: BundleIn, request: Request, user: dict = Depends(require_page(CALC))) -> dict:
+    """Assign Menus (2026-11-17): the contents of a bundle (cards x quantity) without making a recipe card by hand."""
+    try:
+        out = mc.set_bundle(menu_id, body.name, [c.model_dump() for c in body.contents], user)
+    except mc.CostingError as exc:
+        _refuse(exc)
+    activity.record("cc.menu-recipe", user=user, request=request, page="/cost-control/sales-calculator",
+                    summary=f"Isi bundling {body.name} " + ("diatur" if out else "dihapus"),
+                    details={"menu": menu_id, "contents": [c.model_dump() for c in body.contents]})
+    return {"card": out}
+
+
 @router.get("/sales-calc/menus/{menu_id}/package")
 def package(menu_id: str, _: dict = Depends(require_page(CALC))) -> dict:
     try:

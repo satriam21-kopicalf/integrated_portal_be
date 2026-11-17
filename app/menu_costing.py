@@ -513,6 +513,34 @@ def package_contents(menu_id: str) -> dict:
     return {"id": menu_id, "name": row["menu_name"], "groups": out}
 
 
+def bundle_code(menu_id: str) -> str:
+    return "BND-" + menu_id.replace(":", "-").upper()
+
+
+def set_bundle(menu_id: str, menu_name: str, contents: list[dict], user: dict) -> Optional[dict]:
+    """The contents of a bundle set in Assign Menus (2026-11-17, a bundle whose ESB contents are missing or unsure, e.g.
+    BUNDLING PROMO GOFOOD 3 ES KOPI): a card BND-<menu> of menu lines (the cards of the contents x their quantity),
+    assigned to the menu, so its materials and HPP follow those cards. No contents: the card is removed (None)."""
+    code = bundle_code(menu_id)
+    names = {r["code"]: r["name"] for r in db.fetch(f"SELECT code, name FROM {P}.cc_menu_recipe")}
+    lines = []
+    for c in contents:
+        card, qty = str(c.get("card") or "").strip(), _f(c.get("qty"))
+        if not card:
+            continue
+        if card not in names:
+            raise CostingError(f"Kartu {card} tidak ditemukan")
+        if card == code:
+            raise CostingError("Bundling tidak boleh berisi kartunya sendiri")
+        lines.append({"type": "menu", "code": card, "name": names[card], "qty": qty})
+    if not lines:
+        delete_recipe(code)
+        return None
+    key = code if code in names else None
+    return save_recipe(key, {"code": code, "name": menu_name, "category": "Bundling", "lines": lines, "isActive": True,
+                             "note": "Isi bundling dari Assign Menus", "menus": [{"id": menu_id, "name": menu_name}]}, user)
+
+
 def delete_recipe(code: str) -> bool:
     with db.transaction() as conn:
         return conn.execute(f"DELETE FROM {P}.cc_menu_recipe WHERE code = %s", (code,)).rowcount > 0

@@ -18,7 +18,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
-from reportlab.platypus import Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import CondPageBreak, Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from app import damaged_equipment as de
 
@@ -105,30 +105,35 @@ def _pill(text: str, tone: tuple[str, str], s: _S, width: float) -> Table:
 
 
 def _section(n: int, title: str, s: _S, hint: str = "") -> Table:
-    """A numbered section heading: a blue number chip, the title and a thin rule."""
-    chip = Table([[Paragraph(f"<font color='white'><b>{n}</b></font>", s.pill)]], colWidths=[6 * mm], rowHeights=[6 * mm],
-                 style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), BRAND), ("ROUNDEDCORNERS", [3, 3, 3, 3]),
-                                   ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 1)]))
-    text = Paragraph(f"<b>{_esc(title)}</b>" + (f"  <font size=7.5 color='{HEX['muted']}'>{_esc(hint)}</font>" if hint else ""),
-                     ParagraphStyle("sec", parent=s.body, fontSize=11, leading=14))
-    head = Table([[chip, text]], colWidths=[9 * mm, WIDTH - 9 * mm],
-                 style=TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LINEBELOW", (0, 0), (-1, -1), 0.6, LINE),
-                                   ("LEFTPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 5), ("TOPPADDING", (0, 0), (-1, -1), 10)]))
+    """A document section heading (2026-11-18, formal report style): "1. TITLE" in small brand capitals, the hint in grey
+    on the right, a fine rule under it."""
+    head = Table([[Paragraph(f"<font color='{HEX['brand']}'><b>{n}.&nbsp;&nbsp;{_esc(title).upper()}</b></font>",
+                             ParagraphStyle("sec", parent=s.body, fontSize=9, leading=12)),
+                   Paragraph(_esc(hint), ParagraphStyle("sech", parent=s.small, alignment=TA_RIGHT))]],
+                 colWidths=[WIDTH * 0.6, WIDTH * 0.4],
+                 style=TableStyle([("VALIGN", (0, 0), (-1, -1), "BOTTOM"), ("LINEBELOW", (0, 0), (-1, -1), 0.8, INK),
+                                   ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                                   ("BOTTOMPADDING", (0, 0), (-1, -1), 3), ("TOPPADDING", (0, 0), (-1, -1), 14)]))
     head.keepWithNext = True  # never alone at the bottom of a page
     return head
 
 
 def _grid(cells: list[tuple[str, str]], s: _S, cols: int = 4) -> Table:
-    """Key facts as boxed cells (label above, value below)."""
+    """Key facts as a document field list (2026-11-18): label | value pairs, `cols // 2` pairs a row (2 by default),
+    fine rules between the rows, no boxes and no empty cells."""
+    pairs = max(1, cols // 2)
+    lw, vw = WIDTH / pairs * 0.36, WIDTH / pairs * 0.64
     rows = []
-    for i in range(0, len(cells), cols):
-        chunk = cells[i:i + cols] + [("", "")] * (cols - len(cells[i:i + cols]))
-        rows.append([[Paragraph(_esc(k).upper(), s.label), Paragraph(_esc(v) if v else "", s.value)] if k else "" for k, v in chunk])
-    return Table(rows, colWidths=[WIDTH / cols] * cols,
-                 style=TableStyle([("BOX", (0, 0), (-1, -1), 0.6, LINE), ("INNERGRID", (0, 0), (-1, -1), 0.6, LINE),
-                                   ("BACKGROUND", (0, 0), (-1, -1), SOFT), ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                                   ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-                                   ("LEFTPADDING", (0, 0), (-1, -1), 8)]))
+    for i in range(0, len(cells), pairs):
+        row = []
+        for k, v in cells[i:i + pairs]:
+            row += [Paragraph(_esc(k), s.small), Paragraph(f"<b>{_esc(v) if v else '-'}</b>", s.body)]
+        row += [""] * (2 * pairs - len(row))
+        rows.append(row)
+    return Table(rows, colWidths=[lw, vw] * pairs,
+                 style=TableStyle([("LINEBELOW", (0, 0), (-1, -1), 0.4, LINE), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                                   ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                                   ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 8)]))
 
 
 def _reached(r: dict) -> dict:
@@ -171,10 +176,11 @@ def _steps(r: dict, s: _S) -> Table:
 
 
 def _table(head: list[str], rows: list[list], widths: list[float], s: _S) -> Table:
-    data = [[Paragraph(h, s.th) for h in head]] + rows
-    style = [("BACKGROUND", (0, 0), (-1, 0), NAVY), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("LINEBELOW", (0, 1), (-1, -1), 0.4, LINE),
-             ("BOX", (0, 0), (-1, -1), 0.6, LINE), ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5)]
-    style += [("BACKGROUND", (0, i), (-1, i), SOFT) for i in range(2, len(data), 2)]
+    # light header and fine rules (2026-11-18, report style): grey capitals on a pale band, no box
+    data = [[Paragraph(h.upper(), s.label) for h in head]] + rows
+    style = [("BACKGROUND", (0, 0), (-1, 0), HEAD), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("LINEBELOW", (0, 0), (-1, 0), 0.8, MUTED),
+             ("LINEBELOW", (0, 1), (-1, -1), 0.4, LINE), ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+             ("LEFTPADDING", (0, 0), (-1, -1), 5)]
     return Table(data, colWidths=[WIDTH * w for w in widths], repeatRows=1, style=TableStyle(style))
 
 
@@ -259,7 +265,7 @@ def build(request_id: str, share_url: Optional[str] = None, public: bool = False
                           Paragraph(_esc(summary(r)), s.title),
                           Paragraph(f"{_esc(r['branchName'])} ({_esc(r['branchCode'])}) · PIC {_esc(r['picName'])}", s.small)],
                          [_pill(r["statusLabel"], STATUS_PILL.get(r["status"], ("#f1f5f9", "#334155")), s, 34 * mm), Spacer(1, 3),
-                          _pill(f"Urgensi {r['urgencyLabel']}", URGENCY_PILL.get(r["urgency"], ("#f1f5f9", "#334155")), s, 34 * mm)]]],
+                          _pill(f"Prioritas {r['urgencyLabel']}", URGENCY_PILL.get(r["urgency"], ("#f1f5f9", "#334155")), s, 34 * mm)]]],
                        colWidths=[WIDTH - 36 * mm, 36 * mm],
                        style=TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0)])))
     story.append(Spacer(1, 8))
@@ -283,7 +289,7 @@ def build(request_id: str, share_url: Optional[str] = None, public: bool = False
 
     story.append(sec("Data pengajuan"))
     facts = [("Nomor", r["number"]), ("Tanggal pengajuan", _wib(r["submittedAt"])), ("Cabang", r["branchName"]), ("PIC", r["picName"]),
-             ("Jenis", r["kindLabel"]), ("Urgensi", r["urgencyLabel"]),
+             ("Jenis", r["kindLabel"]), ("Prioritas", r["urgencyLabel"] + (f" · {de.TIER_LABEL[r['tier']]}" if r.get("tier") in de.TIER_LABEL else "")),
              ("Lokasi saat kirim", "-" if r["distanceM"] is None else f"{r['distanceM']} m dari outlet" + (" (di luar radius)" if r["outsideRadius"] else "")),
              ("Waktu proses", f"{_hours(t['workHours'])}" + (f" / target {_hours(t['slaHours'])}" if t["slaHours"] else "")),
              ("Target selesai", _wib(t.get("dueAt")) + (" (disesuaikan tim)" if t.get("targetAdjusted") else "")),
@@ -298,9 +304,10 @@ def build(request_id: str, share_url: Optional[str] = None, public: bool = False
 
     story.append(sec("Daftar item", f"{len(r['items'])} item"))
     rows = [[Paragraph(str(i), s.body), Paragraph(f"<b>{_esc(it['name'])}</b><br/><font size=7 color='{HEX['muted']}'>{_esc(it['category'])} · {_esc(it['group'])}</font>", s.body),
-             Paragraph(str(it["qty"]), s.body), Paragraph(_esc(it["location"] or "-"), s.body), Paragraph(de.URGENCY_LABEL[it["urgency"]], s.body),
+             Paragraph(str(it["qty"]), s.body), Paragraph(_esc(it["location"] or "-"), s.body),
              Paragraph(_esc(it["note"] or "-"), s.body)] for i, it in enumerate(r["items"], start=1)]
-    story.append(_table(["No", "Item & kategori", "Qty", "Lokasi", "Urgensi", "Keterangan"], rows, [0.05, 0.33, 0.06, 0.14, 0.11, 0.31], s))
+    # no urgency per item (2026-11-18): the priority is the request's, from the outlet's sales tier
+    story.append(_table(["No", "Item & kategori", "Qty", "Lokasi", "Keterangan"], rows, [0.05, 0.38, 0.07, 0.17, 0.33], s))
 
     story.append(sec("Analisis kerusakan" if r["kind"] == "REPAIR" else "Alasan pengadaan"))
     story.append(Table([[Paragraph(_esc(r["analysis"] or "-"), s.body)]], colWidths=[WIDTH],

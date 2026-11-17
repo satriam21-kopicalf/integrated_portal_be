@@ -402,7 +402,7 @@ def esb_bundles(mapped: dict[str, str]) -> list[dict]:
                               FROM {SCHEMA}.master_pos_menu
                              WHERE (jsonb_typeof(raw_data->'menuPackages'->'menuGroup') = 'array'
                                     AND jsonb_array_length(raw_data->'menuPackages'->'menuGroup') > 0)
-                                OR menu_name ILIKE '%%bundl%%'""")
+                                OR menu_name ILIKE '%%bundl%%' OR menu_name LIKE '%% + %%'""")  # "Brownies Fudgy + Es Kopi" (2026-11-17)
     except Exception:  # noqa: BLE001 - the menu master unreachable: the stored cards alone
         return []
     out = []

@@ -170,10 +170,22 @@ def set_item_active(code: str, active: bool, user: dict) -> dict:
     return {"code": row["code"], "name": row["name"], "active": row["is_active"]}
 
 
+REF_S = 600  # the ESB HPP and the purchase average change a few times a day: kept 10 minutes (2026-11-17, ~3 s a load)
+
+
 def esb_hpp(day: date) -> dict[str, tuple[float, int]]:
     """{item code: (median ESB HPP of one base unit, outlets)}: the unit cost (end HPP ÷ end qty, base unit) of the latest
     valuation period of every location within 60 days, the median over the locations so that one outlet with an odd
     moving average (stock near zero) does not lead (2026-11-05)."""
+    hit = _cache.get(f"hpp:{day}")
+    if hit is None:
+        hit = _esb_hpp(day)
+        if hit:
+            _cache.set(f"hpp:{day}", hit, REF_S)
+    return hit
+
+
+def _esb_hpp(day: date) -> dict[str, tuple[float, int]]:
     try:
         rows = db.fetch(
             f"""WITH v AS (SELECT DISTINCT ON (location_id, product_id) product_id, end_hpp / end_qty AS unit
@@ -192,6 +204,15 @@ def esb_hpp(day: date) -> dict[str, tuple[float, int]]:
 def purchase_avg(d_from: date, d_to: date) -> dict[tuple[str, str], float]:
     """{(product code, UOM): average price} of the ESB purchase invoice lines of the period (Σ qty × price / Σ qty);
     a purchase in another unit (a pack) is left out of the base-unit price."""
+    hit = _cache.get(f"avg:{d_from}:{d_to}")
+    if hit is None:
+        hit = _purchase_avg(d_from, d_to)
+        if hit:
+            _cache.set(f"avg:{d_from}:{d_to}", hit, REF_S)
+    return hit
+
+
+def _purchase_avg(d_from: date, d_to: date) -> dict[tuple[str, str], float]:
     try:
         rows = db.fetch(
             f"""SELECT l.product_code, upper(coalesce(l.uom_name, '')) AS uom, sum(l.qty * l.price) AS value, sum(l.qty) AS qty
@@ -456,18 +477,24 @@ def menus(days: int = 90) -> list[dict]:
 def _menus_sold(days: int) -> list[dict]:
     """The menus of the POS transactions with their brand, quantity of the last `days` days and last day sold."""
     since = date.today() - timedelta(days=days)
+    # 2026-11-17: summed per branch + menu first (millions of rows -> thousands), the branch company joined after; the
+    # same result, ~2 s instead of up to 10 s (the sort of the monthly rows spilled to disk)
     rows = db.fetch(
         f"""WITH br AS ({BRANCH_COMPANY}),
-                 every AS (SELECT coalesce(br.company, %(main)s) || ':' || a.menu_id AS menu_id, max(a.menu_name) AS name,
-                                  max(a.category) AS category, max(a.category_detail) AS detail,
-                                  string_agg(DISTINCT a.kind, ',') AS kinds, max(coalesce(br.company, %(main)s)) AS companies,
-                                  max(a.month) AS last_month
-                             FROM {P}.agg_menu_monthly a LEFT JOIN br ON br.branch_code = a.branch_code
-                            WHERE a.menu_id <> '?' GROUP BY 1),
-                 recent AS (SELECT coalesce(br.company, %(main)s) || ':' || a.menu_id AS menu_id, sum(a.qty) AS qty,
-                                   max(a.sales_date) AS last_day
-                              FROM {P}.agg_menu_daily a LEFT JOIN br ON br.branch_code = a.branch_code
-                             WHERE a.sales_date >= %(since)s AND a.menu_id <> '?' GROUP BY 1)
+                 m AS (SELECT branch_code, menu_id, max(menu_name) AS name, max(category) AS category,
+                              max(category_detail) AS detail, array_agg(DISTINCT kind) AS kinds, max(month) AS last_month
+                         FROM {P}.agg_menu_monthly WHERE menu_id <> '?' GROUP BY branch_code, menu_id),
+                 every AS (SELECT coalesce(br.company, %(main)s) || ':' || m.menu_id AS menu_id, max(m.name) AS name,
+                                  max(m.category) AS category, max(m.detail) AS detail,
+                                  (SELECT string_agg(DISTINCT k, ',') FROM unnest(array_agg(k_all)) AS k) AS kinds,
+                                  max(coalesce(br.company, %(main)s)) AS companies, max(m.last_month) AS last_month
+                             FROM m LEFT JOIN br ON br.branch_code = m.branch_code, LATERAL unnest(m.kinds) AS k_all
+                            GROUP BY 1),
+                 d AS (SELECT branch_code, menu_id, sum(qty) AS qty, max(sales_date) AS last_day
+                         FROM {P}.agg_menu_daily WHERE sales_date >= %(since)s AND menu_id <> '?' GROUP BY branch_code, menu_id),
+                 recent AS (SELECT coalesce(br.company, %(main)s) || ':' || d.menu_id AS menu_id, sum(d.qty) AS qty,
+                                   max(d.last_day) AS last_day
+                              FROM d LEFT JOIN br ON br.branch_code = d.branch_code GROUP BY 1)
             SELECT coalesce(e.menu_id, r.menu_id) AS menu_id, e.name, e.category, e.detail, e.kinds, e.companies, e.last_month,
                    r.qty, r.last_day
               FROM every e FULL JOIN recent r ON r.menu_id = e.menu_id""",

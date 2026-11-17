@@ -503,7 +503,9 @@ def delete(user: dict, entry_id: str) -> Optional[dict]:
 # ---------------------------------------------------------------- monitoring & review
 
 def monitor(date_from: date, date_to: date, branches: Optional[list[str]], scope: str = "", category: str = "",
-            status: str = "", user_id: str = "", limit: int = 2000, q: str = "") -> dict:
+            status: str = "", user_id: str = "", limit: int = VALUE_ROWS, q: str = "") -> dict:
+    # 2026-11-17: every entry of the period and filter is listed (was 2,000: a month of every outlet has ~9k); the page
+    # shows them a page at a time
     where = ["e.business_date BETWEEN %(a)s AND %(b)s"]
     params: dict[str, Any] = {"a": date_from, "b": date_to, "lim": limit}
     if branches is not None:

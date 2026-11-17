@@ -45,13 +45,11 @@ def test_procurement_has_its_own_flow():
 
 def test_priority_from_impact_and_sales_tier(monkeypatch):
     monkeypatch.setattr(de, "branch_tiers", lambda: {"TOP": "A", "MID": "B", "LOW": "C"})
-    assert de.priority("REPAIR", "LOW", "STOPS", None) == ("HIGH", "C")       # a stopped small outlet still comes first
-    assert de.priority("REPAIR", "TOP", "MINOR", None) == ("NORMAL", "A")     # a scratch at the top outlet is not critical
-    assert de.priority("REPAIR", "MID", "STOPS", None) == ("CRITICAL", "B")
-    assert de.priority("REPAIR", "NEW", "DEGRADED", None) == ("HIGH", "B")    # a branch without sales yet: tier B
-    assert de.priority("PROCUREMENT", "TOP", None, "REPLACE") == ("HIGH", "A")
-    assert de.priority("PROCUREMENT", "LOW", None, "OTHER") == ("PLANNED", "C")
-    assert de.priority("REPAIR", "TOP", None, None) == ("NORMAL", "A")       # not chosen yet
+    # only the sales tier sets the priority (an alert for the team, 2026-11-17)
+    assert de.priority("REPAIR", "TOP", "MINOR", None) == ("CRITICAL", "A")
+    assert de.priority("REPAIR", "LOW", "STOPS", None) == ("NORMAL", "C")
+    assert de.priority("PROCUREMENT", "MID", None, "OTHER") == ("HIGH", "B")
+    assert de.priority("REPAIR", "NEW", None, None) == ("HIGH", "B")       # a branch without sales yet: tier B
 
 
 def test_status_rules(monkeypatch):

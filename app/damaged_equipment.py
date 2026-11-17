@@ -63,9 +63,10 @@ SLA_HOURS = SLA_BY_KIND["REPAIR"]
 # priority (2026-11-16): what the PIC says (impact of a repair / reason of a purchase) × the branch's sales tier
 IMPACT = {"STOPS": "Berhenti jualan", "DEGRADED": "Terganggu", "MINOR": "Tidak mengganggu"}
 REASON = {"REPLACE": "Ganti alat rusak", "CAPACITY": "Tambah kapasitas", "OTHER": "Dekorasi & lainnya"}
-PRIORITY = {"STOPS": {"A": "CRITICAL", "B": "CRITICAL", "C": "HIGH"}, "DEGRADED": {"A": "HIGH", "B": "HIGH", "C": "NORMAL"},
-            "MINOR": {"A": "NORMAL", "B": "LOW", "C": "LOW"}, "REPLACE": {"A": "HIGH", "B": "NORMAL", "C": "NORMAL"},
-            "CAPACITY": {"A": "NORMAL", "B": "LOW", "C": "LOW"}, "OTHER": {"A": "PLANNED", "B": "PLANNED", "C": "PLANNED"}}
+# the priority is an alert for the Maintenance & Procurement team (user, 2026-11-17): only the branch's sales tier sets
+# it; every request is still handled. The impact / reason of the PIC stays as information for the team.
+BY_TIER = {"A": "CRITICAL", "B": "HIGH", "C": "NORMAL"}
+PRIORITY = {k: dict(BY_TIER) for k in ("STOPS", "DEGRADED", "MINOR", "REPLACE", "CAPACITY", "OTHER")}
 TIER_LABEL = {"A": "Tier A · sales 20% teratas", "B": "Tier B · sales menengah", "C": "Tier C · sales 20% terbawah"}
 CAUSES = ("WEAR", "MISUSE", "AGE", "OTHER")
 STATUS_LABEL = {"DRAFT": "Draf", "PENDING": "Diajukan", "ON_HOLD": "On hold", "ACCEPTED": "Disetujui", "IN_PROGRESS": "Dikerjakan",
@@ -116,10 +117,10 @@ def branch_tiers() -> dict[str, str]:
 
 
 def priority(kind: str, branch_code: str, impact: Optional[str], reason: Optional[str]) -> tuple[str, str]:
-    """(urgency, tier) of a request: the PIC's impact (Maintenance) / reason (Procurement) × the branch's sales tier."""
+    """(urgency, tier) of a request: the branch's sales tier alone (A top 20 % of 30-day sales → Critical, B → High,
+    C bottom 20 % → Normal); kind, impact and reason do not change it."""
     tier = branch_tiers().get(branch_code, "B")
-    key = impact if kind == "REPAIR" else reason
-    return PRIORITY.get(key or "", {}).get(tier, "NORMAL" if kind == "REPAIR" else "PLANNED"), tier
+    return BY_TIER[tier], tier
 NOTE_REQUIRED = ("ON_HOLD", "REJECTED")
 VIDEO_TYPES = {"mp4": "video/mp4", "m4v": "video/mp4", "mov": "video/quicktime", "webm": "video/webm", "3gp": "video/3gpp"}
 
@@ -525,6 +526,12 @@ def save_draft(user: dict, request_id: str, body: dict) -> dict:
                 name = " ".join((it.get("name") or "").split())[:120]
                 if not name:
                     raise DeError("Nama item wajib diisi")
+                # a category with a list: the item is picked from it, never typed (user, 2026-11-17)
+                listed = {x.lower(): x for x in (cat.get("examples") or [])}
+                if listed and cat.get("group") != "Merchandise":
+                    if name.lower() not in listed:
+                        raise DeError(f"Pilih item {cat['name']} dari daftar")
+                    name = listed[name.lower()]
                 urgency = "NORMAL"  # the request's priority is set below from the impact / reason and the tier
                 conn.execute(f"""INSERT INTO {P}.de_item (request_id, category_id, name, qty, location, urgency, note, sort)
                                  VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",

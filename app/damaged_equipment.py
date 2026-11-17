@@ -324,6 +324,7 @@ COLS = """r.id::text, r.number, r.kind, r.status, r.hold_from, r.user_id::text, 
     r.target_set_at, r.target_changes, r.mode, r.handover_requested_at, r.handover_at, r.handover_note, r.handover_distance_m,
     r.handover_outside, r.pic_sign_name, (r.pic_sign IS NOT NULL) AS has_pic_sign, r.vendor_sign_name,
     (r.vendor_sign IS NOT NULL) AS has_vendor_sign, r.approved_by, r.approval_step,
+    r.impact, r.reason, r.branch_tier, r.ordered_at,
     (SELECT number FROM integration_portal.de_request d WHERE d.id = r.duplicate_of) AS duplicate_number"""
 
 

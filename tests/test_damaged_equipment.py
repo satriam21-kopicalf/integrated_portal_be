@@ -277,3 +277,9 @@ def test_review_waits_for_the_approval_steps(monkeypatch):
     monkeypatch.setattr(de, "get_row", lambda rid: {**row, "id": rid, "hold_from": None})
     with pytest.raises(PermissionError):
         de.change_status({"id": "mg", "username": "mg"}, "r1", "ACCEPTED", None)  # not the step waiting
+
+
+def test_request_columns_carry_the_fields_of_migration_114():
+    # 2026-11-17: COLS lacked them, so submit always said the impact / reason was missing (422) and the views showed none
+    for col in ("r.impact", "r.reason", "r.branch_tier", "r.ordered_at"):
+        assert col in de.COLS

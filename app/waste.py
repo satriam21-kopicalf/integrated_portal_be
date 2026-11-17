@@ -503,7 +503,7 @@ def delete(user: dict, entry_id: str) -> Optional[dict]:
 # ---------------------------------------------------------------- monitoring & review
 
 def monitor(date_from: date, date_to: date, branches: Optional[list[str]], scope: str = "", category: str = "",
-            status: str = "", user_id: str = "", limit: int = 2000) -> dict:
+            status: str = "", user_id: str = "", limit: int = 2000, q: str = "") -> dict:
     where = ["e.business_date BETWEEN %(a)s AND %(b)s"]
     params: dict[str, Any] = {"a": date_from, "b": date_to, "lim": limit}
     if branches is not None:
@@ -521,6 +521,12 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], scope
     if user_id:
         where.append("e.user_id::text = %(u)s")
         params["u"] = user_id
+    # search on the server (2026-11-17): every word must match the item, branch or who entered it, over the whole period
+    # and filter, so an entry older than the listed `limit` rows is found too
+    for n, word in enumerate([w for w in (q or "").lower().split() if w][:6]):
+        where.append(f"""lower(concat_ws(' ', e.item_name, e.item_code, e.branch_name, e.branch_code, e.full_name, e.username,
+                         e.category)) LIKE %(q{n})s""")
+        params[f"q{n}"] = "%" + word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"  # LIKE escapes
     cond = " AND ".join(where)
     # 2026-11-12: the values (Rp) of the summary / items / outlets are summed over every entry of the filter, not only
     # the `limit` rows the page lists (a busy period has more; the total was too low)

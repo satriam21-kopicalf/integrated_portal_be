@@ -323,3 +323,17 @@ def test_rejecting_an_approved_entry_needs_a_reason(monkeypatch):
         w.review(['a'], 'rejected', ' ', {'username': 'cc'}, None)
     assert w.review(['a'], 'rejected', 'foto tidak sesuai', {'username': 'cc'}, None)
     assert w.review(['a'], 'approved', None, {'username': 'cc'}, None)  # approving needs no reason
+
+
+def test_monitor_searches_on_the_server(monkeypatch):
+    # 2026-11-17: the search covers the whole period, not only the 2,000 rows listed
+    from datetime import date
+    from app import waste as w
+    seen = []
+    monkeypatch.setattr(w.db, 'fetch', lambda q, p=None: seen.append((q, p)) or [])
+    monkeypatch.setattr(w.db, 'fetchrow', lambda q, p=None: {})
+    monkeypatch.setattr(w, 'with_values', lambda rows: [])
+    w.monitor(date(2026, 11, 1), date(2026, 11, 17), None, q='Gula 50%')
+    sql, params = seen[0]
+    assert 'LIKE %(q0)s' in sql and 'LIKE %(q1)s' in sql
+    assert params['q0'] == '%gula%' and params['q1'] == '%50\%%'

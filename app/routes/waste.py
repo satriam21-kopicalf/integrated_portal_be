@@ -182,19 +182,19 @@ def _period(date_from: Optional[date], date_to: Optional[date], branch: Optional
 @router.get("/monitor")
 def monitor(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
             group: Optional[str] = Query(None, max_length=60), scope: str = "", category: str = "", status: str = "",
-            userId: str = "", _user: dict = Depends(require_page(MON, REV))) -> dict:
+            userId: str = "", q: str = Query("", max_length=120), _user: dict = Depends(require_page(MON, REV))) -> dict:
     start, end, branches = _period(dateFrom, dateTo, branch, group)
     return {"period": {"from": start.isoformat(), "to": end.isoformat()}, "categories": waste.catalog()["categories"],
-            **waste.monitor(start, end, branches, scope, category, status, userId)}
+            **waste.monitor(start, end, branches, scope, category, status, userId, q=q)}
 
 
 @router.get("/reviews")
 def reviews(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
             group: Optional[str] = Query(None, max_length=60), scope: str = "", category: str = "",
-            status: str = "submitted", _user: dict = Depends(require_page(REV))) -> dict:
+            status: str = "submitted", q: str = Query("", max_length=120), _user: dict = Depends(require_page(REV))) -> dict:
     start, end, branches = _period(dateFrom, dateTo, branch, group)
     return {"period": {"from": start.isoformat(), "to": end.isoformat()}, "categories": waste.catalog()["categories"],
-            **waste.monitor(start, end, branches, scope, category, status)}
+            **waste.monitor(start, end, branches, scope, category, status, q=q)}
 
 
 @router.post("/reviews")

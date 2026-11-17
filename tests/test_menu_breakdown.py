@@ -25,3 +25,18 @@ def test_the_excel_has_the_sales_transactions_layout(monkeypatch):
     header = [c.value for c in data[11]]
     assert header[:3] == ["Month", "Branch Code", "Branch"] and data.freeze_panes == "A12"
     assert [c.value for c in data[12]][2] == "Kopi Calf Cempaka Putih" and [c.value for c in data[12]][-1] == 9000
+
+
+def test_the_screen_folds_the_outlets_and_keeps_each(monkeypatch):
+    """Per outlet (2026-11-17): portions count once per (outlet, menu, level) though repeated on every material."""
+    base = {"company": "CALF", "category": "BEVERAGE", "sub": "KOPI", "menuId": "CALF:1", "menu": "Es Kopi", "card": "BOM-001",
+            "variant": "Normal Sugar", "unit": "GR", "price": 1.0}
+    got = [{**base, "branch": "A", "portions": 10.0, "code": "M1", "material": "Kopi", "qty": 100.0, "value": 100.0},
+           {**base, "branch": "A", "portions": 10.0, "code": "M2", "material": "Susu", "qty": 50.0, "value": 50.0},
+           {**base, "branch": "B", "portions": 5.0, "code": "M1", "material": "Kopi", "qty": 50.0, "value": 50.0}]
+    monkeypatch.setattr(mb, "rows", lambda *a, **k: {"rows": got, "names": {"A": "Outlet A", "B": "Outlet B"}})
+    s = mb.summary(mb.date(2026, 11, 1), mb.date(2026, 11, 16), None)
+    assert s["menus"][0]["portions"] == 15 and s["totals"]["value"] == 200
+    a, b = s["outlets"]
+    assert (a["name"], a["portions"], a["value"], a["menus"]) == ("Outlet A", 10, 150, 1)
+    assert [x["code"] for x in a["materials"]] == ["M1", "M2"] and b["materials"][0]["qty"] == 50

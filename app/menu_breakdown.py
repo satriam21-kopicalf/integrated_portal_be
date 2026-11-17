@@ -191,16 +191,34 @@ def rows(d_from: date, d_to: date, branches: Optional[list[str]], per_branch: bo
 def summary(d_from: date, d_to: date, branches: Optional[list[str]]) -> dict:
     """The screen: every menu (category → sub category → menu) with its portions per sugar level, its materials and value,
     and the materials over every menu; the outlets and months folded together."""
-    got = rows(d_from, d_to, branches, per_branch=False, per_month=False)["rows"]
+    # per outlet (2026-11-17): the rows of every outlet, folded here for the menus and kept for the outlets
+    res = rows(d_from, d_to, branches, per_branch=True, per_month=False)
+    got, names = res["rows"], res["names"]
     menus: dict[str, dict] = {}
     mats: dict[str, dict] = {}
+    seen: set[tuple] = set()  # a (branch, menu, variant) repeats on each of its materials: its portions count once
+    outlets: dict[str, dict] = {}
     for r in got:
         m = menus.setdefault(r["menuId"], {"id": r["menuId"], "category": r["category"], "sub": r["sub"], "menu": r["menu"], "card": r["card"],
                                            "levels": {}, "choices": {}, "materials": {}, "value": 0.0, "unpriced": 0})
-        if r["variant"] in LEVELS:
-            m["levels"][r["variant"]] = r["portions"]
-        else:
-            m["choices"][r["variant"]] = r["portions"]
+        o = outlets.setdefault(r["branch"], {"code": r["branch"], "name": names.get(r["branch"], r["branch"]), "portions": 0.0, "value": 0.0,
+                                             "menus": set(), "materials": {}})
+        if (r["branch"], r["menuId"], r["variant"]) not in seen:
+            seen.add((r["branch"], r["menuId"], r["variant"]))
+            bucket = m["levels"] if r["variant"] in LEVELS else m["choices"]
+            bucket[r["variant"]] = bucket.get(r["variant"], 0.0) + r["portions"]
+            if r["variant"] in LEVELS:
+                o["portions"] += r["portions"]
+        o["menus"].add(r["menuId"])
+        if r["code"] or r["material"] != NO_CARD:
+            ox = o["materials"].setdefault(r["code"] or r["material"], {"code": r["code"], "name": r["material"], "unit": r["unit"], "qty": 0.0,
+                                                                         "value": 0.0, "priced": True})
+            ox["qty"] += r["qty"]
+            if r["value"] is None:
+                ox["priced"] = False
+            else:
+                ox["value"] += r["value"]
+                o["value"] += r["value"]
         key = r["code"] or r["material"]
         x = m["materials"].setdefault(key, {"code": r["code"], "name": r["material"], "unit": r["unit"], "qty": 0.0, "value": 0.0, "priced": True})
         x["qty"] += r["qty"]
@@ -224,7 +242,10 @@ def summary(d_from: date, d_to: date, branches: Optional[list[str]]) -> dict:
     out_menus.sort(key=lambda m: (m["category"], m["sub"], -m["portions"]))
     materials = sorted(({**t, "qty": round(t["qty"], 3), "value": round(t["value"], 2), "menus": len(t["menus"])} for t in mats.values()
                         if t["code"] or t["name"] != NO_CARD), key=lambda t: -t["value"])
-    return {"period": {"from": d_from.isoformat(), "to": d_to.isoformat()}, "menus": out_menus, "materials": materials,
+    out_outlets = sorted(({**o, "portions": round(o["portions"], 3), "value": round(o["value"], 2), "menus": len(o["menus"]),
+                           "materials": sorted(({**x, "qty": round(x["qty"], 3), "value": round(x["value"], 2)} for x in o["materials"].values()),
+                                               key=lambda x: -x["value"])} for o in outlets.values()), key=lambda o: -o["value"])
+    return {"period": {"from": d_from.isoformat(), "to": d_to.isoformat()}, "menus": out_menus, "materials": materials, "outlets": out_outlets,
             "totals": {"portions": round(sum(m["portions"] for m in out_menus), 3), "value": round(sum(m["value"] for m in out_menus), 2),
                        "noCard": sum(1 for m in out_menus if not m["card"])}}
 

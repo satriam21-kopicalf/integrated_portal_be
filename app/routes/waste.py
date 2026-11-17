@@ -215,6 +215,7 @@ def review(body: ReviewIn, request: Request, user: dict = Depends(require_page(R
 
 class CorrectIn(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
+    scope: Optional[Literal["waste", "premix"]] = None  # the type: material <-> premix / WIP (2026-11-17)
     qty: Optional[float] = Field(None, ge=0, le=1_000_000)  # Cost Control may correct to 0 (2026-11-17); the outlet enters more than 0
     uom: Optional[str] = Field(None, max_length=40)
     itemCode: Optional[str] = Field(None, min_length=1, max_length=80)
@@ -268,8 +269,8 @@ def correct(entry_id: str, body: CorrectIn, request: Request, user: dict = Depen
 
 
 @router.get("/reviews/{entry_id}/options")
-def correct_options(entry_id: str, _user: dict = Depends(require_page(REV))) -> dict:
-    out = waste.correct_options(entry_id, allowed_branches())
+def correct_options(entry_id: str, scope: Optional[str] = None, _user: dict = Depends(require_page(REV))) -> dict:
+    out = waste.correct_options(entry_id, allowed_branches(), scope)
     if out is None:
         raise HTTPException(404, detail="Waste tidak ditemukan")
     return out

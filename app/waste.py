@@ -578,7 +578,8 @@ def review(ids: list[str], status: str, note: Optional[str], user: dict, branche
          "ids": ids, "all": branches is None, "br": list(branches or [])})
 
 
-FIX_FIELDS = ("qty", "item", "category", "businessDate", "productionDate", "expiredDate", "note")
+FIX_FIELDS = ("type", "qty", "item", "category", "businessDate", "productionDate", "expiredDate", "note")
+TYPE_LABEL = {"waste": "Bahan baku", "premix": "Premix/WIP", "usage": "Pemakaian"}
 
 
 def correct(entry_id: str, body: dict, user: dict, branches: Optional[tuple]) -> Optional[dict]:
@@ -599,10 +600,22 @@ def correct(entry_id: str, body: dict, user: dict, branches: Optional[tuple]) ->
             return None
         new: dict[str, Any] = {}
         log: list[tuple[str, Any, Any]] = []
-        scope, facility = row["scope"], (facility_type(row["branch_code"]) if row["scope"] == "premix" else "OUTLET")
+        # the type may be corrected too (2026-11-17): material (waste) <-> premix / WIP, with an item of the new type
+        scope = body.get("scope") or row["scope"]
+        if scope != row["scope"]:
+            if {scope, row["scope"]} - {"waste", "premix"}:
+                raise WasteError("Tipe hanya bisa dikoreksi antara bahan baku dan premix/WIP")
+            if not body.get("itemCode") or body["itemCode"] == row["item_code"]:
+                raise WasteError("Pilih item dari tipe yang baru")
+        facility = facility_type(row["branch_code"]) if scope == "premix" else "OUTLET"
         code = body.get("itemCode") or row["item_code"]
         qty = _qty(body["qty"], allow_zero=True) if body.get("qty") is not None else row["qty"]
         uom = body.get("uom") or row["unit"]
+        if scope != row["scope"]:
+            log.append(("type", TYPE_LABEL.get(row["scope"], row["scope"]), TYPE_LABEL.get(scope, scope)))
+            new["scope"] = scope
+            if (body.get("category") or row["category"]) not in catalog(facility)["categories"]:
+                raise WasteError("Pilih kategori waste untuk tipe yang baru")
         if code != row["item_code"] or qty != row["qty"] or uom != row["unit"]:
             item = _item(scope, code, facility, row["branch_code"])
             if item is None:
@@ -645,15 +658,16 @@ def correct(entry_id: str, body: dict, user: dict, branches: Optional[tuple]) ->
     return {**with_values([out])[0], "changed": [f for f, _, _ in log]}
 
 
-def correct_options(entry_id: str, branches: Optional[tuple]) -> Optional[dict]:
-    """What a correction may pick for an entry: the items of its scope at its branch (premix with their units) and the
-    waste categories."""
+def correct_options(entry_id: str, branches: Optional[tuple], scope: Optional[str] = None) -> Optional[dict]:
+    """What a correction may pick for an entry: the items of its type (or of `scope`, when the type is corrected between
+    material and premix / WIP) at its branch (premix with their units) and the waste categories."""
     row = db.fetchrow(f"SELECT scope, branch_code FROM {T} WHERE id::text = %s", (entry_id,))
     if row is None or (branches is not None and row["branch_code"] not in branches):
         return None
-    facility = facility_type(row["branch_code"]) if row["scope"] == "premix" else "OUTLET"
+    scope = scope if scope in ("waste", "premix") and row["scope"] in ("waste", "premix") else row["scope"]
+    facility = facility_type(row["branch_code"]) if scope == "premix" else "OUTLET"
     cat = catalog(facility, row["branch_code"])
-    return {"items": cat["items"].get(row["scope"], []), "categories": cat["categories"]}
+    return {"scope": scope, "items": cat["items"].get(scope, []), "categories": cat["categories"]}
 
 
 def corrections(entry_id: str) -> list[dict]:

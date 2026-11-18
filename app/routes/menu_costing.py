@@ -112,6 +112,24 @@ def _save(key: Optional[str], body: dict, request: Request, user: dict) -> dict:
     return out
 
 
+@router.post("/sales-calc/recipes/import")
+async def import_recipes(request: Request, dry: bool = True, user: dict = Depends(require_page(CALC))) -> dict:
+    """Recipe cards from the Excel the page exports (2026-11-18): the raw .xlsx as the body; dry=true checks only."""
+    from app import recipe_import as ri
+    data = await request.body()
+    if not data or len(data) > 10 * 1024 * 1024:
+        raise HTTPException(422, detail="File kosong atau lebih dari 10 MB")
+    try:
+        out = ri.run(data, dry, user)
+    except ri.ImportError_ as exc:
+        _refuse(exc)
+    if not dry:
+        activity.record("cc.menu-recipe", user=user, request=request, page="/cost-control/sales-calculator",
+                        summary=f"Import kartu resep: {out['saved']} disimpan, {out['invalid']} ditolak",
+                        details={"create": out["create"], "update": out["update"], "invalid": out["invalid"]})
+    return out
+
+
 @router.post("/sales-calc/recipes", status_code=201)
 def create_recipe(body: dict, request: Request, user: dict = Depends(require_page(CALC))) -> dict:
     return _save(None, body, request, user)

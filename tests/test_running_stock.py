@@ -11,7 +11,7 @@ def test_the_estimate_from_the_count_and_what_moved_since(monkeypatch):
     monkeypatch.setattr(rs, "latest_counts", lambda branches: {"A": {"date": "2026-11-01", "refs": ["SC-1"], "final": True, "statuses": ["APPROVED"],
                                                                       "items": {"RM-MILK": (1000.0, "GR")}, "esb": {}}})
     monkeypatch.setattr(stock_moves, "moves", lambda a, b, branches: {"A": {"received": {("RM-MILK", "GR"): 500.0}, "transferOut": {("RM-MILK", "GR"): -100.0}}})
-    monkeypatch.setattr(rs, "_waste", lambda starts, d_to, cutoffs=None: {"A": {"RM-MILK": 50.0}})
+    monkeypatch.setattr(rs, "_waste", lambda starts, d_to, cutoffs=None, product=None: (product.update({"A": {"RM-MILK": 20.0}}) if product is not None else None) or {"A": {"RM-MILK": 50.0}})
     monkeypatch.setattr(rs, "system_usage", lambda starts, d_to, cutoffs=None: {"A": {"RM-MILK": {"code": "RM-MILK", "name": "Milk", "unit": "GR", "qty": 700.0},
                                                                          "RM-CUP": {"code": "RM-CUP", "name": "Cup", "unit": "PCS", "qty": 3.0}}})
     monkeypatch.setattr(mc, "item_units", lambda codes: {})
@@ -70,3 +70,8 @@ def test_the_stock_list_of_some_branches_is_a_part_of_every_branch(monkeypatch):
     assert out["branches"] == [{"branch": "B"}] and out["rows"] == [{"branch": "B", "code": "Y"}]
     assert len(st.stock_list(None)["rows"]) == 2
     st._list().reset()
+
+
+def test_product_waste_is_told_apart():
+    assert rs.is_product_waste("Premix Tumpah / Human Error") and rs.is_product_waste("human error")
+    assert not rs.is_product_waste("Expired") and not rs.is_product_waste(None)

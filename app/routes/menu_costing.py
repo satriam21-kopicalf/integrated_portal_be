@@ -238,7 +238,7 @@ def delete_extra(extra_id: int, request: Request, user: dict = Depends(require_p
 
 
 @router.get("/sales-calc/report")
-def report(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
+def report(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None, soBasis: Literal["month", "period"] = "month",
            horizon: int = Query(7, ge=1, le=60), buffer: float = Query(10, ge=0, le=200),
            _: dict = Depends(require_page(CALC))) -> dict:
     end = dateTo or today()
@@ -247,7 +247,7 @@ def report(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Quer
         raise HTTPException(422, detail="Periode 1 hari sampai 3 bulan")
     scoped = scoped_branch(branch)
     branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
-    return mc.report(start, end, branches, horizon, buffer)
+    return mc.report(start, end, branches, horizon, buffer, soBasis)
 
 
 def _period(dateFrom: Optional[date], dateTo: Optional[date], branch: Optional[str]) -> tuple[date, date, Optional[list[str]]]:

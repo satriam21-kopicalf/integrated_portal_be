@@ -50,15 +50,27 @@ def latest_counts(branches: Optional[list[str]]) -> dict[str, dict]:
     return counts
 
 
-def _waste(starts: dict[str, date], d_to: date, cutoffs: Optional[dict[str, datetime]] = None) -> dict[str, dict[str, float]]:
+# Waste Product Sales (Cost Control, 2026-11-18): the portal waste of the categories "Premix Tumpah / Human Error" — the
+# product spilled or made wrong while selling — shown apart from the usual waste (Items Out); both stay in the estimate
+PRODUCT_WASTE = ("tumpah", "human error")
+
+
+def is_product_waste(category: Optional[str]) -> bool:
+    c = (category or "").lower()
+    return any(k in c for k in PRODUCT_WASTE)
+
+
+def _waste(starts: dict[str, date], d_to: date, cutoffs: Optional[dict[str, datetime]] = None,
+           product: Optional[dict[str, dict[str, float]]] = None) -> dict[str, dict[str, float]]:
     """{branch: {item code: qty in the base unit}} of the waste approved by Cost Control since the count of the branch
-    (entered after the SO was sent when its time is known)."""
+    (entered after the SO was sent when its time is known). `product` gets the part of the Waste Product Sales
+    categories (is_product_waste) — already inside the total."""
     from app import menu_costing as mc
     from app import waste
     if not starts:
         return {}
     cutoffs = cutoffs or {}
-    rows = db.fetch(f"""SELECT branch_code, business_date, created_at, scope, item_code, qty, unit, exploded FROM {waste.T}
+    rows = db.fetch(f"""SELECT branch_code, business_date, created_at, scope, item_code, qty, unit, exploded, category FROM {waste.T}
                         WHERE status = 'approved' AND business_date BETWEEN %s AND %s AND branch_code = ANY(%s)""",
                     (min(starts.values()), d_to, list(starts)))
     codes = sorted({c for r in rows for c in ([x.get("code") for x in (r["exploded"] or [])] if r["scope"] == "premix" else [r["item_code"]]) if c})
@@ -77,6 +89,9 @@ def _waste(starts: dict[str, date], d_to: date, cutoffs: Optional[dict[str, date
             q = waste.base_qty(units, code, qty, unit, recipe)
             if q is not None:
                 mine[code] = mine.get(code, 0.0) + q
+                if product is not None and is_product_waste(r.get("category")):
+                    p = product.setdefault(r["branch_code"], {})
+                    p[code] = p.get(code, 0.0) + q
     return out
 
 
@@ -244,7 +259,8 @@ def _running(branches: Optional[list[str]]) -> dict[str, dict]:
             bucket = moved.setdefault(b, {}).setdefault(kind, {})
             for key, q in items.items():
                 bucket[key] = bucket.get(key, 0.0) - q
-    waste = _waste(starts, today, cutoffs)
+    product: dict[str, dict[str, float]] = {}
+    waste = _waste(starts, today, cutoffs, product)
     used = system_usage(starts, today, cutoffs)
     codes = sorted({c for v in counts.values() for c in v["items"]} | {c for v in used.values() for c in v if not c.startswith(("wip:", "n:", "o:"))})
     packs = mc.item_units(codes)
@@ -267,7 +283,7 @@ def _running(branches: Optional[list[str]]) -> dict[str, dict]:
             w = waste.get(b, {}).get(code, 0.0)
             if not (so or mv or use or w):
                 continue
-            items[code] = {"so": so, "unit": unit, "moves": mv, "waste": w, "used": use or 0.0,
+            items[code] = {"so": so, "unit": unit, "moves": mv, "waste": w, "wasteProduct": product.get(b, {}).get(code, 0.0), "used": use or 0.0,
                            "estimate": so + sum(mv.values()) - w - (use or 0.0)}
         out[b] = {"so": {"date": c["date"], "refs": c["refs"], "final": c["final"], "statuses": c["statuses"],
                          "cutoff": c["cutoff"].isoformat() if c.get("cutoff") else None}, "items": items}

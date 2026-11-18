@@ -819,17 +819,23 @@ def _delta_cost(key: str, qty: float, price: dict[str, float]) -> Optional[float
     return None if p is None else qty * p
 
 
-def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int = 7, buffer_pct: float = 10) -> dict:
+def report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int = 7, buffer_pct: float = 10, so_basis: str = "month") -> dict:
     """The calculator of a period (see _report), kept REPORT_S seconds per filter while nothing of the setup changed."""
-    key = f"report:{d_from}:{d_to}:{','.join(sorted(branches)) if branches is not None else '*'}:{horizon}:{buffer_pct}:{stamp()}"
+    key = f"report:{d_from}:{d_to}:{','.join(sorted(branches)) if branches is not None else '*'}:{horizon}:{buffer_pct}:{so_basis}:{stamp()}"
     hit = _cache.get(key)
     if hit is None:
-        hit = _report(d_from, d_to, branches, horizon, buffer_pct)
+        hit = _report(d_from, d_to, branches, horizon, buffer_pct, so_basis)
         _cache.set(key, hit, REPORT_S)
     return hit
 
 
-def _report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int = 7, buffer_pct: float = 10) -> dict:
+def month_window(d_from: date, d_to: date) -> tuple[date, date]:
+    """The whole months of a period: the first day of the month of d_from to the last day of the month of d_to."""
+    nxt = d_to.replace(day=28) + timedelta(days=4)
+    return d_from.replace(day=1), nxt - timedelta(days=nxt.day)
+
+
+def _report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: int = 7, buffer_pct: float = 10, so_basis: str = "month") -> dict:
     days = (d_to - d_from).days + 1
     cards, mapped = costing_cards()  # the stored cards + the bundles costed from the ESB master (2026-11-17)
     wip = wips()
@@ -876,10 +882,31 @@ def _report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: in
 
     # usage actual vs system: both over the branches with SO awal and SO akhir (portal counts, else ESB documents)
     units = {v["code"]: str(v["unit"] or "").upper() for v in system.values() if v.get("code")}
-    actual = actual_usage(d_from, d_to, branches, units)
+    # Usage & COGS on the month-end stock opname (Cost Control, 2026-11-18): SO awal = the count at the end of the month
+    # before, SO akhir = the count at the end of the last month of the period; the system usage over the same months
+    u_from, u_to = month_window(d_from, d_to) if so_basis == "month" else (d_from, d_to)
+    actual = actual_usage(u_from, u_to, branches, units)
     covered = actual["covered"]
-    same = covered and (branches is not None and sorted(branches) == covered)
-    scope = got if same or not covered else _sold(d_from, d_to, covered, cards, mapped, wip, horizon, buffer_pct)
+    same = covered and (u_from, u_to) == (d_from, d_to) and (branches is not None and sorted(branches) == covered)
+    scope = got if same or not covered else _sold(u_from, u_to, covered, cards, mapped, wip, horizon, buffer_pct)
+    # the waste of the window (Items Out): the usual waste and the Waste Product Sales (Premix Tumpah / Human Error)
+    w_all: dict[str, float] = {}
+    w_prod: dict[str, float] = {}
+    if covered:
+        try:
+            from app import running_stock
+            prod: dict[str, dict[str, float]] = {}
+            per = running_stock._waste({b: u_from for b in covered}, u_to, None, prod)
+            bases = item_units(sorted(units))
+            for target, src in ((w_all, per), (w_prod, prod)):
+                for items_ in src.values():
+                    for code, q in items_.items():
+                        if code in units:
+                            v = to_unit(q, (bases.get(code) or (units[code], {}))[0], units[code])
+                            if v is not None:
+                                target[code] = target.get(code, 0.0) + v
+        except Exception:  # noqa: BLE001 - no waste data: the columns stay empty
+            w_all, w_prod = {}, {}
     usage = []
     for k, v in sorted(scope["system"].items(), key=lambda kv: kv[1]["name"]):
         a = actual["items"].get(v["code"] or "") if covered else None
@@ -890,9 +917,19 @@ def _report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: in
                       "soEnd": round(a["end"], 3) if a else None, "actual": round(a["actual"], 3) if a else None,
                       "purchasedOther": [{"uom": k, "qty": round(q, 3)} for k, q in sorted(a["skipped"].items())] if a else [],
                       "moves": {k: round(q, 3) for k, q in a["moves"].items()} if a else {},
+                      # Items In / Out of the window (2026-11-18): goods receipt, transfers, other moves, waste apart
+                      "received": round(a["moves"].get("received", 0.0), 3) if a else None,
+                      "transferIn": round(abs(a["moves"].get("transferIn", 0.0)), 3) if a else None,
+                      "transferOut": round(abs(a["moves"].get("transferOut", 0.0)), 3) if a else None,
+                      "otherMoves": round(sum(q for k, q in a["moves"].items() if k not in ("received", "transferIn", "transferOut")), 3) if a else None,
+                      "waste": round(w_all.get(v["code"] or "", 0.0) - w_prod.get(v["code"] or "", 0.0), 3) if a else None,
+                      "wasteProduct": round(w_prod.get(v["code"] or "", 0.0), 3) if a else None,
                       "variance": round(a["actual"] - v["qty"], 3) if a else None,
+                      "variancePct": round((a["actual"] - v["qty"]) / v["qty"], 6) if a and v["qty"] else None,
                       "price": p, "systemValue": round(v["qty"] * p, 2) if p is not None else None,
-                      "actualValue": round(a["actual"] * p, 2) if a and p is not None else None})
+                      "actualValue": round(a["actual"] * p, 2) if a and p is not None else None,
+                      "valueVariance": round((a["actual"] - v["qty"]) * p, 2) if a and p is not None else None,
+                      "valueVariancePct": round((a["actual"] - v["qty"]) / v["qty"], 6) if a and p is not None and v["qty"] else None})
     anomalies = count_anomalies(actual.get("perBranch", []), {u["code"]: u for u in usage if u["code"]}) if covered else []
     # SO coverage (2026-11-06): the stock items the cards use that the counts of both ends hold; an item missing from the
     # SO lists has no actual usage, so its system value stays out of the actual COGS
@@ -922,11 +959,14 @@ def _report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: in
     mrp = []
     for v in sorted(plan.values(), key=lambda x: x["name"]):
         need = math.ceil(round(v["qty"], 6))
-        stock = have["items"].get(v["code"] or "") if v.get("code") else None
+        estimate = have["items"].get(v["code"] or "") if v.get("code") else None
+        so_latest = (have.get("so") or have["items"]).get(v["code"] or "") if v.get("code") else None
+        stock = so_latest  # Cost Control (2026-11-18): the order follows the latest SO; the estimate is shown beside it
         order = max(0, math.ceil(round(need - stock, 6))) if stock is not None else need
         p = unit_price(v)
         mrp.append({"code": v["code"], "name": v["name"], "unit": v["unit"], "isStock": v.get("isStock", True), "extra": v.get("extra", False),
-                    "qty": need, "onHand": round(stock, 3) if stock is not None else None, "toOrder": order,
+                    "qty": need, "onHand": round(stock, 3) if stock is not None else None, "soLatest": round(so_latest, 3) if so_latest is not None else None,
+                    "estimate": round(estimate, 3) if estimate is not None else None, "toOrder": order,
                     "value": round(need * p, 2) if p is not None else None, "orderValue": round(order * p, 2) if p is not None else None})
     extra_cost = sum((e["used"] * (unit_price({"code": e["code"], "price": e["price"]}) or 0.0)) for e in extra_rows)
     non_sales_cost = sum(r["cost"] for r in non_sales)  # made and given away: a cost without a sale
@@ -937,6 +977,7 @@ def _report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: in
             "menus": per_menu, "unmapped": got["unmapped"], "usage": usage, "nonSales": non_sales,
             "options": {"unruled": got["unruled"], "pendingDays": got["optionsPending"]}, "mrp": mrp, "extras": extra_rows, "counts": got["counts"],
             "coverage": coverage, "anomalies": anomalies,
+            "usageWindow": {"from": u_from.isoformat(), "to": u_to.isoformat(), "basis": so_basis, "closed": u_to < date.today()},
             "stock": {"branches": actual["branches"], "covered": covered, "onHand": {**{k: have[k] for k in ("branches", "from", "to")}, "running": bool(have.get("running"))}},
             "total": {"sales": sales, "cogs": cogs + extra_cost + non_sales_cost, "menuCogs": cogs, "extraCogs": round(extra_cost, 2),
                       "ratio": round((cogs + extra_cost + non_sales_cost) / sales, 6) if sales else None,
@@ -1194,14 +1235,18 @@ def on_hand(branches: Optional[list[str]], units: dict[str, str]) -> dict:
         run = {}
     if run:
         items: dict[str, float] = {}
+        so: dict[str, float] = {}
         for v in run.values():
             for code, unit in units.items():
                 it = v["items"].get(code)
                 q = to_unit(it["estimate"], it["unit"], unit) if it else None
                 if q is not None:
                     items[code] = items.get(code, 0.0) + max(q, 0.0)  # an estimate below zero has nothing to give
+                s = to_unit(it["so"], it["unit"], unit) if it else None
+                if s is not None:
+                    so[code] = so.get(code, 0.0) + s
         dates = sorted({v["so"]["date"] for v in run.values()})
-        return {"items": items, "branches": len(run), "from": dates[0], "to": dates[-1], "running": True}
+        return {"items": items, "so": so, "branches": len(run), "from": dates[0], "to": dates[-1], "running": True}
     snap = stock_at(today, today - timedelta(days=1), branches, back=8)
     items: dict[str, float] = {}
     for v in snap.values():

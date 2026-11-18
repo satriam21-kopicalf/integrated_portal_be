@@ -72,3 +72,11 @@ def test_a_file_without_the_columns_is_refused():
         assert False
     except ri.ImportError_:
         pass
+
+
+def test_month_window():
+    from datetime import date
+    from app.menu_costing import month_window
+    assert month_window(date(2026, 11, 10), date(2026, 11, 18)) == (date(2026, 11, 1), date(2026, 11, 30))
+    assert month_window(date(2026, 1, 31), date(2026, 2, 3)) == (date(2026, 1, 1), date(2026, 2, 28))
+    assert month_window(date(2026, 12, 5), date(2026, 12, 31)) == (date(2026, 12, 1), date(2026, 12, 31))

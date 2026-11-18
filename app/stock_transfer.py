@@ -205,8 +205,11 @@ def _stock_list(branches: Optional[list[str]]) -> dict:
                          "stock": round(now, 3), "available": round(it["available"], 3), "price": p, "value": val,
                          # the running stock since the count: goods received and the other moves, waste approved, usage by the cards
                          "received": round(mv.get("received", 0.0), 3),
+                         "transferIn": round(abs(mv.get("transferIn", 0.0)), 3), "transferOut": round(abs(mv.get("transferOut", 0.0)), 3),
                          "otherMoves": round(sum(q for k, q in mv.items() if k not in TRANSFER_KINDS and k != "received"), 3),
-                         "waste": round((e or {}).get("waste", 0.0), 3), "used": round((e or {}).get("used", 0.0), 3),
+                         # waste (2026-11-18): the usual waste and the Waste Product Sales (Premix Tumpah / Human Error) apart
+                         "waste": round((e or {}).get("waste", 0.0) - (e or {}).get("wasteProduct", 0.0), 3),
+                         "wasteProduct": round((e or {}).get("wasteProduct", 0.0), 3), "used": round((e or {}).get("used", 0.0), 3),
                          "estimate": round(est, 3), "estimateValue": ev,
                          "prevSo": round(prev[b]["items"][code][0], 3) if b in prev and code in prev[b]["items"] else None})
         heads.append({"branch": b, "branchName": names.get(b, b), "soDate": v["so"]["date"], "refs": v["so"]["refs"],

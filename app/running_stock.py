@@ -113,9 +113,11 @@ def early_sales(starts: dict[str, date], cutoffs: dict[str, datetime], source: d
     return out
 
 
-def system_usage(starts: dict[str, date], d_to: date, cutoffs: Optional[dict[str, datetime]] = None) -> dict[str, dict[str, dict]]:
+def system_usage(starts: dict[str, date], d_to: date, cutoffs: Optional[dict[str, datetime]] = None,
+                 non_sales: Optional[dict[str, dict[str, dict]]] = None) -> dict[str, dict[str, dict]]:
     """{branch: {material key: {code, name, unit, qty}}}: what the branch used since its count by the recipe cards (the
-    Sales Calculator's system usage, per branch and from each branch's own day)."""
+    Sales Calculator's system usage, per branch and from each branch's own day). `non_sales` gets the part made without
+    a sale (ESB other-cost bills: cupping, waste, compliment …), already inside the total (Stock List, 2026-11-18)."""
     from app import menu_costing as mc
     from app import menu_options
     if not starts:
@@ -198,6 +200,8 @@ def system_usage(starts: dict[str, date], d_to: date, cutoffs: Optional[dict[str
             code = mapped.get(g["menu_id"])
             if code:
                 mc.explode(cards[code], _f(g["qty"]), wip, system)
+                if non_sales is not None:
+                    mc.explode(cards[code], _f(g["qty"]), wip, non_sales.setdefault(b, {}))
         counts = {"bill": sum(_f(x["bills"]) for x in d["base"]), "portion": portions, "day": sum(1 for x in d["base"] if x["open"])}
         for e in extras:
             used = e["qty"] * counts[e["basis"]]
@@ -261,7 +265,8 @@ def _running(branches: Optional[list[str]]) -> dict[str, dict]:
                 bucket[key] = bucket.get(key, 0.0) - q
     product: dict[str, dict[str, float]] = {}
     waste = _waste(starts, today, cutoffs, product)
-    used = system_usage(starts, today, cutoffs)
+    given: dict[str, dict[str, dict]] = {}
+    used = system_usage(starts, today, cutoffs, given)
     codes = sorted({c for v in counts.values() for c in v["items"]} | {c for v in used.values() for c in v if not c.startswith(("wip:", "n:", "o:"))})
     packs = mc.item_units(codes)
     out: dict[str, dict] = {}
@@ -280,12 +285,44 @@ def _running(branches: Optional[list[str]]) -> dict[str, dict]:
                     mv[kind] = q
             u = used.get(b, {}).get(code)
             use = mc.to_unit(u["qty"], u.get("unit"), unit) if u else 0.0
+            g = given.get(b, {}).get(code)
+            use_ns = (mc.to_unit(g["qty"], g.get("unit"), unit) or 0.0) if g else 0.0
             w = waste.get(b, {}).get(code, 0.0)
             if not (so or mv or use or w):
                 continue
-            items[code] = {"so": so, "unit": unit, "moves": mv, "waste": w, "wasteProduct": product.get(b, {}).get(code, 0.0), "used": use or 0.0,
+            items[code] = {"so": so, "unit": unit, "moves": mv, "waste": w, "wasteProduct": product.get(b, {}).get(code, 0.0), "used": use or 0.0, "usedNonSales": use_ns,
                            "estimate": so + sum(mv.values()) - w - (use or 0.0)}
         out[b] = {"so": {"date": c["date"], "refs": c["refs"], "final": c["final"], "statuses": c["statuses"],
                          "cutoff": c["cutoff"].isoformat() if c.get("cutoff") else None}, "items": items}
     return out
 
+
+
+def estimate_before(branch: str, day: date) -> dict:
+    """The estimated stock of a branch at the start of `day` (Stock Opname Review, weekly / monthly, 2026-11-18): its
+    previous portal count + every move, − waste approved, − system usage from that count to the day before.
+    {from: date of the previous count | None, items: {code: {so, estimate, unit}}} in the base unit of the items."""
+    from datetime import timedelta
+    from app import menu_costing as mc
+    from app import stock_moves
+    prev = mc.portal_counts(day - timedelta(days=1), [branch], back=LATEST_SO_DAYS, ahead=0).get(branch)
+    if not prev:
+        return {"from": None, "items": {}}
+    start, end = date.fromisoformat(prev["date"]), day - timedelta(days=1)
+    starts = {branch: start}
+    moved = stock_moves.moves(start, end, [branch]).get(branch, {}) if end >= start else {}
+    waste = _waste(starts, end).get(branch, {}) if end >= start else {}
+    used = system_usage(starts, end).get(branch, {}) if end >= start else {}
+    units = {code: u for code, (_, u) in prev["items"].items()}
+    for v in used.values():
+        if v.get("code") and v["code"] not in units:
+            units[v["code"]] = str(v.get("unit") or "").upper()
+    packs = mc.item_units(sorted(units))
+    items: dict[str, dict] = {}
+    for code, unit in units.items():
+        so = prev["items"].get(code, (0.0, unit))[0]
+        mv = sum(q for rows in moved.values() for q in [mc._bought(rows, code, unit, prev["esb"].get(code), packs.get(code))] if q)
+        u = used.get(code)
+        use = (mc.to_unit(u["qty"], u.get("unit"), unit) or 0.0) if u else 0.0
+        items[code] = {"so": round(so, 3), "unit": unit, "estimate": round(so + mv - waste.get(code, 0.0) - use, 3)}
+    return {"from": prev["date"], "items": items}

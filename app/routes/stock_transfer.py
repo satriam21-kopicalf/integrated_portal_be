@@ -164,6 +164,18 @@ def _branches(branch: Optional[str]) -> Optional[list[str]]:
     return None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
 
 
+@router.get("/api/monitoring/stock/estimate")
+def stock_estimate(branch: str = Query(..., min_length=1, max_length=40), day: date = Query(..., alias="date"),
+                   _: dict = Depends(require_page("cc.reviews", LIST))) -> dict:
+    """Stock Opname Review (weekly / monthly): the estimated stock of the branch at the start of the count day, from its
+    previous count and what moved since (app/running_stock.estimate_before)."""
+    from app import running_stock
+    allowed = _branches(branch)  # an account sees its own branches only
+    if allowed is not None and branch not in allowed:
+        raise HTTPException(403, detail="Cabang di luar akses Anda")
+    return running_stock.estimate_before(branch, day)
+
+
 @router.get("/api/monitoring/stock/list")
 def stock_list(branch: Optional[str] = None, _: dict = Depends(require_page(LIST))) -> dict:
     return st.stock_list(_branches(branch))

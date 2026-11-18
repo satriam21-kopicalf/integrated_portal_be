@@ -210,6 +210,9 @@ def _stock_list(branches: Optional[list[str]]) -> dict:
                          # waste (2026-11-18): the usual waste and the Waste Product Sales (Premix Tumpah / Human Error) apart
                          "waste": round((e or {}).get("waste", 0.0) - (e or {}).get("wasteProduct", 0.0), 3),
                          "wasteProduct": round((e or {}).get("wasteProduct", 0.0), 3), "used": round((e or {}).get("used", 0.0), 3),
+                         # Items Out (2026-11-18): the usage of the menus sold and of the ESB other-cost bills (Non Sales)
+                         "sales": round((e or {}).get("used", 0.0) - (e or {}).get("usedNonSales", 0.0), 3),
+                         "nonSales": round((e or {}).get("usedNonSales", 0.0), 3),
                          "estimate": round(est, 3), "estimateValue": ev,
                          "prevSo": round(prev[b]["items"][code][0], 3) if b in prev and code in prev[b]["items"] else None})
         heads.append({"branch": b, "branchName": names.get(b, b), "soDate": v["so"]["date"], "refs": v["so"]["refs"],

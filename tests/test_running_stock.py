@@ -12,7 +12,7 @@ def test_the_estimate_from_the_count_and_what_moved_since(monkeypatch):
                                                                       "items": {"RM-MILK": (1000.0, "GR")}, "esb": {}}})
     monkeypatch.setattr(stock_moves, "moves", lambda a, b, branches: {"A": {"received": {("RM-MILK", "GR"): 500.0}, "transferOut": {("RM-MILK", "GR"): -100.0}}})
     monkeypatch.setattr(rs, "_waste", lambda starts, d_to, cutoffs=None, product=None: (product.update({"A": {"RM-MILK": 20.0}}) if product is not None else None) or {"A": {"RM-MILK": 50.0}})
-    monkeypatch.setattr(rs, "system_usage", lambda starts, d_to, cutoffs=None: {"A": {"RM-MILK": {"code": "RM-MILK", "name": "Milk", "unit": "GR", "qty": 700.0},
+    monkeypatch.setattr(rs, "system_usage", lambda starts, d_to, cutoffs=None, non_sales=None: {"A": {"RM-MILK": {"code": "RM-MILK", "name": "Milk", "unit": "GR", "qty": 700.0},
                                                                          "RM-CUP": {"code": "RM-CUP", "name": "Cup", "unit": "PCS", "qty": 3.0}}})
     monkeypatch.setattr(mc, "item_units", lambda codes: {})
     out = rs.running(None)["A"]
@@ -75,3 +75,18 @@ def test_the_stock_list_of_some_branches_is_a_part_of_every_branch(monkeypatch):
 def test_product_waste_is_told_apart():
     assert rs.is_product_waste("Premix Tumpah / Human Error") and rs.is_product_waste("human error")
     assert not rs.is_product_waste("Expired") and not rs.is_product_waste(None)
+
+
+def test_estimate_before_a_count(monkeypatch):
+    from datetime import date
+    from app import menu_costing as mc, stock_moves
+    monkeypatch.setattr(mc, "portal_counts", lambda day, branches, back=1, ahead=1: {"A": {"date": "2026-11-01", "items": {"RM-MILK": (100.0, "ML")}, "esb": {}}})
+    monkeypatch.setattr(stock_moves, "moves", lambda a, b, br: {"A": {"received": {("RM-MILK", "ML"): 40.0}}})
+    monkeypatch.setattr(mc, "_bought", lambda rows, code, unit, esb, packs, skipped=None: sum(q for (c, _), q in rows.items() if c == code))
+    monkeypatch.setattr(mc, "item_units", lambda codes: {})
+    monkeypatch.setattr(rs, "_waste", lambda starts, d_to, cutoffs=None, product=None: {"A": {"RM-MILK": 10.0}})
+    monkeypatch.setattr(rs, "system_usage", lambda starts, d_to, cutoffs=None, non_sales=None: {"A": {"RM-MILK": {"code": "RM-MILK", "unit": "ML", "qty": 25.0}}})
+    out = rs.estimate_before("A", date(2026, 11, 8))
+    assert out["from"] == "2026-11-01" and out["items"]["RM-MILK"]["estimate"] == 105.0
+    monkeypatch.setattr(mc, "portal_counts", lambda *a, **k: {})
+    assert rs.estimate_before("A", date(2026, 11, 8)) == {"from": None, "items": {}}

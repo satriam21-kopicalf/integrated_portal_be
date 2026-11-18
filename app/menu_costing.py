@@ -774,6 +774,7 @@ def _sold(d_from: date, d_to: date, branches: Optional[list[str]], cards: dict, 
                 row["qty"] = row.get("qty", 0.0) + amount
     # the menus made without a sale (ESB other-cost bills: cupping, waste, compliment, QC …): their materials are used too
     reasons: dict[str, dict] = {}
+    given_use: dict[str, dict] = {}  # the part of the system usage made without a sale (Items Out: Non Sales, 2026-11-18)
     try:
         given = non_sales(d_from, d_to, branches)
     except Exception:  # noqa: BLE001 - the transactions unreachable: the sales alone
@@ -788,6 +789,7 @@ def _sold(d_from: date, d_to: date, branches: Optional[list[str]], cards: dict, 
             r["unmapped"] += qty
             continue
         explode(cards[code], qty, wip, system)
+        explode(cards[code], qty, wip, given_use)
         explode(cards[code], qty / days * horizon * (1 + buffer_pct / 100), wip, plan)
         r["menus"][code] = r["menus"].get(code, 0.0) + qty
     # items outside the cards: per bill, per portion sold (menus with a card) or per day of an outlet with sales
@@ -805,7 +807,7 @@ def _sold(d_from: date, d_to: date, branches: Optional[list[str]], cards: dict, 
             row = target.setdefault(key, {"code": e["code"], "name": e["name"], "unit": e["unit"], "price": e["price"], "extra": True})
             row["qty"] = row.get("qty", 0.0) + amount
         extra_rows.append({**e, "count": counts[e["basis"]], "used": round(used, 3)})
-    return {"nonSales": list(reasons.values()), "system": system, "plan": plan, "menus": per_menu, "unmapped": unmapped, "extras": extra_rows, "counts": counts,
+    return {"nonSales": list(reasons.values()), "nonSalesUse": given_use, "system": system, "plan": plan, "menus": per_menu, "unmapped": unmapped, "extras": extra_rows, "counts": counts,
             "options": option_of, "unruled": unruled, "optionsPending": len(pending),
             "allSales": sum(m["sales"] for m in per_menu) + sum(m["sales"] for m in unmapped) + choice_sales,
             "choiceSales": choice_sales}
@@ -908,11 +910,15 @@ def _report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: in
         except Exception:  # noqa: BLE001 - no waste data: the columns stay empty
             w_all, w_prod = {}, {}
     usage = []
+    given_use = scope.get("nonSalesUse", {})
     for k, v in sorted(scope["system"].items(), key=lambda kv: kv[1]["name"]):
         a = actual["items"].get(v["code"] or "") if covered else None
+        ns = (given_use.get(k) or {}).get("qty", 0.0)
         p = unit_price(v)
         usage.append({"code": v["code"], "name": v["name"], "unit": v["unit"], "isStock": v.get("isStock", True), "extra": v.get("extra", False),
                       "system": round(v["qty"], 3),
+                      # Items Out (2026-11-18): the system usage of the menus sold and of the ESB other-cost bills (Non Sales)
+                      "sales": round(v["qty"] - ns, 3), "nonSales": round(ns, 3),
                       "soStart": round(a["start"], 3) if a else None, "purchased": round(a["bought"], 3) if a else None,
                       "soEnd": round(a["end"], 3) if a else None, "actual": round(a["actual"], 3) if a else None,
                       "purchasedOther": [{"uom": k, "qty": round(q, 3)} for k, q in sorted(a["skipped"].items())] if a else [],

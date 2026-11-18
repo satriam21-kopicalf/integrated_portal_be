@@ -39,7 +39,7 @@ def test_procurement_has_its_own_flow():
     assert de.allowed_next({**p, "status": "ACCEPTED"}) == ["ORDERED", "ON_HOLD", "REJECTED"]
     assert de.allowed_next({**p, "status": "ORDERED"}) == ["HANDOVER", "ON_HOLD"]
     assert de.allowed_next({**p, "status": "HANDOVER"}) == ["DONE", "ORDERED", "ON_HOLD"]  # wrong goods: ordered again
-    assert de.status_label("PROCUREMENT", "HANDOVER") == "Diterima PIC" and de.status_label("REPAIR", "HANDOVER") == "Serah terima"
+    assert de.status_label("PROCUREMENT", "HANDOVER") == "Diterima" and de.status_label("PROCUREMENT", "ORDERED") == "Diproses & dipesan" and de.status_label("REPAIR", "HANDOVER") == "Serah terima"
     assert de.STEPS_BY_KIND["PROCUREMENT"] == ("PENDING", "ACCEPTED", "ORDERED", "HANDOVER", "DONE")
 
 

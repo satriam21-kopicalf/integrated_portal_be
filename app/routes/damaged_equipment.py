@@ -435,6 +435,19 @@ def team_note(request_id: str, body: NoteIn, request: Request, user: dict = Depe
     return _run(de.add_note, user, request_id, body.note)
 
 
+class SupplierIn(BaseModel):
+    vendor: str = Field(min_length=1, max_length=200)
+
+
+@router.post("/api/de/monitor/{request_id}/supplier")
+def team_supplier(request_id: str, body: SupplierIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    """Procurement: the shop / supplier the goods are bought from (required before In Progress & Order)."""
+    row = _team_row(request, user, request_id)
+    out = _with_work_urls(_run(de.set_supplier, user, request_id, body.vendor))
+    _record(request, user, f"{row['number']}: toko / vendor {body.vendor.strip()}", request_id)
+    return out
+
+
 @router.post("/api/de/monitor/{request_id}/cost-items", status_code=201)
 def team_add_cost(request_id: str, body: CostItemIn, request: Request, user: dict = Depends(current_user)) -> dict:
     _team_row(request, user, request_id)

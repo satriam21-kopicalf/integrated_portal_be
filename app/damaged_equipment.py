@@ -72,7 +72,8 @@ CAUSES = ("WEAR", "MISUSE", "AGE", "OTHER")
 STATUS_LABEL = {"DRAFT": "Draf", "PENDING": "Diajukan", "ON_HOLD": "On hold", "ACCEPTED": "Disetujui", "IN_PROGRESS": "Dikerjakan",
                 "ORDERED": "Dipesan", "HANDOVER": "Serah terima", "DONE": "Selesai", "REJECTED": "Ditolak"}
 # a purchase is handed over as "received" and done as "received"
-STATUS_LABEL_PROCUREMENT = {**STATUS_LABEL, "HANDOVER": "Diterima PIC", "DONE": "Selesai"}
+# Procurement flow (user, 2026-11-18): Submitted → Approved → In Progress & Order → Received → Done
+STATUS_LABEL_PROCUREMENT = {**STATUS_LABEL, "ORDERED": "Diproses & dipesan", "HANDOVER": "Diterima", "DONE": "Selesai"}
 OPEN = ("PENDING", "ON_HOLD", "ACCEPTED", "IN_PROGRESS", "ORDERED", "HANDOVER")
 STEPS_BY_KIND = {"REPAIR": ("PENDING", "ACCEPTED", "IN_PROGRESS", "HANDOVER", "DONE"),
                  "PROCUREMENT": ("PENDING", "ACCEPTED", "ORDERED", "HANDOVER", "DONE")}
@@ -688,11 +689,12 @@ def team_full(request_id: str) -> dict:
         recompute(request_id)  # the labour of a running job grows with the time
     row = get_row(request_id)
     out = full(request_id)
-    # every other request of the same branch or PIC (open first): one look at what is already asked
-    rows = db.fetch(f"""SELECT {COLS} FROM {P}.de_request r WHERE r.id::text <> %s AND r.status <> 'DRAFT'
+    # every other request of the same kind (Maintenance or Procurement, never mixed; 2026-11-18) of the same branch or PIC
+    # (open first): one look at what is already asked
+    rows = db.fetch(f"""SELECT {COLS} FROM {P}.de_request r WHERE r.id::text <> %s AND r.status <> 'DRAFT' AND r.kind = %s
                         AND (r.branch_code = %s OR r.user_id::text = %s)
                         ORDER BY r.status = ANY(%s) DESC, r.submitted_at DESC LIMIT 30""",
-                    (request_id, row["branch_code"], row["user_id"], list(OPEN)))
+                    (request_id, row["kind"], row["branch_code"], row["user_id"], list(OPEN)))
     out["related"] = [{**view(r), "items": items_of(r["id"])} for r in rows]
     out["allowed"] = allowed_next(row)
     out["approval"] = approval_state(row) if row["status"] == "PENDING" else None
@@ -759,8 +761,10 @@ def change_status(user: dict, request_id: str, to: str, note: Optional[str]) -> 
         raise DeError("Foto hasil pekerjaan dari tukang belum masuk: kirim link foto ke tukang dulu")
     if to == "DONE":
         if not row.get("handover_at"):
-            raise DeError("Serah terima dari PIC belum dikirim")
-        if (procurement or row.get("mode") == "VENDOR") and (row["actual_cost"] is None or not count("INVOICE")):
+            raise DeError("Penerimaan barang oleh PIC belum dikirim" if procurement else "Serah terima dari PIC belum dikirim")
+        if procurement and (row["actual_cost"] is None or not count("INVOICE")):
+            raise DeError("Procurement: isi harga aktual dan lampirkan invoice / nota sebelum Selesai")
+        if row.get("mode") == "VENDOR" and (row["actual_cost"] is None or not count("INVOICE")):
             raise DeError("Pekerjaan vendor: isi biaya aktual dan lampirkan invoice sebelum Done")
     reopen = to in ("IN_PROGRESS", "ORDERED") and row["status"] == "HANDOVER"
     with db.transaction() as conn:
@@ -1325,6 +1329,20 @@ def recompute(request_id: str) -> None:
     actual = round(sum(acts) + lab, 2) if (acts or lab) else None
     db.fetchrow(f"""UPDATE {P}.de_request SET est_cost = %s, actual_cost = %s WHERE id::text = %s
                     AND (est_cost IS DISTINCT FROM %s OR actual_cost IS DISTINCT FROM %s) RETURNING id""", (est, actual, request_id, est, actual))
+
+
+def set_supplier(user: dict, request_id: str, vendor: str) -> dict:
+    """Procurement (2026-11-18): the shop / supplier of the purchase, needed before In Progress & Order."""
+    row = _cost_open(request_id)
+    if row["kind"] != "PROCUREMENT":
+        raise DeError("Toko / vendor hanya untuk Procurement")
+    vendor = vendor.strip()[:200]
+    if not vendor:
+        raise DeError("Nama toko / vendor wajib diisi")
+    with db.transaction() as conn:
+        conn.execute(f"UPDATE {P}.de_request SET vendor = %s, updated_at = now() WHERE id::text = %s", (vendor, request_id))
+        _event(conn, request_id, user, "NOTE", None, None, f"Toko / vendor: {vendor}", {"action": "SUPPLIER", "vendor": vendor})
+    return team_full(request_id)
 
 
 def _cost_open(request_id: str) -> dict:

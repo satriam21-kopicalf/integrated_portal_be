@@ -114,7 +114,7 @@ class InvestigationIn(BaseModel):
 
 
 class ReviewIn(BaseModel):
-    ids: list[str] = Field(min_length=1, max_length=500)
+    ids: list[str] = Field(min_length=1, max_length=1000)  # 2026-11-19: 1,000 per approve / reject (was 500)
     status: Literal["approved", "rejected"]
     note: Optional[str] = Field(None, max_length=500)
 

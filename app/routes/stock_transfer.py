@@ -10,7 +10,8 @@ Form (page form.stock-transfer: the PICs and the outlet accounts, portal and Ope
     GET  /api/stock-transfer/{id}                    one transfer (either side, or Monitoring Stock)
     GET  /api/stock-transfer/{id}/file/{kind}        photo | signature | receive
 Monitoring Stock (pages cc.stock-list, cc.stock-transfer)
-    GET  /api/monitoring/stock/list?branch=          Stock List: every branch × item of the latest SO, with the transfers
+    GET  /api/monitoring/stock/list?month=&branch=   Stock List per month (app/stock_list_month.py)
+    GET|POST /api/monitoring/stock/transit, DELETE /api/monitoring/stock/transit/{id}   Transit In / Out by hand (migration 123)
     GET  /api/monitoring/stock/transfers             ?dateFrom&dateTo&branch&status -> the transfers and their figures
     GET  /api/monitoring/stock/transfers/lines?ids=  the lines of transfers (Excel per material)
     POST /api/monitoring/stock/transfers/{id}/decide {approve, note, qty: {code: qty}} (approvers only; qty adjusts)
@@ -177,8 +178,56 @@ def stock_estimate(branch: str = Query(..., min_length=1, max_length=40), day: d
 
 
 @router.get("/api/monitoring/stock/list")
-def stock_list(branch: Optional[str] = None, _: dict = Depends(require_page(LIST))) -> dict:
-    return st.stock_list(_branches(branch))
+def stock_list(branch: Optional[str] = None, month: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}$"),
+               _: dict = Depends(require_page(LIST))) -> dict:
+    """Stock List per month (2026-11-19, app/stock_list_month.py): Previous Balance = the count at the end of the month
+    before, Ending Stock = the latest checkpoint of the month; without `month` the latest-SO list."""
+    if not month:  # the page before the monthly Stock List (kept while both are live)
+        return st.stock_list(_branches(branch))
+    from app import stock_list_month
+    return stock_list_month.stock_list(month, _branches(branch))
+
+
+class TransitIn(BaseModel):
+    branch: str = Field(min_length=1, max_length=40)
+    code: str = Field(min_length=1, max_length=80)
+    unit: str = Field(min_length=1, max_length=20)
+    qty: float = Field(gt=0, le=10_000_000)
+    direction: str = Field(pattern="^(in|out)$")
+    date: date
+    note: Optional[str] = Field(None, max_length=500)
+
+
+@router.get("/api/monitoring/stock/transit")
+def transit_list(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"), branch: Optional[str] = None,
+                 _: dict = Depends(require_page(LIST))) -> dict:
+    from app import stock_list_month, stock_transit
+    a, z = stock_list_month.month_bounds(month)
+    return {"data": stock_transit.list_(_branches(branch), a, z)}
+
+
+@router.post("/api/monitoring/stock/transit")
+def transit_add(body: TransitIn, request: Request, user: dict = Depends(require_page(LIST))) -> dict:
+    from app import stock_transit
+    try:
+        row = stock_transit.add(user, body.model_dump(), _branches(None))
+    except stock_transit.TransitError as e:
+        raise HTTPException(422, detail=str(e)) from None
+    activity.record("stock_transit.add", user=user, request=request, page="/cost-control/stock-list",
+                    summary=f"Transit {'In' if row['direction'] == 'in' else 'Out'} {row['branch']} · {row['code']} {row['qty']:g} {row['unit']}",
+                    details=row)
+    return row
+
+
+@router.delete("/api/monitoring/stock/transit/{transit_id}")
+def transit_remove(transit_id: str, request: Request, user: dict = Depends(require_page(LIST))) -> dict:
+    from app import stock_transit
+    row = stock_transit.remove(user, transit_id, _branches(None))
+    if row is None:
+        raise HTTPException(404, detail="Transit tidak ditemukan")
+    activity.record("stock_transit.remove", user=user, request=request, page="/cost-control/stock-list",
+                    summary=f"Transit dihapus {row['branch']} · {row['code']} {row['qty']:g} {row['unit']}", details=row)
+    return row
 
 
 @router.get("/api/monitoring/stock/transfers")

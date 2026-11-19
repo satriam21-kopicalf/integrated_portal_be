@@ -109,6 +109,8 @@ def _add(kind: str) -> None:
 
     @router.get(f"/api/forms/{slug}", name=f"{kind}_form")
     def form(user: dict = Depends(require_page(form_page))) -> dict:
+        # the punch-in of the attendance at an outlet is that outlet's PIC Check In (migration 121): not asked twice
+        attendance = pic_checkin.from_attendance(user) if kind == "pic" else None
         branches = pic_checkin.branch_options(user, every=kind == "surveyor")
         if kind == "pic":  # the on-time deadline of every outlet, as set in Monitoring OPS → Branch Groups (migration 069)
             try:
@@ -121,6 +123,7 @@ def _add(kind: str) -> None:
             "branches": branches,
             "recent": pic_checkin.recent_of(str(user["id"]), kind=kind),
             "today": pic_checkin.done_today(str(user["id"]), kind),  # branches already checked in today
+            **({"attendance": attendance} if kind == "pic" else {}),
             # the Cost Control visit still open (clocked in, not out yet)
             **({"open": _open(str(user["id"]))} if kind == "surveyor" else {}),
             # the outlets the leader of Cost Control planned for the member today (Schedule, migration 108)
@@ -171,6 +174,8 @@ def _add(kind: str) -> None:
         scoped = scoped_branch(branch)
         branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
         branches = branch_groups.narrow(branches, group)  # Monitoring → Branch groups (CCI, CTG, CTGP …)
+        if kind == "pic":  # the punch-ins of the attendance count as PIC Check In too (migration 121)
+            pic_checkin.sync_attendance(start, end)
         return {"period": {"from": start.isoformat(), "to": end.isoformat()},
                 **pic_checkin.monitor(start, end, branches, userId, location, kind=kind)}
 

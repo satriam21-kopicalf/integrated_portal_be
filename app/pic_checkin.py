@@ -285,6 +285,85 @@ def create(user: dict, branch_code: str, photo: str, lat: float, lng: float, acc
             "riskLevel": risk["level"], "riskSignals": [s["code"] for s in risk["signals"]]}
 
 
+# ---------------------------------------------------------------- from the attendance (migration 121, 2026-11-19)
+
+HRMS = "sk_hrms"
+ATTENDANCE_FROM = date(2026, 11, 19)  # the forms were reset that day (migration 122): older punches are not brought back
+
+
+def from_attendance(user: dict, day: Optional[date] = None) -> Optional[dict]:
+    """The PIC's attendance punch-in of the day (HRMS, face and GPS checked there) as the PIC Check In of the outlet whose
+    radius it falls in: one per punch, never when the PIC already checked in at that outlet. A PIC punches in at the
+    first outlet of the day, so the form is not filled twice there. None when no punch, no position or no outlet fits."""
+    emp = user.get("hrms_employee_id")
+    if not emp:
+        return None
+    day = day or datetime.now(WIB_TZ).date()
+    if day < ATTENDANCE_FROM:
+        return None
+    try:
+        a = db.fetchrow(f"""SELECT id, check_in, latitude, longitude FROM {HRMS}.attendance_logs
+                            WHERE employee_id = %s AND date = %s AND check_in IS NOT NULL ORDER BY check_in LIMIT 1""",
+                        (int(emp), day))
+    except Exception:  # noqa: BLE001 - HRMS unreachable: the form works as before
+        return None
+    if not a or a["latitude"] is None or a["longitude"] is None:
+        return None
+    if (done := db.fetchrow(f"SELECT id::text, branch_code, branch_name, visited_at FROM {T} WHERE attendance_id = %s", (a["id"],))):
+        return {"id": done["id"], "branchCode": done["branch_code"], "branchName": done["branch_name"], "visitedAt": done["visited_at"].isoformat()}
+    lat, lng = float(a["latitude"]), float(a["longitude"])
+    fits = []
+    for b in branch_options(user):
+        if b["latitude"] is None:
+            continue
+        j = judge(lat, lng, None, b)
+        if not j["outside_radius"]:
+            fits.append((j["distance_m"], b, j))
+    if not fits:
+        return None
+    _, b, j = min(fits, key=lambda x: x[0])
+    at = a["check_in"].replace(tzinfo=WIB_TZ) if a["check_in"].tzinfo is None else a["check_in"]
+    if db.fetchrow(f"""SELECT 1 FROM {T} WHERE user_id = %s AND kind = 'pic' AND branch_code = %s
+                       AND (visited_at AT TIME ZONE 'Asia/Jakarta')::date = %s""", (user["id"], b["code"], day)):
+        return None  # already checked in there through the form
+    row = db.fetchrow(
+        f"""INSERT INTO {T} (user_id, username, full_name, role, branch_code, branch_name, visited_at, device_time, latitude, longitude,
+                outlet_latitude, outlet_longitude, radius_m, distance_m, outside_radius, low_accuracy, face_count, photo, photo_type,
+                note, device, risk_level, risk_signals, gps_samples, kind, source, attendance_id)
+            VALUES (%(u)s, %(un)s, %(fn)s, %(role)s, %(bc)s, %(bn)s, %(at)s, %(at)s, %(lat)s, %(lng)s, %(olat)s, %(olng)s, %(r)s, %(d)s,
+                false, false, 1, NULL, 'attendance', %(note)s, 'HRMS attendance', 'none', '[]'::jsonb, '[]'::jsonb, 'pic', 'attendance', %(aid)s)
+            ON CONFLICT (attendance_id) WHERE attendance_id IS NOT NULL DO NOTHING
+            RETURNING id::text, visited_at""",
+        {"u": user["id"], "un": user["username"], "fn": user.get("full_name"), "role": user["role"], "bc": b["code"], "bn": b["name"],
+         "at": at, "lat": lat, "lng": lng, "olat": b["latitude"], "olng": b["longitude"], "r": b["radius_m"], "d": j["distance_m"],
+         "note": "Dari absen masuk (HRMS)", "aid": a["id"]})
+    if not row:
+        return None
+    return {"id": row["id"], "branchCode": b["code"], "branchName": b["name"], "visitedAt": row["visited_at"].isoformat()}
+
+
+def sync_attendance(date_from: date, date_to: date) -> int:
+    """Every punch-in of the period by a PIC with a linked portal account made into its PIC Check In (Monitoring opens it:
+    a PIC who never opened the form that day is still counted). At most 31 days back; returns how many were made."""
+    from app import accounts
+    date_from = max(date_from, date_to.fromordinal(date_to.toordinal() - 31), ATTENDANCE_FROM)
+    try:
+        rows = db.fetch(f"""SELECT DISTINCT u.id::text AS user_id, a.date FROM {HRMS}.attendance_logs a
+                            JOIN integration_portal.user_account u ON u.hrms_employee_id = a.employee_id::text
+                             AND u.account_kind = 'person' AND u.is_active
+                            WHERE a.date BETWEEN %s AND %s AND a.check_in IS NOT NULL AND a.latitude IS NOT NULL
+                              AND NOT EXISTS (SELECT 1 FROM {T} c WHERE c.attendance_id = a.id)""", (date_from, date_to))
+    except Exception:  # noqa: BLE001 - HRMS unreachable: the monitoring shows the form check-ins only
+        return 0
+    made, users = 0, {}
+    for r in rows:
+        u = users.get(r["user_id"]) or accounts.get_user(r["user_id"])
+        users[r["user_id"]] = u
+        if u and from_attendance(u, r["date"]):
+            made += 1
+    return made
+
+
 def open_visit(user_id: str) -> Optional[dict]:
     """The surveyor's latest clock in without a clock out of the last OPEN_HOURS hours."""
     return db.fetchrow(f"""SELECT id::text, branch_code, branch_name, visited_at FROM {T}
@@ -350,7 +429,7 @@ COLUMNS = """c.id::text, c.user_id::text, c.username, c.full_name, c.role, c.bra
     c.device_time, c.latitude, c.longitude, c.accuracy_m, c.located_at, c.outlet_latitude, c.outlet_longitude, c.radius_m,
     c.distance_m, c.outside_radius, c.low_accuracy, c.face_count, c.note, c.risk_level, c.risk_signals, c.review_status,
     c.review_note, c.reviewed_by, c.reviewed_at, c.kind, c.out_at, c.out_latitude, c.out_longitude, c.out_accuracy_m,
-    c.out_distance_m, c.out_outside_radius, c.out_low_accuracy, c.out_face_count, c.out_note, c.out_risk_level, c.out_risk_signals"""
+    c.out_distance_m, c.out_outside_radius, c.out_low_accuracy, c.out_face_count, c.out_note, c.out_risk_level, c.out_risk_signals, c.source"""
 
 
 def _view(r: dict, risk: bool = True) -> dict:
@@ -367,6 +446,8 @@ def _view(r: dict, risk: bool = True) -> dict:
         "outletLatitude": num(r["outlet_latitude"]), "outletLongitude": num(r["outlet_longitude"]), "radiusM": r["radius_m"],
         "distanceM": r["distance_m"], "outsideRadius": r["outside_radius"], "lowAccuracy": r["low_accuracy"],
         "outletLocated": r["outlet_latitude"] is not None, "faces": r["face_count"], "note": r["note"],
+        # attendance: made from the HRMS punch-in (migration 121, no photo of its own) · form: Form → PIC Check In
+        "source": r.get("source") or "form",
         **({"clockOut": _clock_out(r, risk)} if r.get("kind") == "surveyor" else {}),
     }
 

@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from app import scope
 from app import database as db
 from app.database import SCHEMA
 
@@ -199,8 +200,15 @@ def start() -> None:
 
 # ---------------------------------------------------------------- the bell
 
-def _view(r: dict) -> dict:
-    return {"id": r["id"], "kind": r["kind"], "severity": r["severity"], "title": r["title"], "body": r["body"],
+def brand_of(branch: Optional[str], brand_codes: frozenset[str]) -> Optional[str]:
+    """The brand of a notification (2026-11-19): the bell stays whole across brands, each line names its brand."""
+    if not branch:
+        return None
+    return next((c for c in scope.BRANDS if branch in brand_codes), scope.MAIN_COMPANY)
+
+
+def _view(r: dict, brand_codes: frozenset[str] = frozenset()) -> dict:
+    return {"brand": brand_of(r["branch_code"], brand_codes), "id": r["id"], "kind": r["kind"], "severity": r["severity"], "title": r["title"], "body": r["body"],
             "link": r["link"], "branch": r["branch_code"], "doc": r["doc_num"], "at": r["created_at"].isoformat(),
             "read": r["read_at"] is not None}
 
@@ -214,7 +222,11 @@ def for_user(user: dict, limit: int = 50) -> dict:
     unread = db.fetchrow(
         f"""SELECT count(*) AS n FROM {T} a WHERE a.created_at > now() - make_interval(days => %s)
               AND NOT EXISTS (SELECT 1 FROM {T_READ} r WHERE r.alert_id = a.id AND r.user_id = %s)""", (SHOW_DAYS, uid))
-    return {"unread": int(unread["n"]) if unread else 0, "data": [_view(r) for r in rows]}
+    try:
+        codes = frozenset(c for b in scope.BRANDS for c in scope.brand_branches(b))
+    except Exception:  # noqa: BLE001 - no branch master: no brand label
+        codes = frozenset()
+    return {"unread": int(unread["n"]) if unread else 0, "data": [_view(r, codes) for r in rows]}
 
 
 def mark_read(user: dict, ids: Optional[list[int]], everything: bool) -> int:

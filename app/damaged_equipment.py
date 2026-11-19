@@ -155,7 +155,7 @@ def categories(active_only: bool = True) -> list[dict]:
 def save_category(category_id: Optional[int], body: dict) -> dict:
     if body.get("defaultUrgency") not in URGENCY:
         raise DeError("Urgensi tidak dikenal")
-    examples = [e.strip()[:80] for e in body.get("examples") or [] if e and e.strip()][:30]
+    examples = [e.strip()[:80] for e in body.get("examples") or [] if e and e.strip()][:200]
     groups = sorted({str(g)[:40] for g in body.get("branchGroups") or [] if g})[:20]
     kind = body.get("kind") or "REPAIR"
     if kind not in KINDS:

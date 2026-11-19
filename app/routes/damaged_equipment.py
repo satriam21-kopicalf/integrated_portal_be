@@ -571,7 +571,7 @@ class CategoryIn(BaseModel):
     group: str = Field(min_length=1, max_length=60)
     name: str = Field(min_length=1, max_length=80)
     defaultUrgency: str
-    examples: list[str] = Field(default_factory=list, max_length=30)
+    examples: list[str] = Field(default_factory=list, max_length=200)
     sort: int = Field(0, ge=0, le=9999)
     isActive: bool = True
     branchGroups: list[str] = Field(default_factory=list, max_length=20)  # [] = every branch

@@ -24,6 +24,30 @@ LEVELS = ("No Sugar", "Less Sugar", "Normal Sugar", "Extra Sugar")
 NO_CARD = "(no recipe card)"
 
 
+def convert(qty: float, unit: Optional[str], packs: Optional[tuple[str, dict[str, float]]]) -> dict:
+    """The converted unit of a raw material (2026-11-19): the quantity in the largest active pack of the item master
+    (kc_master.item_uom, e.g. 1 BTL = 750 ML), from the recipe unit through the base unit; {} when there is no pack
+    bigger than one base unit or the units cannot be compared."""
+    if not packs:
+        return {}
+    base, factors = packs
+    best = max(((u, f) for u, f in factors.items() if f and f > 1 and u != base), key=lambda x: x[1], default=None)
+    if not best:
+        return {}
+    in_base = mc.to_unit(qty, unit, base)
+    if in_base is None:
+        return {}
+    return {"convQty": round(in_base / best[1], 3), "convUom": best[0], "convFactor": best[1], "baseUom": base}
+
+
+def with_conversion(materials: list[dict]) -> list[dict]:
+    try:
+        packs = mc.item_units(sorted({m["code"] for m in materials if m.get("code")}))
+    except Exception:  # noqa: BLE001 - no item master: no conversion
+        packs = {}
+    return [{**m, **convert(m["qty"], m.get("unit"), packs.get(m["code"]))} if m.get("code") else m for m in materials]
+
+
 def sugar_level(name: str) -> Optional[str]:
     """The sugar level of a choice (No / Less / Normal / Extra Sugar), None when it is not a sugar choice. Half Sugar
     counts as Less; Split Sugar (served apart) as Normal; the CE / CA variants as their level."""
@@ -245,6 +269,7 @@ def summary(d_from: date, d_to: date, branches: Optional[list[str]]) -> dict:
     out_outlets = sorted(({**o, "portions": round(o["portions"], 3), "value": round(o["value"], 2), "menus": len(o["menus"]),
                            "materials": sorted(({**x, "qty": round(x["qty"], 3), "value": round(x["value"], 2)} for x in o["materials"].values()),
                                                key=lambda x: -x["value"])} for o in outlets.values()), key=lambda o: -o["value"])
+    materials = with_conversion(materials)
     return {"period": {"from": d_from.isoformat(), "to": d_to.isoformat()}, "menus": out_menus, "materials": materials, "outlets": out_outlets,
             "totals": {"portions": round(sum(m["portions"] for m in out_menus), 3), "value": round(sum(m["value"] for m in out_menus), 2),
                        "noCard": sum(1 for m in out_menus if not m["card"])}}

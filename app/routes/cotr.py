@@ -108,7 +108,7 @@ router = APIRouter(prefix="/api/cotr", tags=["cotr"])
 driver_only = require_roles("driver")
 ENTITY_PAGE = {"pools": "cotr.pools", "fleet": "cotr.fleet", "fleet-types": "cotr.fleet", "shift-templates": "cotr.schedule", "incentive-schemes": "cotr.incentive", "menus": "cotr.menu",
                "boms": "cotr.production", "items": "cotr.production", "drivers": "cotr.drivers",
-               "areas": "cotr.pools", "accessories": "cotr.fleet", "menu-categories": "cotr.menu", "request-kinds": "cotr.check-in"}  # migration 080: with the pools and the fleet
+               "areas": "cotr.areas", "accessories": "cotr.fleet", "menu-categories": "cotr.menu", "request-kinds": "cotr.requests"}  # migration 126: Area and Requests have their own page
 Entity = Literal["pools", "fleet", "fleet-types", "shift-templates", "incentive-schemes", "menus", "boms", "items", "drivers",
                  "areas", "accessories", "menu-categories", "request-kinds"]
 MANAGEMENT = "cotr.management"  # salary, bank and NIK of the drivers (migration 050)

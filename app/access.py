@@ -74,14 +74,17 @@ PAGES: list[tuple[str, str, str]] = [
     ("rating.gofood", "GoFood", "Aggregator"),
     ("rating.grabfood", "GrabFood", "Aggregator"),
     # Calf On The Road (prototype 2026-11-01, sample data in the frontend): pages of the COTR team, given per role / user
-    ("cotr.check-in", "Driver Check In", "Calf On The Road"),
+    ("cotr.check-in", "Monitoring Armada - Driver", "Calf On The Road"),
     ("cotr.storage", "Storage & Assignment", "Calf On The Road"),
-    ("cotr.drivers", "Master Driver", "Calf On The Road"),
-    ("cotr.fleet", "Master Fleet", "Calf On The Road"),
-    ("cotr.pools", "Master Pool / HUB", "Calf On The Road"),
-    ("cotr.menu", "Master Menu", "Calf On The Road"),
     ("cotr.production", "Storage & Production", "Calf On The Road"),
-    ("cotr.schedule", "Master Schedule", "Calf On The Road"),
+    # Master (2026-11-20, migration 126): one page per tab of Calf On The Road → Master, named as the tab
+    ("cotr.pools", "Master · Pool / HUB", "Calf On The Road"),
+    ("cotr.areas", "Master · Area", "Calf On The Road"),
+    ("cotr.menu", "Master · Menu", "Calf On The Road"),
+    ("cotr.fleet", "Master · Fleet & Accessories", "Calf On The Road"),
+    ("cotr.drivers", "Master · Employees", "Calf On The Road"),
+    ("cotr.schedule", "Master · Schedule", "Calf On The Road"),
+    ("cotr.requests", "Master · Requests", "Calf On The Road"),
     ("cotr.incentive", "Incentive Calculator", "Calf On The Road"),
     # not a menu entry: salary, bank account and NIK of the drivers in Master Driver (migration 050)
     ("cotr.management", "COTR Management (salary & bank)", "Calf On The Road"),

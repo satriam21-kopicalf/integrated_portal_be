@@ -40,8 +40,8 @@ MAX_OTHER_FILES = 10
 MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_AMOUNT = Decimal("1000000000000")
 MAX_BARISTAS = 20
-KINDS = {"PETTY_CASH": "Petty cash mingguan", "EMERGENCY": "Pembelian darurat", "MARKETING": "Marketing & promo",
-         "EVENT": "Event & bazar", "BILL": "Tagihan outlet", "PERSONAL": "Pengajuan personal"}
+KINDS = {"PETTY_CASH": "Petty Cash Mingguan", "EMERGENCY": "Pembelian Darurat", "MARKETING": "Marketing & Promo",
+         "EVENT": "Event & Bazar", "BILL": "Tagihan Outlet", "PERSONAL": "Pengajuan Personal"}
 OUTLET_KINDS = ("PETTY_CASH", "EMERGENCY", "MARKETING", "EVENT", "BILL")
 CATEGORIES_OF = {
     "PETTY_CASH": {"RAW": "Bahan baku", "OPERATIONAL": "Operasional outlet", "GAS_WATER": "Gas & air galon",
@@ -243,7 +243,7 @@ def view(row: dict, full: bool = False) -> dict:
         "createdAt": _iso(row["created_at"]), "updatedAt": _iso(row["updated_at"]), "submittedAt": _iso(row["submitted_at"]),
         "firstSubmittedAt": _iso(row["first_submitted_at"]),
         "approvedAt": _iso(row["approved_at"]), "approvedBy": row["approved_by"], "paidAt": _iso(row["paid_at"]), "paidBy": row["paid_by"],
-        "closedAt": _iso(row["closed_at"]), "kind": row["kind"], "kindLabel": KINDS[row["kind"]], "approvalStep": row["approval_step"],
+        "closedAt": _iso(row["closed_at"]), "kind": row["kind"], "kindLabel": kind_labels().get(row["kind"]) or KINDS[row["kind"]], "approvalStep": row["approval_step"],
         "requesterName": row["requester_name"], "requesterPhone": row["requester_phone"], "payeeBank": row["payee_bank"],
         "payeeAccount": row["payee_account"], "payeeName": row["payee_name"], "purpose": row["purpose"], "neededOn": _iso(row["needed_on"]),
         "plafon": _num(row["plafon"]), "requestedAmount": _num(row["requested_amount"]),
@@ -550,7 +550,7 @@ def form_state(user: dict) -> dict:
             "branches": branches, "requests": [view(r) for r in rows], "categories": CATEGORIES, "categoriesOf": CATEGORIES_OF,
             "kinds": KINDS, "neededOn": NEEDED_ON, "receiptRequired": list(RECEIPT_REQUIRED), "docTypes": DOC_TYPES,
             "statusLabel": STATUS_LABEL, "baristas": {b["code"]: barista_options(b["code"]) for b in branches},
-            **personal_state(user)}
+            "kindLabels": kind_labels(), **personal_state(user)}
 
 
 def previous_closing(branch_code: str, exclude: Optional[str] = None) -> Optional[dict]:
@@ -946,7 +946,7 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]]) -> di
         data.append(v)
     from app import fund_options
     return {"data": data, "categories": CATEGORIES, "kinds": KINDS, "docTypes": DOC_TYPES, "statusLabel": STATUS_LABEL,
-            "options": fund_options.all_options()}
+            "options": fund_options.all_options(), "kindLabels": kind_labels()}
 
 
 # ---------------------------------------------------------------- personal requests (2026-11-20, migration 124)
@@ -1093,3 +1093,26 @@ def check_personal(row: dict) -> Optional[Decimal]:
     if plafon is not None and row["requested_amount"] is not None and row["requested_amount"] > plafon:
         raise PengajuanError(f"Melebihi plafon departemen {row.get('department')}: maksimal Rp {plafon:,.0f}".replace(",", "."))
     return plafon
+
+
+# ---------------------------------------------------------------- names of the outlet kinds (2026-11-20, migration 127)
+
+def kind_labels() -> dict[str, str]:
+    """The names management gave the outlet kinds (none = the default name of the app)."""
+    try:
+        return {r["kind"]: r["label"] for r in db.fetch(f"SELECT kind, label FROM {P}.fund_kind_label")}
+    except Exception:  # noqa: BLE001 - before migration 127
+        return {}
+
+
+def set_kind_label(user: dict, kind: str, label: Any) -> dict[str, str]:
+    if kind not in OUTLET_KINDS:
+        raise PengajuanError("Jenis pengajuan tidak dikenal")
+    name = " ".join(str(label or "").split())[:60]
+    if not name:
+        db.fetchrow(f"DELETE FROM {P}.fund_kind_label WHERE kind = %s RETURNING kind", (kind,))
+    else:
+        db.fetchrow(f"""INSERT INTO {P}.fund_kind_label (kind, label, updated_by) VALUES (%s, %s, %s)
+                        ON CONFLICT (kind) DO UPDATE SET label = EXCLUDED.label, updated_at = now(), updated_by = EXCLUDED.updated_by
+                        RETURNING kind""", (kind, name, _actor(user)))
+    return kind_labels()

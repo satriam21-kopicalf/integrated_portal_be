@@ -338,7 +338,7 @@ def settings(request: Request, user: dict = Depends(current_user)) -> dict:
             "canEdit": user.get("role") == "superadmin", "canPlafon": _plafon_editor(user),
             # the lists of the personal form and the plafon per department (management: superadmin / admin)
             "options": options, "lists": fund_options.LISTS, "deptPlafon": fund_options.dept_plafons(),
-            "departments": fund_options.departments(), "canOptions": _options_editor(user)}
+            "departments": fund_options.departments(), "canOptions": _options_editor(user), "kindLabels": pg.kind_labels()}
 
 
 @router.put("/api/pengajuan/settings/flow/{kind}")
@@ -437,3 +437,16 @@ def set_dept_plafon(body: DeptPlafonIn, request: Request, user: dict = Depends(c
     activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan",
                     summary=f"Plafon departemen {body.department}: {body.amount if body.amount else 'tanpa batas'}", details=body.model_dump())
     return {"deptPlafon": out}
+
+
+class KindLabelIn(BaseModel):
+    label: Optional[str] = Field(None, max_length=60)
+
+
+@router.put("/api/pengajuan/settings/kind-label/{kind}")
+def set_kind_label(kind: str, body: KindLabelIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _need_options(request, user)
+    out = _run(pg.set_kind_label, user, kind, body.label)
+    activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan",
+                    summary=f"Nama jenis {kind}: {body.label or '(default)'}", details={"kind": kind, "label": body.label})
+    return {"kindLabels": out}

@@ -993,7 +993,7 @@ def personal_state(user: dict) -> dict:
     last = db.fetchrow(f"""SELECT payee_bank, payee_account, payee_name, account_type_id FROM {P}.pengajuan
                            WHERE user_id::text = %s AND kind = 'PERSONAL' AND status <> 'DRAFT' ORDER BY first_submitted_at DESC LIMIT 1""",
                        (str(user["id"]),)) or {}
-    return {"profile": _profile(user), "options": fund_options.all_options(active_only=True), "outlets": outlet_options(),
+    return {"profile": _profile(user), "options": fund_options.all_options(active_only=True), "outlets": outlet_options(), "listNames": list_names(),
             "advances": open_advances(str(user["id"])),
             "lastPayee": {"bank": last.get("payee_bank"), "account": last.get("payee_account"), "name": last.get("payee_name"),
                           "accountTypeId": last.get("account_type_id")}}
@@ -1105,8 +1105,17 @@ def kind_labels() -> dict[str, str]:
         return {}
 
 
+def list_names() -> dict[str, str]:
+    """The titles of the lists of the personal form (Keperluan Dana …), as management named them."""
+    from app import fund_options
+    names = kind_labels()
+    return {k: names.get(f"LIST:{k}") or v for k, v in fund_options.LISTS.items()}
+
+
 def set_kind_label(user: dict, kind: str, label: Any) -> dict[str, str]:
-    if kind not in OUTLET_KINDS:
+    """The name of an outlet kind, or (LIST:<list>) the title of a list of the personal form."""
+    from app import fund_options
+    if kind not in OUTLET_KINDS and kind not in {f"LIST:{k}" for k in fund_options.LISTS}:
         raise PengajuanError("Jenis pengajuan tidak dikenal")
     name = " ".join(str(label or "").split())[:60]
     if not name:

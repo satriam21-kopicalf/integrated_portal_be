@@ -337,7 +337,7 @@ def settings(request: Request, user: dict = Depends(current_user)) -> dict:
     return {"kinds": pg.KINDS, "flows": flows, "users": pg.approver_options(), "plafon": pg.plafons(), "outlets": pg.outlet_options(),
             "canEdit": user.get("role") == "superadmin", "canPlafon": _plafon_editor(user),
             # the lists of the personal form and the plafon per department (management: superadmin / admin)
-            "options": options, "lists": fund_options.LISTS, "deptPlafon": fund_options.dept_plafons(),
+            "options": options, "lists": pg.list_names(), "listDefaults": fund_options.LISTS, "deptPlafon": fund_options.dept_plafons(),
             "departments": fund_options.departments(), "canOptions": _options_editor(user), "kindLabels": pg.kind_labels()}
 
 

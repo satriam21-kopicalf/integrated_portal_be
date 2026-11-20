@@ -41,7 +41,8 @@ MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_AMOUNT = Decimal("1000000000000")
 MAX_BARISTAS = 20
 KINDS = {"PETTY_CASH": "Petty cash mingguan", "EMERGENCY": "Pembelian darurat", "MARKETING": "Marketing & promo",
-         "EVENT": "Event & bazar", "BILL": "Tagihan outlet"}
+         "EVENT": "Event & bazar", "BILL": "Tagihan outlet", "PERSONAL": "Pengajuan personal"}
+OUTLET_KINDS = ("PETTY_CASH", "EMERGENCY", "MARKETING", "EVENT", "BILL")
 CATEGORIES_OF = {
     "PETTY_CASH": {"RAW": "Bahan baku", "OPERATIONAL": "Operasional outlet", "GAS_WATER": "Gas & air galon",
                    "TRANSPORT": "Transportasi & kirim", "CLEANING": "Kebersihan & ATK", "REPAIR": "Perbaikan ringan",
@@ -55,6 +56,7 @@ CATEGORIES_OF = {
     "BILL": {"ELECTRIC": "Listrik", "WATER": "Air (PDAM)", "INTERNET": "Internet & telepon", "WASTE": "Sampah",
              "SECURITY": "Keamanan & lingkungan", "RENT": "Sewa tempat", "OTHER": "Lainnya"},
 }
+CATEGORIES_OF["PERSONAL"] = {}  # a personal request has one amount, no expense lines (2026-11-20)
 CATEGORIES = {k: v for cats in CATEGORIES_OF.values() for k, v in cats.items()}
 RECEIPT_REQUIRED = ("PETTY_CASH", "EMERGENCY", "BILL")   # every line needs its receipt / invoice
 LINE_DATE_REQUIRED = ("PETTY_CASH", "EMERGENCY")
@@ -205,7 +207,8 @@ COLS = """p.id::text, p.number, p.status, p.user_id::text, p.username, p.full_na
     p.closing_balance, p.note, p.approved_amount, p.paid_amount, p.paid_on, p.paid_note, p.created_at, p.updated_at, p.submitted_at,
     p.first_submitted_at, p.approved_at, p.approved_by, p.paid_at, p.paid_by, p.closed_at, p.kind, p.approval_step,
     p.requester_name, p.requester_phone, p.payee_bank, p.payee_account, p.payee_name, p.purpose, p.needed_on, p.plafon,
-    p.requested_amount"""
+    p.requested_amount, p.email, p.department, p.job_title, p.purpose_id, p.transaction_type_id, p.project_id,
+    p.account_type_id, p.settles_id::text"""
 
 
 def get_row(pengajuan_id: str) -> Optional[dict]:
@@ -244,14 +247,25 @@ def view(row: dict, full: bool = False) -> dict:
         "requesterName": row["requester_name"], "requesterPhone": row["requester_phone"], "payeeBank": row["payee_bank"],
         "payeeAccount": row["payee_account"], "payeeName": row["payee_name"], "purpose": row["purpose"], "neededOn": _iso(row["needed_on"]),
         "plafon": _num(row["plafon"]), "requestedAmount": _num(row["requested_amount"]),
+        "scope": "PERSONAL" if row["kind"] == "PERSONAL" else "OUTLET", "email": row.get("email"), "department": row.get("department"),
+        "jobTitle": row.get("job_title"), "purposeId": row.get("purpose_id"), "transactionTypeId": row.get("transaction_type_id"),
+        "projectId": row.get("project_id"), "accountTypeId": row.get("account_type_id"), "settlesId": row.get("settles_id"),
     }
+    if row["kind"] == "PERSONAL":
+        names = _option_names()
+        out["kindLabel"] = names.get(row.get("purpose_id")) or KINDS["PERSONAL"]
+        out["purposeName"] = names.get(row.get("purpose_id"))
+        out["transactionTypeName"] = names.get(row.get("transaction_type_id"))
+        out["projectName"] = names.get(row.get("project_id"))
+        out["accountTypeName"] = names.get(row.get("account_type_id"))
+        out["settles"] = settlement_of(row)
     if full:
         out["lines"] = lines_of(row["id"])
         out["files"] = files_of(row["id"])
         out["events"] = events_of(row["id"])
         out["missing"] = missing(row, out["lines"], out["files"]) if row["status"] in EDITABLE else []
         out["steps"] = [{"position": s["position"], "label": s["label"], "type": s["type"], "users": [u["name"] for u in s["users"]]}
-                        for s in flow(row["kind"])]
+                        for s in steps_of(row)]
         if row["kind"] == "PETTY_CASH" and row["status"] in EDITABLE:
             out["plafon"] = _num(plafon_of(row["branch_code"]))
         if row["kind"] == "PETTY_CASH":
@@ -281,6 +295,16 @@ def flow(kind: str, form: str = "pengajuan") -> list[dict]:
             for i, s in enumerate(steps, start=1)]
 
 
+def flow_key(row: dict) -> str:
+    return f"PERSONAL:{row['purpose_id']}" if row.get("kind") == "PERSONAL" and row.get("purpose_id") else row["kind"]
+
+
+def steps_of(row: dict) -> list[dict]:
+    """The steps of a request: its kind's; a personal one its Keperluan Dana's own, else the default personal flow."""
+    steps = flow(flow_key(row))
+    return steps if steps or row.get("kind") != "PERSONAL" else flow("PERSONAL")
+
+
 def _approvals(steps: list[dict]) -> list[dict]:
     return [s for s in steps if s["type"] == "APPROVE"]
 
@@ -295,7 +319,7 @@ def takes(user: dict, step: Optional[dict]) -> bool:
 
 
 def current_step(row: dict, steps: Optional[list[dict]] = None) -> Optional[dict]:
-    steps = flow(row["kind"]) if steps is None else steps
+    steps = steps_of(row) if steps is None else steps
     if row["status"] == "SUBMITTED":
         appr = _approvals(steps)
         return appr[min(max(row["approval_step"], 1), len(appr)) - 1] if appr else None
@@ -314,7 +338,13 @@ def set_flow(user: dict, kind: str, steps: list[dict], form: str = "pengajuan") 
     (the last entry, type PAY; Form Fund only). Damaged Equipment: approval steps only, none = any monitoring account
     accepts as before. Requests waiting keep their position (clamped to the new number of steps)."""
     kinds, page = FLOW_FORMS.get(form, ({}, ""))
-    if kind not in kinds:
+    purpose = None
+    if form == "pengajuan" and kind.startswith("PERSONAL:"):  # the flow of one Keperluan Dana
+        from app import fund_options
+        purpose = fund_options.get(int(kind.split(":", 1)[1]) if kind.split(":", 1)[1].isdigit() else 0)
+        if purpose is None or purpose["list"] != "PURPOSE":
+            raise PengajuanError("Keperluan Dana tidak dikenal")
+    elif kind not in kinds:
         raise PengajuanError("Jenis pengajuan tidak dikenal")
     appr = [s for s in steps if s.get("type") != "PAY"]
     pay = [s for s in steps if s.get("type") == "PAY"]
@@ -342,8 +372,12 @@ def set_flow(user: dict, kind: str, steps: list[dict], form: str = "pengajuan") 
             conn.execute(f"""INSERT INTO {P}.user_page (user_id, page, allowed) VALUES (%s, %s, true)
                              ON CONFLICT (user_id, page) DO UPDATE SET allowed = true""", (uid, page))
         if form == "pengajuan":
-            conn.execute(f"""UPDATE {P}.pengajuan SET approval_step = LEAST(approval_step, %s) WHERE kind = %s AND status = 'SUBMITTED'""",
-                         (len(appr), kind))
+            if purpose:
+                conn.execute(f"""UPDATE {P}.pengajuan SET approval_step = LEAST(approval_step, %s)
+                                 WHERE kind = 'PERSONAL' AND purpose_id = %s AND status = 'SUBMITTED'""", (len(appr), purpose["id"]))
+            else:
+                conn.execute(f"""UPDATE {P}.pengajuan SET approval_step = LEAST(approval_step, %s) WHERE kind = %s AND status = 'SUBMITTED'""",
+                             (len(appr), kind))
         else:
             conn.execute(f"""UPDATE {P}.de_request SET approval_step = GREATEST(LEAST(approval_step, %s), 1)
                              WHERE kind = %s AND status = 'REVIEW'""", (len(appr), kind))
@@ -515,7 +549,8 @@ def form_state(user: dict) -> dict:
     return {"user": {"id": str(user["id"]), "username": user["username"], "name": user.get("full_name") or user["username"]},
             "branches": branches, "requests": [view(r) for r in rows], "categories": CATEGORIES, "categoriesOf": CATEGORIES_OF,
             "kinds": KINDS, "neededOn": NEEDED_ON, "receiptRequired": list(RECEIPT_REQUIRED), "docTypes": DOC_TYPES,
-            "statusLabel": STATUS_LABEL, "baristas": {b["code"]: barista_options(b["code"]) for b in branches}}
+            "statusLabel": STATUS_LABEL, "baristas": {b["code"]: barista_options(b["code"]) for b in branches},
+            **personal_state(user)}
 
 
 def previous_closing(branch_code: str, exclude: Optional[str] = None) -> Optional[dict]:
@@ -526,9 +561,11 @@ def previous_closing(branch_code: str, exclude: Optional[str] = None) -> Optiona
                            ORDER BY period_to DESC NULLS LAST, first_submitted_at DESC LIMIT 1""", (branch_code, exclude, exclude))
 
 
-def create_draft(user: dict, branch_code: str, kind: str = "PETTY_CASH") -> dict:
+def create_draft(user: dict, branch_code: Optional[str], kind: str = "PETTY_CASH") -> dict:
     if kind not in KINDS:
         raise PengajuanError("Jenis pengajuan tidak dikenal")
+    if kind == "PERSONAL":
+        return create_personal(user, branch_code)
     branch = next((b for b in branch_options(user) if b["code"] == branch_code), None)
     if branch is None:
         raise PengajuanError("Cabang tidak tersedia untuk akun Anda")
@@ -602,6 +639,8 @@ def save_draft(user: dict, pengajuan_id: str, body: dict) -> dict:
         sets["opening_balance"] = _amount(body["openingBalance"], "Saldo awal", allow_negative=True)
     if "incomeAmount" in body:
         sets["income_amount"] = _amount(body["incomeAmount"], "Dana masuk") or Decimal(0)
+    if row["kind"] == "PERSONAL":
+        sets.update(personal_sets(user, row, body))
     for key, col in (("openingNote", "opening_note"), ("incomeNote", "income_note"), ("note", "note"), ("purpose", "purpose")):
         if key in body:
             sets[col] = (str(body[key] or "")).strip()[:1000] or None
@@ -641,6 +680,8 @@ def save_draft(user: dict, pengajuan_id: str, body: dict) -> dict:
 def missing(row: dict, lines: list[dict], files: list[dict]) -> list[str]:
     """What blocks the sending (the same list shows in the form)."""
     kind = row.get("kind") or "PETTY_CASH"
+    if kind == "PERSONAL":
+        return missing_personal(row, files)
     petty = kind == "PETTY_CASH"
     out = []
     if not (row.get("requester_name") or "").strip():
@@ -732,6 +773,8 @@ def submit(user: dict, pengajuan_id: str) -> dict:
         raise PengajuanError(f"Periode ini sudah diajukan di {other}: petty cash satu kali per periode, pilih periode berikutnya")
     plafon = plafon_of(row["branch_code"]) if row["kind"] == "PETTY_CASH" else None
     ask = requested(row["kind"], row["opening_balance"], row["income_amount"], row["total_out"], plafon)
+    if row["kind"] == "PERSONAL":
+        plafon, ask = check_personal(row), row["requested_amount"]
     with db.transaction() as conn:
         number = row["number"] or _next_number(conn)
         # a revision is checked again from the first approval step
@@ -767,7 +810,7 @@ def allowed_next(user: dict, row: dict, steps: Optional[list[dict]] = None) -> l
 
 def can(user: dict, row: dict) -> dict:
     """What the signed-in user may do on it now, and who takes the step waiting."""
-    steps = flow(row["kind"])
+    steps = steps_of(row)
     step = current_step(row, steps)
     mine = takes(user, step)
     return {"next": allowed_next(user, row, steps), "reviewLines": mine and row["status"] == "SUBMITTED",
@@ -782,7 +825,7 @@ def change_status(user: dict, pengajuan_id: str, to: str, note: Optional[str], p
         raise LookupError("Pengajuan tidak ditemukan")
     if to not in allowed_actions(row["status"]):
         raise PengajuanError(f"Tidak dapat memproses pengajuan {STATUS_LABEL[row['status']].lower()} dengan langkah ini")
-    steps = flow(row["kind"])
+    steps = steps_of(row)
     step = current_step(row, steps)
     if not takes(user, step):
         who = ", ".join(u["name"] for u in step["users"]) if step and step["users"] else "superadmin"
@@ -795,8 +838,11 @@ def change_status(user: dict, pengajuan_id: str, to: str, note: Optional[str], p
     status, position = to, row["approval_step"]
     if to == "APPROVE":
         if row["approval_step"] >= len(_approvals(steps)):
-            ok = sum((Decimal(str(ln["amount"] or 0)) for ln in lines_of(pengajuan_id) if ln["review"] == "OK"), Decimal(0))
-            details["approvedAmount"] = requested(row["kind"], row["opening_balance"], row["income_amount"], ok, row["plafon"])
+            if row["kind"] == "PERSONAL":  # one amount, no expense lines
+                details["approvedAmount"] = row["requested_amount"]
+            else:
+                ok = sum((Decimal(str(ln["amount"] or 0)) for ln in lines_of(pengajuan_id) if ln["review"] == "OK"), Decimal(0))
+                details["approvedAmount"] = requested(row["kind"], row["opening_balance"], row["income_amount"], ok, row["plafon"])
             sets += ["approved_at = now()", "approved_by = %(actor)s", "approved_amount = %(approved)s"]
             status = "APPROVED"
         else:
@@ -865,7 +911,7 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]]) -> di
              "((p.first_submitted_at AT TIME ZONE 'Asia/Jakarta')::date BETWEEN %(a)s AND %(b)s OR p.status = ANY(%(open)s))"]
     params: dict[str, Any] = {"a": date_from, "b": date_to, "open": list(OPEN)}
     if branches is not None:
-        where.append("p.branch_code = ANY(%(br)s)")
+        where.append("(p.branch_code = ANY(%(br)s) OR p.branch_code IS NULL)")  # personal: no outlet
         params["br"] = branches
     rows = db.fetch(f"SELECT {COLS} FROM {P}.pengajuan p WHERE {' AND '.join(where)} ORDER BY p.submitted_at DESC LIMIT 2000", params)
     ids = [r["id"] for r in rows]
@@ -882,12 +928,12 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]]) -> di
                                          WHERE o.sha256 = f.sha256 AND o.pengajuan_id <> f.pengajuan_id AND q.status <> 'DRAFT'))::int AS reused
                               FROM {P}.pengajuan_file f WHERE f.pengajuan_id::text = ANY(%s) GROUP BY 1""", (ids,)):
             stats[s["pid"]] = s
-    flows = {k: flow(k) for k in {r["kind"] for r in rows}}
+    flows = {flow_key(r): steps_of(r) for r in rows}
     refs = weekly_averages(sorted({r["branch_code"] for r in rows if r["kind"] == "PETTY_CASH"}))
     data = []
     for r in rows:
         v = view(r)
-        step = current_step(r, flows[r["kind"]])
+        step = current_step(r, flows[flow_key(r)])
         v["step"] = {"label": step["label"], "users": [u["name"] for u in step["users"]],
                      "userIds": [u["id"] for u in step["users"]]} if step else None
         ref = refs.get(r["branch_code"]) if r["kind"] == "PETTY_CASH" else None
@@ -898,4 +944,152 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]]) -> di
         v["fileCount"] = stats.get(r["id"], {}).get("files", 0)
         v["reusedFiles"] = stats.get(r["id"], {}).get("reused", 0)
         data.append(v)
-    return {"data": data, "categories": CATEGORIES, "kinds": KINDS, "docTypes": DOC_TYPES, "statusLabel": STATUS_LABEL}
+    from app import fund_options
+    return {"data": data, "categories": CATEGORIES, "kinds": KINDS, "docTypes": DOC_TYPES, "statusLabel": STATUS_LABEL,
+            "options": fund_options.all_options()}
+
+
+# ---------------------------------------------------------------- personal requests (2026-11-20, migration 124)
+
+def _option_names() -> dict[int, str]:
+    return {r["id"]: r["name"] for r in db.fetch(f"SELECT id, name FROM {P}.fund_option")}
+
+
+def _profile(user: dict) -> dict:
+    """Email, name, department and job title of the account (synced from HRMS): filled in and not typed again."""
+    return {"email": user.get("email"), "name": user.get("full_name") or user["username"], "department": user.get("department"),
+            "jobTitle": user.get("job_title")}
+
+
+def open_advances(user_id: str, exclude: Optional[str] = None) -> list[dict]:
+    """The Cash in Advance of a person paid and not settled yet (a settlement not rejected settles it)."""
+    rows = db.fetch(f"""SELECT p.id::text, p.number, p.paid_amount, p.paid_on, p.purpose FROM {P}.pengajuan p
+                         JOIN {P}.fund_option o ON o.id = p.purpose_id AND o.settings->>'type' = 'ADVANCE'
+                        WHERE p.kind = 'PERSONAL' AND p.user_id::text = %s AND p.status = 'PAID'
+                          AND NOT EXISTS (SELECT 1 FROM {P}.pengajuan s WHERE s.settles_id = p.id AND s.status NOT IN ('DRAFT', 'REJECTED')
+                                            AND (%s::text IS NULL OR s.id::text <> %s))
+                        ORDER BY p.paid_on DESC NULLS LAST""", (user_id, exclude, exclude))
+    return [{"id": r["id"], "number": r["number"], "paidAmount": _num(r["paid_amount"]), "paidOn": _iso(r["paid_on"]), "purpose": r["purpose"]} for r in rows]
+
+
+def settle_diff(paid: Any, spent: Any) -> dict:
+    """A Laporan Penyelesaian: spent − paid > 0 the company still pays, < 0 the person gives back (pure)."""
+    d = Decimal(str(spent or 0)) - Decimal(str(paid or 0))
+    return {"diff": float(d), "outcome": "PAY" if d > 0 else "RETURN" if d < 0 else "EVEN"}
+
+
+def settlement_of(row: dict) -> Optional[dict]:
+    if not row.get("settles_id"):
+        return None
+    ca = db.fetchrow(f"SELECT id::text, number, paid_amount, paid_on FROM {P}.pengajuan WHERE id::text = %s", (row["settles_id"],))
+    if ca is None:
+        return None
+    return {"id": ca["id"], "number": ca["number"], "paidAmount": _num(ca["paid_amount"]), "paidOn": _iso(ca["paid_on"]),
+            **settle_diff(ca["paid_amount"], row["requested_amount"])}
+
+
+def personal_state(user: dict) -> dict:
+    from app import fund_options
+    last = db.fetchrow(f"""SELECT payee_bank, payee_account, payee_name, account_type_id FROM {P}.pengajuan
+                           WHERE user_id::text = %s AND kind = 'PERSONAL' AND status <> 'DRAFT' ORDER BY first_submitted_at DESC LIMIT 1""",
+                       (str(user["id"]),)) or {}
+    return {"profile": _profile(user), "options": fund_options.all_options(active_only=True), "outlets": outlet_options(),
+            "advances": open_advances(str(user["id"])),
+            "lastPayee": {"bank": last.get("payee_bank"), "account": last.get("payee_account"), "name": last.get("payee_name"),
+                          "accountTypeId": last.get("account_type_id")}}
+
+
+def create_personal(user: dict, branch_code: Optional[str]) -> dict:
+    row = db.fetchrow(f"""SELECT id::text FROM {P}.pengajuan WHERE user_id::text = %s AND kind = 'PERSONAL' AND status = 'DRAFT'
+                          ORDER BY updated_at DESC LIMIT 1""", (str(user["id"]),))
+    if row is None:
+        me, last = _profile(user), personal_state(user)["lastPayee"]
+        mine = branch_options(user)
+        branch = next((b for b in mine if b["code"] == branch_code), None) or (mine[0] if len(mine) == 1 else None)
+        row = db.fetchrow(f"""INSERT INTO {P}.pengajuan (user_id, username, full_name, kind, baristas, email, department, job_title,
+                                  requester_name, branch_code, branch_name, payee_bank, payee_account, payee_name, account_type_id)
+                              VALUES (%s, %s, %s, 'PERSONAL', '[]'::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id::text""",
+                          (user["id"], user["username"], user.get("full_name"), me["email"], me["department"], me["jobTitle"], me["name"],
+                           branch["code"] if branch else None, branch["name"] if branch else None,
+                           last["bank"], last["account"], last["name"], last["accountTypeId"]))
+    return full(row["id"])
+
+
+def _option_id(v: Any, list_: str, label: str) -> Optional[int]:
+    if v in (None, ""):
+        return None
+    try:
+        oid = int(v)
+    except (TypeError, ValueError):
+        raise PengajuanError(f"{label} tidak dikenal") from None
+    if not db.fetchrow(f"SELECT 1 AS x FROM {P}.fund_option WHERE id = %s AND list = %s", (oid, list_)):
+        raise PengajuanError(f"{label} tidak dikenal")
+    return oid
+
+
+def personal_sets(user: dict, row: dict, body: dict) -> dict:
+    """The personal fields of a draft; the identity is refreshed from the account at every save."""
+    me = _profile(user)
+    sets: dict[str, Any] = {"email": me["email"], "department": me["department"], "job_title": me["jobTitle"], "requester_name": me["name"]}
+    for key, list_, label, col in (("purposeId", "PURPOSE", "Keperluan Dana", "purpose_id"),
+                                   ("transactionTypeId", "TRANSACTION", "Jenis Transaksi", "transaction_type_id"),
+                                   ("projectId", "PROJECT", "Project", "project_id"), ("accountTypeId", "ACCOUNT", "Jenis Rekening", "account_type_id")):
+        if key in body:
+            sets[col] = _option_id(body[key], list_, label)
+    if "requestedAmount" in body:
+        sets["requested_amount"] = _amount(body["requestedAmount"], "Total dana diajukan")
+    if "branchCode" in body:
+        code = (body["branchCode"] or "").strip()
+        if code:
+            b = next((o for o in outlet_options() if o["code"] == code), None)
+            if b is None:
+                raise PengajuanError("Outlet tidak dikenal")
+            sets["branch_code"], sets["branch_name"] = b["code"], b["name"]
+        else:
+            sets["branch_code"] = sets["branch_name"] = None
+    if "settlesId" in body:
+        sid = (body["settlesId"] or "").strip() or None
+        if sid and sid not in {a["id"] for a in open_advances(str(user["id"]), exclude=row["id"])}:
+            raise PengajuanError("Cash in Advance tidak ditemukan atau sudah diselesaikan")
+        sets["settles_id"] = sid
+    return sets
+
+
+def missing_personal(row: dict, files: list[dict]) -> list[str]:
+    from app import fund_options
+    out = []
+    purpose = fund_options.get(row.get("purpose_id"))
+    flags = (purpose or {}).get("settings") or {}
+    if purpose is None:
+        out.append("Pilih Keperluan Dana")
+    if not row.get("transaction_type_id"):
+        out.append("Pilih Jenis Transaksi")
+    if not row.get("needed_on"):
+        out.append("Isi tanggal dana dibutuhkan")
+    if not (row.get("purpose") or "").strip():
+        out.append("Tulis deskripsi dan detail pengajuan dana")
+    if row.get("requested_amount") is None or row["requested_amount"] <= 0:
+        out.append("Isi total dana diajukan")
+    if flags.get("outlet") and not row.get("branch_code"):
+        out.append("Pilih outlet")
+    if not row.get("account_type_id"):
+        out.append("Pilih jenis rekening tujuan")
+    if not (row.get("payee_bank") or "").strip() or not (row.get("payee_account") or "").strip() or not (row.get("payee_name") or "").strip():
+        out.append("Isi rekening tujuan: bank, nomor rekening dan nama pemilik")
+    if flags.get("type") == "SETTLEMENT" and not row.get("settles_id"):
+        out.append("Pilih Cash in Advance yang diselesaikan")
+    if flags.get("receipt") and not any(f["kind"] in ("OTHER", "LINE") for f in files):
+        out.append("Lampirkan dokumen pendukung (nota / kwitansi / foto)")
+    return out
+
+
+def check_personal(row: dict) -> Optional[Decimal]:
+    """The plafon of the department for a Keperluan Dana marked deptPlafon (refused above it); None = no limit."""
+    from app import fund_options
+    purpose = fund_options.get(row.get("purpose_id")) or {}
+    if not (purpose.get("settings") or {}).get("deptPlafon"):
+        return None
+    plafon = fund_options.dept_plafon(row.get("department"))
+    if plafon is not None and row["requested_amount"] is not None and row["requested_amount"] > plafon:
+        raise PengajuanError(f"Melebihi plafon departemen {row.get('department')}: maksimal Rp {plafon:,.0f}".replace(",", "."))
+    return plafon

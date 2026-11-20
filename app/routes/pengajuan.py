@@ -66,7 +66,7 @@ def _team_row(request: Request, user: dict, pengajuan_id: str) -> dict:
     _need(request, user, MON)
     row = pg.get_row(pengajuan_id)
     scope = allowed_branches()
-    if row is None or row["status"] == "DRAFT" or (scope is not None and row["branch_code"] not in scope):
+    if row is None or row["status"] == "DRAFT" or (scope is not None and row["branch_code"] and row["branch_code"] not in scope):
         raise HTTPException(404, detail="Pengajuan tidak ditemukan")
     return row
 
@@ -90,7 +90,7 @@ async def _body(request: Request) -> bytes:
 # ---------------------------------------------------------------- outlet
 
 class NewIn(BaseModel):
-    branchCode: str = Field(min_length=1, max_length=40)
+    branchCode: Optional[str] = Field(None, max_length=40)  # a personal request may have no outlet (2026-11-20)
     kind: str = Field("PETTY_CASH", max_length=20)
 
 
@@ -124,6 +124,14 @@ class DraftIn(BaseModel):
     payeeName: Optional[str] = Field(None, max_length=80)
     purpose: Optional[str] = Field(None, max_length=1000)
     neededOn: Optional[str] = Field(None, max_length=10)
+    # personal (2026-11-20, migration 124)
+    purposeId: Optional[int] = None
+    transactionTypeId: Optional[int] = None
+    projectId: Optional[int] = None
+    accountTypeId: Optional[int] = None
+    requestedAmount: Optional[float] = None
+    branchCode: Optional[str] = Field(None, max_length=40)
+    settlesId: Optional[str] = Field(None, max_length=40)
 
 
 @router.get("/api/pengajuan/form")
@@ -194,7 +202,7 @@ def file(file_id: str, request: Request, user: dict = Depends(current_user)) -> 
         raise HTTPException(404, detail="File tidak ditemukan")
     own = row["user_id"] == str(user["id"]) and has_page(user, FORM)
     scope = allowed_branches()
-    team = row["status"] != "DRAFT" and has_page(user, MON) and (scope is None or row["branch_code"] in scope)
+    team = row["status"] != "DRAFT" and has_page(user, MON) and (scope is None or not row["branch_code"] or row["branch_code"] in scope)
     if not (own or team):
         deny(request, user)
     if f["path"] is None:
@@ -322,8 +330,15 @@ def _superadmin(request: Request, user: dict) -> None:
 @router.get("/api/pengajuan/settings")
 def settings(request: Request, user: dict = Depends(current_user)) -> dict:
     _need(request, user, MON)
-    return {"kinds": pg.KINDS, "flows": {k: pg.flow(k) for k in pg.KINDS}, "users": pg.approver_options(), "plafon": pg.plafons(), "outlets": pg.outlet_options(),
-            "canEdit": user.get("role") == "superadmin", "canPlafon": _plafon_editor(user)}
+    from app import fund_options
+    options = fund_options.all_options()
+    flows = {k: pg.flow(k) for k in pg.KINDS}
+    flows.update({f"PERSONAL:{o['id']}": pg.flow(f"PERSONAL:{o['id']}") for o in options["PURPOSE"]})
+    return {"kinds": pg.KINDS, "flows": flows, "users": pg.approver_options(), "plafon": pg.plafons(), "outlets": pg.outlet_options(),
+            "canEdit": user.get("role") == "superadmin", "canPlafon": _plafon_editor(user),
+            # the lists of the personal form and the plafon per department (management: superadmin / admin)
+            "options": options, "lists": fund_options.LISTS, "deptPlafon": fund_options.dept_plafons(),
+            "departments": fund_options.departments(), "canOptions": _options_editor(user)}
 
 
 @router.put("/api/pengajuan/settings/flow/{kind}")
@@ -362,3 +377,63 @@ def set_plafon(body: PlafonIn, request: Request, user: dict = Depends(current_us
     activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan",
                     summary=f"Plafon petty cash {body.branchCode}: {body.amount}", details=body.model_dump())
     return out
+
+
+# ---------------------------------------------------------------- the lists of the personal form (2026-11-20)
+
+class OptionIn(BaseModel):
+    list: str = Field(pattern="^(PURPOSE|TRANSACTION|PROJECT|ACCOUNT)$")
+    name: str = Field(min_length=1, max_length=120)
+    settings: Optional[dict] = None
+
+
+class OptionPatch(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=120)
+    isActive: Optional[bool] = None
+    sort: Optional[int] = Field(None, ge=0, le=100_000)
+    settings: Optional[dict] = None
+
+
+class DeptPlafonIn(BaseModel):
+    department: str = Field(min_length=1, max_length=120)
+    amount: Optional[float] = None
+
+
+def _options_editor(user: dict) -> bool:
+    return user.get("role") in ("superadmin", "admin")
+
+
+def _need_options(request: Request, user: dict) -> None:
+    _need(request, user, MON)
+    if not _options_editor(user):
+        deny(request, user)
+
+
+@router.post("/api/pengajuan/settings/options", status_code=201)
+def add_option(body: OptionIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    from app import fund_options
+    _need_options(request, user)
+    out = _run(fund_options.create, user, body.list, body.name, body.settings)
+    activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan",
+                    summary=f"Menambah {fund_options.LISTS[body.list]}: {out['name']}", details=out)
+    return out
+
+
+@router.patch("/api/pengajuan/settings/options/{option_id}")
+def edit_option(option_id: int, body: OptionPatch, request: Request, user: dict = Depends(current_user)) -> dict:
+    from app import fund_options
+    _need_options(request, user)
+    out = _run(fund_options.update, user, option_id, body.model_dump(exclude_unset=True))
+    activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan",
+                    summary=f"Mengubah {fund_options.LISTS[out['list']]}: {out['name']}{'' if out['isActive'] else ' (nonaktif)'}", details=out)
+    return out
+
+
+@router.put("/api/pengajuan/settings/dept-plafon")
+def set_dept_plafon(body: DeptPlafonIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    from app import fund_options
+    _need_options(request, user)
+    out = _run(fund_options.set_dept_plafon, user, body.department, body.amount)
+    activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan",
+                    summary=f"Plafon departemen {body.department}: {body.amount if body.amount else 'tanpa batas'}", details=body.model_dump())
+    return {"deptPlafon": out}

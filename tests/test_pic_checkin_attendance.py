@@ -15,7 +15,7 @@ def _fake(monkeypatch, punch, existing=None, form_done=False):
         calls.append(sql)
         if sql.strip().startswith("INSERT"):
             return {"id": "new", "visited_at": params["at"]}
-        if "attendance_logs" in sql:
+        if "attendance_records" in sql:
             return punch
         if "WHERE attendance_id" in sql:
             return existing
@@ -30,18 +30,18 @@ def _fake(monkeypatch, punch, existing=None, form_done=False):
 
 
 def test_a_punch_in_at_an_outlet_becomes_its_check_in(monkeypatch):
-    calls = _fake(monkeypatch, {"id": 11, "check_in": datetime(2026, 11, 19, 8, 5), "latitude": -6.20005, "longitude": 106.80003})
+    calls = _fake(monkeypatch, {"id": "a11", "check_in": datetime(2026, 11, 19, 8, 5), "latitude": -6.20005, "longitude": 106.80003})
     out = pc.from_attendance(USER, date(2026, 11, 19))
     assert out["branchCode"] == "A" and out["id"] == "new" and out["visitedAt"].startswith("2026-11-19T08:05")
     assert any(c.strip().startswith("INSERT") for c in calls)
 
 
 def test_no_check_in_outside_every_radius_or_twice(monkeypatch):
-    _fake(monkeypatch, {"id": 11, "check_in": datetime(2026, 11, 19, 8, 5), "latitude": -6.25, "longitude": 106.85})
+    _fake(monkeypatch, {"id": "a11", "check_in": datetime(2026, 11, 19, 8, 5), "latitude": -6.25, "longitude": 106.85})
     assert pc.from_attendance(USER, date(2026, 11, 19)) is None  # at no outlet
-    _fake(monkeypatch, {"id": 11, "check_in": datetime(2026, 11, 19, 8, 5), "latitude": -6.2, "longitude": 106.8}, form_done=True)
+    _fake(monkeypatch, {"id": "a11", "check_in": datetime(2026, 11, 19, 8, 5), "latitude": -6.2, "longitude": 106.8}, form_done=True)
     assert pc.from_attendance(USER, date(2026, 11, 19)) is None  # already checked in there through the form
-    _fake(monkeypatch, {"id": 11, "check_in": datetime(2026, 11, 19, 8, 5), "latitude": -6.2, "longitude": 106.8},
+    _fake(monkeypatch, {"id": "a11", "check_in": datetime(2026, 11, 19, 8, 5), "latitude": -6.2, "longitude": 106.8},
           existing={"id": "old", "branch_code": "A", "branch_name": "Outlet A", "visited_at": datetime(2026, 11, 19, 8, 5)})
     assert pc.from_attendance(USER, date(2026, 11, 19))["id"] == "old"  # one per punch
 

@@ -302,9 +302,11 @@ def from_attendance(user: dict, day: Optional[date] = None) -> Optional[dict]:
     if day < ATTENDANCE_FROM:
         return None
     try:
-        a = db.fetchrow(f"""SELECT id, check_in, latitude, longitude FROM {HRMS}.attendance_logs
-                            WHERE employee_id = %s AND date = %s AND check_in IS NOT NULL ORDER BY check_in LIMIT 1""",
-                        (int(emp), day))
+        # sk_hrms.attendance_records (text ids; clock_in in WIB without a zone) — 2026-11-20: was attendance_logs,
+        # a table that does not exist, so no punch ever came through
+        a = db.fetchrow(f"""SELECT id, clock_in AS check_in, latitude, longitude FROM {HRMS}.attendance_records
+                            WHERE employee_id = %s AND date = %s AND clock_in IS NOT NULL ORDER BY clock_in LIMIT 1""",
+                        (str(emp), day))
     except Exception:  # noqa: BLE001 - HRMS unreachable: the form works as before
         return None
     if not a or a["latitude"] is None or a["longitude"] is None:
@@ -348,10 +350,10 @@ def sync_attendance(date_from: date, date_to: date) -> int:
     from app import accounts
     date_from = max(date_from, date_to.fromordinal(date_to.toordinal() - 31), ATTENDANCE_FROM)
     try:
-        rows = db.fetch(f"""SELECT DISTINCT u.id::text AS user_id, a.date FROM {HRMS}.attendance_logs a
-                            JOIN integration_portal.user_account u ON u.hrms_employee_id = a.employee_id::text
-                             AND u.account_kind = 'person' AND u.is_active
-                            WHERE a.date BETWEEN %s AND %s AND a.check_in IS NOT NULL AND a.latitude IS NOT NULL
+        rows = db.fetch(f"""SELECT DISTINCT u.id::text AS user_id, a.date FROM {HRMS}.attendance_records a
+                            JOIN integration_portal.user_account u ON u.hrms_employee_id = a.employee_id
+                             AND u.account_kind = 'person' AND u.is_active AND u.role = 'user'
+                            WHERE a.date BETWEEN %s AND %s AND a.clock_in IS NOT NULL AND a.latitude IS NOT NULL
                               AND NOT EXISTS (SELECT 1 FROM {T} c WHERE c.attendance_id = a.id)""", (date_from, date_to))
     except Exception:  # noqa: BLE001 - HRMS unreachable: the monitoring shows the form check-ins only
         return 0

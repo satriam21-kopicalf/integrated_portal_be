@@ -567,10 +567,38 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], user_
     return {"data": [_view(r) for r in rows], "summary": s, "pics": pics, "truncated": len(rows) >= limit}
 
 
+HRMS_UPLOADS = "/data/hrms_uploads"  # the kopicalf-hr-api uploads volume, mounted read only (docker-compose.yml)
+
+
+def attendance_photo(attendance_id: Optional[str]) -> Optional[bytes]:
+    """The selfie of the HRMS punch-in (sk_hrms.attendance_records.check_in_photo, /uploads/attendance/<file>)."""
+    import os
+    if not attendance_id:
+        return None
+    try:
+        a = db.fetchrow(f"SELECT check_in_photo FROM {HRMS}.attendance_records WHERE id = %s", (attendance_id,))
+    except Exception:  # noqa: BLE001
+        return None
+    url = (a or {}).get("check_in_photo") or ""
+    if not url.startswith("/uploads/"):
+        return None
+    root = os.path.realpath(HRMS_UPLOADS)
+    path = os.path.realpath(os.path.join(root, url[len("/uploads/"):]))
+    if not path.startswith(root + os.sep) or not os.path.isfile(path):
+        return None
+    with open(path, "rb") as f:
+        return f.read()
+
+
 def photo_of(checkin_id: str, out: bool = False) -> Optional[dict]:
-    """The selfie of the check in (out: of the clock out, None while there is none)."""
+    """The selfie of the check in (out: of the clock out, None while there is none); a check in made from the attendance
+    shows the selfie of its HRMS punch-in."""
     cols = "out_photo AS photo, out_photo_type AS photo_type" if out else "photo, photo_type"
-    row = db.fetchrow(f"SELECT user_id::text, branch_code, kind, {cols} FROM {T} WHERE id::text = %s", (checkin_id,))
+    row = db.fetchrow(f"SELECT user_id::text, branch_code, kind, attendance_id, {cols} FROM {T} WHERE id::text = %s", (checkin_id,))
+    if row and row["photo"] is None and not out and row.get("attendance_id"):
+        data = attendance_photo(row["attendance_id"])
+        if data:
+            row = {**row, "photo": data, "photo_type": "image/jpeg"}
     return row if row and row["photo"] is not None else None
 
 

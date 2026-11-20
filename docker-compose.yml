@@ -14,6 +14,8 @@ services:
       - exports:/data/exports
       # Damaged Equipment photos & videos (app/damaged_equipment.py), kept for good
       - media:/data/media
+      # the HRMS attendance selfies (kopicalf-hr-api uploads), read only: the photo of a PIC Check In made from a punch-in
+      - hrms_uploads:/data/hrms_uploads:ro
     restart: unless-stopped
     logging:
       driver: json-file
@@ -24,3 +26,6 @@ services:
 volumes:
   exports:
   media:
+  hrms_uploads:
+    external: true
+    name: kopicalf-hr_hr_uploads

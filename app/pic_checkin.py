@@ -305,7 +305,7 @@ ATTENDANCE_FROM = date(2026, 11, 19)  # the forms were reset that day (migration
 
 def from_attendance(user: dict, day: Optional[date] = None) -> Optional[dict]:
     """The PIC's attendance punch-in of the day (HRMS, face and GPS checked there) as the PIC Check In of the outlet whose
-    radius it falls in: one per punch, never when the PIC already checked in at that outlet. A PIC punches in at the
+    radius it falls in (an outlet only, never a hub inside it): one per punch, never when the PIC already checked in at that outlet. A PIC punches in at the
     first outlet of the day, so the form is not filled twice there. None when no punch, no position or no outlet fits."""
     emp = user.get("hrms_employee_id")
     if not emp:
@@ -327,8 +327,11 @@ def from_attendance(user: dict, day: Optional[date] = None) -> Optional[dict]:
         return {"id": done["id"], "branchCode": done["branch_code"], "branchName": done["branch_name"], "visitedAt": done["visited_at"].isoformat()}
     lat, lng = float(a["latitude"]), float(a["longitude"])
     fits = []
-    for b in branch_options(user):
-        if b["latitude"] is None:
+    branches = branch_options(user)
+    not_outlets = non_outlets([b["code"] for b in branches])
+    for b in branches:
+        # an outlet only: a hub (HUB_WH / HUB_CK) sits inside an outlet and would take the punch (2026-11-21)
+        if b["latitude"] is None or b["code"] in not_outlets:
             continue
         j = judge(lat, lng, None, b)
         if not j["outside_radius"]:
@@ -354,6 +357,14 @@ def from_attendance(user: dict, day: Optional[date] = None) -> Optional[dict]:
     if not row:
         return None
     return {"id": row["id"], "branchCode": b["code"], "branchName": b["name"], "visitedAt": row["visited_at"].isoformat()}
+
+
+def non_outlets(codes: list[str]) -> set[str]:
+    """The branch codes that are a facility other than an outlet in kc_master (hubs, warehouses, offices …)."""
+    if not codes:
+        return set()
+    return {r["code"] for r in db.fetch("SELECT code FROM kc_master.facility WHERE code = ANY(%s) AND facility_type <> 'OUTLET'",
+                                        (codes,))}
 
 
 def sync_attendance(date_from: date, date_to: date) -> int:

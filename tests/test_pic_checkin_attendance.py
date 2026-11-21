@@ -26,6 +26,7 @@ def _fake(monkeypatch, punch, existing=None, form_done=False):
         return None
     monkeypatch.setattr(pc.db, "fetchrow", fetchrow)
     monkeypatch.setattr(pc, "branch_options", lambda user, every=False: OUTLETS)
+    monkeypatch.setattr(pc, "non_outlets", lambda codes: {c for c in codes if c.startswith("HUB")})
     return calls
 
 
@@ -50,3 +51,10 @@ def test_no_link_or_no_punch(monkeypatch):
     _fake(monkeypatch, None)
     assert pc.from_attendance({**USER, "hrms_employee_id": None}) is None
     assert pc.from_attendance(USER, date(2026, 11, 19)) is None
+
+
+def test_a_hub_inside_the_outlet_never_takes_the_punch(monkeypatch):
+    hub = {"code": "HUB-A", "name": "Hub A", "latitude": -6.20001, "longitude": 106.80001, "radius_m": 50}
+    _fake(monkeypatch, {"id": "a12", "check_in": datetime(2026, 11, 19, 8, 5), "latitude": -6.20001, "longitude": 106.80001})
+    monkeypatch.setattr(pc, "branch_options", lambda user, every=False: [hub, *OUTLETS])
+    assert pc.from_attendance(USER, date(2026, 11, 19))["branchCode"] == "A"  # the hub is closer, the outlet takes it

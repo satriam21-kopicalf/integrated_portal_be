@@ -701,6 +701,8 @@ def team_full(request_id: str) -> dict:
     out["workLinks"] = work_links(request_id)
     out["costItems"] = cost_items(request_id)
     out["labor"] = labor(request_id)
+    from app import de_funds
+    out["fund"] = de_funds.view_of(request_id)  # the request's money in Fund Request (Finance)
     return out
 
 
@@ -757,6 +759,8 @@ def change_status(user: dict, request_id: str, to: str, note: Optional[str]) -> 
         raise DeError("Isi toko / vendor dan perkiraan harga dulu (Biaya & invoice) sebelum menandai Dipesan")
     if to in ("ACCEPTED", "IN_PROGRESS") and vendor and row["est_cost"] is None:
         raise DeError("Isi estimasi biaya vendor dulu (Biaya & invoice)")
+    from app import de_funds
+    de_funds.gate(row, to)  # the work starts once Finance approved its fund (2026-11-21)
     if to == "HANDOVER" and not procurement and row.get("mode") == "INTERNAL" and not count("AFTER"):
         raise DeError("Foto hasil pekerjaan dari tukang belum masuk: kirim link foto ke tukang dulu")
     if to == "DONE":
@@ -781,6 +785,7 @@ def change_status(user: dict, request_id: str, to: str, note: Optional[str]) -> 
                          (request_id,))
         if to == "DONE":
             conn.execute(f"UPDATE {P}.de_request SET approved_by = %s WHERE id::text = %s", (user.get("full_name") or user["username"], request_id))
+            de_funds.settle(conn, row, user)  # the difference between the actual cost and the fund
         if to == "PENDING" and row["status"] != "ON_HOLD":  # a new approval starts at the first step
             conn.execute(f"UPDATE {P}.de_request SET approval_step = 1 WHERE id::text = %s", (request_id,))
         if row["status"] == "IN_PROGRESS" or to in ("DONE", "REJECTED"):  # the work stops: open technician links close

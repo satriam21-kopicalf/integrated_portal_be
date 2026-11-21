@@ -294,6 +294,36 @@ def team_delete_payment_file(pengajuan_id: str, file_id: str, request: Request, 
     return _team_view(user, pengajuan_id)
 
 
+@router.post("/api/pengajuan/monitor/{pengajuan_id}/refund-files", status_code=201)
+async def team_refund_file(pengajuan_id: str, request: Request, docType: str = Query("TRANSFER", max_length=10),
+                           name: str = Query("bukti-dana-kembali", max_length=160), user: dict = Depends(current_user)) -> dict:
+    """Finance: the proof that a Maintenance & Procurement fund gave the money not spent back (app/de_funds.py)."""
+    row = await run_in_threadpool(_team_row, request, user, pengajuan_id)
+    if not pg.can(user, row).get("refund"):
+        raise HTTPException(422, detail="Bukti dana kembali diunggah Finance saat ada pengembalian yang belum dikonfirmasi")
+    data = await _body(request)
+    await run_in_threadpool(_run, pg.add_file, user, pengajuan_id, "REFUND", data, name, docType, None)
+    return await run_in_threadpool(_team_view, user, pengajuan_id)
+
+
+@router.delete("/api/pengajuan/monitor/{pengajuan_id}/refund-files/{file_id}")
+def team_delete_refund_file(pengajuan_id: str, file_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    row = _team_row(request, user, pengajuan_id)
+    if not pg.can(user, row).get("refund"):
+        raise HTTPException(422, detail="Bukti dana kembali hanya dapat diubah sebelum dikonfirmasi")
+    pg.delete_file(pengajuan_id, file_id, ("REFUND",))
+    return _team_view(user, pengajuan_id)
+
+
+@router.post("/api/pengajuan/monitor/{pengajuan_id}/refunded")
+def team_refunded(pengajuan_id: str, body: NoteIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    """Finance confirms the money not spent came back (Maintenance & Procurement funds)."""
+    row = _team_row(request, user, pengajuan_id)
+    _run(pg.confirm_refund, user, pengajuan_id, body.note)
+    _record(request, user, f"{row['number']}: dana kembali dikonfirmasi", pengajuan_id, note=body.note)
+    return _team_view(user, pengajuan_id)
+
+
 # ---------------------------------------------------------------- settings (approvals, plafon)
 
 class StepIn(BaseModel):

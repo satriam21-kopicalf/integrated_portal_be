@@ -21,6 +21,8 @@ Team (monitoring page; branches in scope):
     GET    /api/de/monitor/{id}                           one request + related requests of the branch / PIC + allowed steps
     POST   /api/de/monitor/{id}/target                    {"dueAt", "note"}: adjusted due time (the PIC sees it)
     POST   /api/de/monitor/{id}/status                    {"to", "note"}
+    POST   /api/de/monitor/{id}/funds                     {"bank", "account", "name", "note"}: ask Finance for the money
+                                                          of the request from its cost lines (Fund Request, app/de_funds.py)
     POST   /api/de/monitor/{id}/notes                     {"note"}
     POST|PATCH|DELETE /api/de/monitor/{id}/cost-items[/{item}]  cost lines {"kind", "description", "qty", "estAmount", "actualAmount"}
     PUT    /api/de/monitor/{id}/labor/{assignment}        {"adjust", "note"}: the labour of a technician adjusted
@@ -433,6 +435,23 @@ def team_status(request_id: str, body: StatusIn, request: Request, user: dict = 
 def team_note(request_id: str, body: NoteIn, request: Request, user: dict = Depends(current_user)) -> dict:
     _team_row(request, user, request_id)
     return _run(de.add_note, user, request_id, body.note)
+
+
+class FundIn(BaseModel):
+    bank: str = Field(min_length=1, max_length=120)
+    account: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=1, max_length=120)
+    note: Optional[str] = Field(None, max_length=2000)
+
+
+@router.post("/api/de/monitor/{request_id}/funds")
+def team_funds(request_id: str, body: FundIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    """Ask Finance for the money of the request (again after a revision); the work starts once it is approved."""
+    from app import de_funds
+    row = _team_row(request, user, request_id)
+    out = _with_work_urls(_run(de_funds.request_funds, user, request_id, body.model_dump(), body.note))
+    _record(request, user, f"{row['number']}: dana diajukan ke Finance", request_id, note=body.note)
+    return out
 
 
 class SupplierIn(BaseModel):

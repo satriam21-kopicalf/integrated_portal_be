@@ -41,7 +41,10 @@ MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_AMOUNT = Decimal("1000000000000")
 MAX_BARISTAS = 20
 KINDS = {"PETTY_CASH": "Petty Cash Mingguan", "EMERGENCY": "Pembelian Darurat", "MARKETING": "Marketing & Promo",
-         "EVENT": "Event & Bazar", "BILL": "Tagihan Outlet", "PERSONAL": "Pengajuan Personal"}
+         "EVENT": "Event & Bazar", "BILL": "Tagihan Outlet", "PERSONAL": "Pengajuan Personal",
+         "MAINTENANCE": "Maintenance", "PROCUREMENT": "Procurement"}
+# asked by the Maintenance & Procurement team from a Damaged Equipment request, never from the outlet form (app/de_funds.py)
+DE_KINDS = ("MAINTENANCE", "PROCUREMENT")
 OUTLET_KINDS = ("PETTY_CASH", "EMERGENCY", "MARKETING", "EVENT", "BILL")
 CATEGORIES_OF = {
     "PETTY_CASH": {"RAW": "Bahan baku", "OPERATIONAL": "Operasional outlet", "GAS_WATER": "Gas & air galon",
@@ -57,6 +60,8 @@ CATEGORIES_OF = {
              "SECURITY": "Keamanan & lingkungan", "RENT": "Sewa tempat", "OTHER": "Lainnya"},
 }
 CATEGORIES_OF["PERSONAL"] = {}  # a personal request has one amount, no expense lines (2026-11-20)
+DE_CATEGORIES = {"MATERIAL": "Material / barang", "SERVICE": "Jasa vendor", "TRANSPORT": "Transport", "OTHER": "Lainnya"}
+CATEGORIES_OF.update({k: DE_CATEGORIES for k in DE_KINDS})
 CATEGORIES = {k: v for cats in CATEGORIES_OF.values() for k, v in cats.items()}
 RECEIPT_REQUIRED = ("PETTY_CASH", "EMERGENCY", "BILL")   # every line needs its receipt / invoice
 LINE_DATE_REQUIRED = ("PETTY_CASH", "EMERGENCY")
@@ -147,8 +152,9 @@ def files_of(pengajuan_id: str) -> list[dict]:
 
 
 def add_file(user: dict, pengajuan_id: str, kind: str, data: bytes, file_name: str, doc_type: str, line_id: Optional[int]) -> dict:
-    """kind LINE (a receipt of one expense), INCOME (the proof of the money in), OTHER (anything else), PAYMENT (Finance)."""
-    if kind not in ("LINE", "INCOME", "OTHER", "PAYMENT"):
+    """kind LINE (a receipt of one expense), INCOME (the proof of the money in), OTHER (anything else), PAYMENT (Finance),
+    REFUND (Finance: the money a Maintenance & Procurement fund gave back)."""
+    if kind not in ("LINE", "INCOME", "OTHER", "PAYMENT", "REFUND"):
         raise PengajuanError("Jenis lampiran tidak dikenal")
     if doc_type not in DOC_TYPES:
         raise PengajuanError("Jenis dokumen tidak dikenal")
@@ -208,7 +214,7 @@ COLS = """p.id::text, p.number, p.status, p.user_id::text, p.username, p.full_na
     p.first_submitted_at, p.approved_at, p.approved_by, p.paid_at, p.paid_by, p.closed_at, p.kind, p.approval_step,
     p.requester_name, p.requester_phone, p.payee_bank, p.payee_account, p.payee_name, p.purpose, p.needed_on, p.plafon,
     p.requested_amount, p.email, p.department, p.job_title, p.purpose_id, p.transaction_type_id, p.project_id,
-    p.account_type_id, p.settles_id::text"""
+    p.account_type_id, p.settles_id::text, p.de_request_id::text, p.refund_amount, p.refunded_at, p.refunded_by, p.refunded_note"""
 
 
 def get_row(pengajuan_id: str) -> Optional[dict]:
@@ -250,7 +256,14 @@ def view(row: dict, full: bool = False) -> dict:
         "scope": "PERSONAL" if row["kind"] == "PERSONAL" else "OUTLET", "email": row.get("email"), "department": row.get("department"),
         "jobTitle": row.get("job_title"), "purposeId": row.get("purpose_id"), "transactionTypeId": row.get("transaction_type_id"),
         "projectId": row.get("project_id"), "accountTypeId": row.get("account_type_id"), "settlesId": row.get("settles_id"),
+        "refundAmount": _num(row.get("refund_amount")), "refundedAt": _iso(row.get("refunded_at")), "refundedBy": row.get("refunded_by"),
+        "refundedNote": row.get("refunded_note"),
     }
+    if row.get("de_request_id"):  # asked by the Maintenance & Procurement team (app/de_funds.py)
+        de = db.fetchrow(f"SELECT number, kind, vendor, full_name FROM {P}.de_request WHERE id::text = %s", (row["de_request_id"],))
+        out["deRequest"] = {"id": row["de_request_id"], "number": de["number"], "kind": de["kind"], "vendor": de["vendor"],
+                            "pic": de["full_name"]} if de else None
+        out["scope"] = "DE"
     if row["kind"] == "PERSONAL":
         names = _option_names()
         out["kindLabel"] = names.get(row.get("purpose_id")) or KINDS["PERSONAL"]
@@ -562,7 +575,7 @@ def previous_closing(branch_code: str, exclude: Optional[str] = None) -> Optiona
 
 
 def create_draft(user: dict, branch_code: Optional[str], kind: str = "PETTY_CASH") -> dict:
-    if kind not in KINDS:
+    if kind not in KINDS or kind in DE_KINDS:  # Maintenance & Procurement funds come from their request (de_funds)
         raise PengajuanError("Jenis pengajuan tidak dikenal")
     if kind == "PERSONAL":
         return create_personal(user, branch_code)
@@ -813,9 +826,32 @@ def can(user: dict, row: dict) -> dict:
     steps = steps_of(row)
     step = current_step(row, steps)
     mine = takes(user, step)
+    refund = row["status"] == "PAID" and row.get("refund_amount") is not None and not row.get("refunded_at")
     return {"next": allowed_next(user, row, steps), "reviewLines": mine and row["status"] == "SUBMITTED",
             "payment": mine and row["status"] == "APPROVED", "step": step["label"] if step else None,
+            "refund": refund and takes(user, _pay(steps)),
             "stepUsers": [u["name"] for u in step["users"]] if step else []}
+
+
+def confirm_refund(user: dict, pengajuan_id: str, note: Optional[str]) -> dict:
+    """Finance (the payment step) confirms the money a Maintenance & Procurement fund gave back (app/de_funds.py)."""
+    row = get_row(pengajuan_id)
+    if row is None or row["status"] != "PAID" or row.get("refund_amount") is None:
+        raise LookupError("Pengajuan tidak ditemukan")
+    if row.get("refunded_at"):
+        raise PengajuanError("Pengembalian dana sudah dikonfirmasi")
+    if not takes(user, _pay(steps_of(row))):
+        raise PermissionError("Konfirmasi pengembalian oleh tahap pembayaran Finance")
+    if not any(f["kind"] == "REFUND" for f in files_of(pengajuan_id)):
+        raise PengajuanError("Lampirkan bukti dana kembali dulu")
+    note = (note or "").strip()[:2000] or None
+    with db.transaction() as conn:
+        conn.execute(f"""UPDATE {P}.pengajuan SET refunded_at = now(), refunded_by = %s, refunded_note = %s, updated_at = now()
+                         WHERE id::text = %s""", (_actor(user), note, pengajuan_id))
+        _event(conn, pengajuan_id, user, "REFUND", "PAID", "PAID", note, {"refund": row["refund_amount"]})
+        from app import de_funds
+        de_funds.on_fund_status(conn, row, user, "REFUNDED", note, {"amount": row["refund_amount"]})
+    return full(pengajuan_id)
 
 
 def change_status(user: dict, pengajuan_id: str, to: str, note: Optional[str], paid: Optional[dict] = None) -> dict:
@@ -868,6 +904,8 @@ def change_status(user: dict, pengajuan_id: str, to: str, note: Optional[str], p
         conn.execute(f"""UPDATE {P}.pengajuan SET status = %(to)s, approval_step = %(pos)s, updated_at = now(){''.join(', ' + s for s in sets)}
                          WHERE id::text = %(id)s""", params)
         _event(conn, pengajuan_id, user, "STATUS", row["status"], status, note, details)
+        from app import de_funds
+        de_funds.on_fund_status(conn, row, user, status, note, details)
     return full(pengajuan_id)
 
 
@@ -1115,7 +1153,7 @@ def list_names() -> dict[str, str]:
 def set_kind_label(user: dict, kind: str, label: Any) -> dict[str, str]:
     """The name of an outlet kind, or (LIST:<list>) the title of a list of the personal form."""
     from app import fund_options
-    if kind not in OUTLET_KINDS and kind not in {f"LIST:{k}" for k in fund_options.LISTS}:
+    if kind not in OUTLET_KINDS + DE_KINDS and kind not in {f"LIST:{k}" for k in fund_options.LISTS}:
         raise PengajuanError("Jenis pengajuan tidak dikenal")
     name = " ".join(str(label or "").split())[:60]
     if not name:

@@ -150,7 +150,8 @@ def submit(form: str, visit_id: str, body: SubmitIn, request: Request, user: dic
     _form_page(form, request, user)
     try:
         out = vf.submit(form, user, visit_id, body.latitude, body.longitude, body.accuracyM,
-                        request.headers.get("user-agent"), client_ip(request), body.signature, body.signedName)
+                        request.headers.get("user-agent"), client_ip(request), body.signature, body.signedName,
+                        vf.client_of(request.headers.get("x-kopicalf-app"), request.headers.get("user-agent")))
     except LookupError as e:
         raise HTTPException(404, detail=str(e)) from None
     except CheckInError as e:  # VisitError, or a photo / signature that cannot be read

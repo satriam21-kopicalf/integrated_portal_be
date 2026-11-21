@@ -449,7 +449,19 @@ def _counts(form: str, answers: dict, group: Optional[str] = None, branch: Optio
 COLS = """v.id::text, v.form, v.status, v.user_id::text, v.username, v.full_name, v.branch_code, v.branch_name, v.started_at,
     v.updated_at, v.submitted_at, v.answers, v.counts, v.score, v.latitude, v.longitude, v.accuracy_m, v.outlet_latitude,
     v.outlet_longitude, v.radius_m, v.distance_m, v.outside_radius, v.low_accuracy, v.signed_name, v.signed_at,
-    (v.signature IS NOT NULL) AS has_signature"""
+    (v.signature IS NOT NULL) AS has_signature, v.client"""
+
+# where a visit was sent from (2026-11-21, migration 132): the attendance app sends X-Kopicalf-App: attendance, its native
+# build with a React Native user agent (okhttp), its PWA from a browser; anything else is Operations (or the portal)
+CLIENTS = ("ATTENDANCE_APP", "ATTENDANCE_PWA", "OPERATIONS")
+_NATIVE_UA = ("okhttp", "expo", "reactnative", "dalvik", "cfnetwork")
+
+
+def client_of(app_header: Optional[str], user_agent: Optional[str]) -> str:
+    if (app_header or "").strip().lower() != "attendance":
+        return "OPERATIONS"
+    ua = (user_agent or "").lower().replace(" ", "")
+    return "ATTENDANCE_APP" if any(n in ua for n in _NATIVE_UA) else "ATTENDANCE_PWA"
 
 
 def group_of(branch_code: str) -> Optional[str]:
@@ -502,6 +514,7 @@ def _view(r: dict, photos: Optional[list] = None) -> dict:
         "distanceM": r["distance_m"], "outsideRadius": r["outside_radius"], "lowAccuracy": r["low_accuracy"],
         "signature": {"name": r["signed_name"], "signedAt": r["signed_at"].isoformat() if r["signed_at"] else None}
         if r["has_signature"] else None,
+        "client": r.get("client"),
     }
     if photos is not None:
         out["answers"] = r["answers"] or {}
@@ -734,7 +747,8 @@ def missing(form: str, answers: dict, photos: list[dict], group: Optional[str] =
 
 
 def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Optional[float], accuracy: Optional[float],
-           device: Optional[str], ip: Optional[str], signature: Optional[str] = None, signed_name: Optional[str] = None) -> dict:
+           device: Optional[str], ip: Optional[str], signature: Optional[str] = None, signed_name: Optional[str] = None,
+           client: Optional[str] = None) -> dict:
     row = own_draft(form, user, visit_id)
     if form == "wwwr":  # one audit per outlet per day is kept by the schedule; the lead sends
         a = audit_of(visit_id)
@@ -783,12 +797,12 @@ def submit(form: str, user: dict, visit_id: str, lat: Optional[float], lng: Opti
     db.fetchrow(
         f"""UPDATE {T} SET status = 'SUBMITTED', submitted_at = now(), updated_at = now(), answers = %s::jsonb, counts = %s::jsonb, score = %s,
                 latitude = %s, longitude = %s, accuracy_m = %s, outlet_latitude = %s, outlet_longitude = %s, radius_m = %s,
-                distance_m = %s, outside_radius = %s, low_accuracy = %s, device = %s, ip = %s,
+                distance_m = %s, outside_radius = %s, low_accuracy = %s, device = %s, ip = %s, client = %s,
                 signature = %s, signature_type = %s, signed_name = %s, signed_at = CASE WHEN %s THEN now() END
             WHERE id::text = %s RETURNING id""",
         (json.dumps(answers), json.dumps(counts), counts["score"], lat, lng, accuracy, outlet.get("latitude"), outlet.get("longitude"),
          outlet.get("radius_m"), j["distance_m"], j["outside_radius"], j.get("low_accuracy", False), (device or "")[:300] or None,
-         ip, sig, sig_type, signed_name if sig is not None else None, sig is not None, visit_id))
+         ip, client, sig, sig_type, signed_name if sig is not None else None, sig is not None, visit_id))
     return full(visit_id)
 
 

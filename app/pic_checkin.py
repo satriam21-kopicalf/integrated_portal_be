@@ -128,7 +128,12 @@ def groups_of(codes: list[str]) -> dict[str, str]:
 
 # ---------------------------------------------------------------- photo
 
-def parse_photo(value: str) -> tuple[str, bytes]:
+MAX_RAW_PHOTO = 15 * 1024 * 1024  # shrink=True: a camera photo up to this size is taken and made at most 1600 px
+
+
+def parse_photo(value: str, shrink: bool = False) -> tuple[str, bytes]:
+    """(media type, bytes) of a photo data URL. shrink: a full-size camera photo (the mobile app sends it as taken,
+    2026-11-21) is accepted up to MAX_RAW_PHOTO and stored as a JPEG of at most 1600 px, like the web form makes it."""
     match = _DATA_URL.match((value or "").strip())
     if not match:
         raise CheckInError("Foto harus dari kamera (JPG, PNG atau WebP)")
@@ -136,10 +141,17 @@ def parse_photo(value: str) -> tuple[str, bytes]:
         data = base64.b64decode(re.sub(r"\s", "", match.group(2)), validate=True)
     except (binascii.Error, ValueError):
         raise CheckInError("Data foto rusak") from None
-    if len(data) > MAX_PHOTO:
-        raise CheckInError("Ukuran foto maksimal 3 MB")
+    if len(data) > (MAX_RAW_PHOTO if shrink else MAX_PHOTO):
+        raise CheckInError(f"Ukuran foto maksimal {(MAX_RAW_PHOTO if shrink else MAX_PHOTO) // (1024 * 1024)} MB")
     if not _signature_ok(match.group(1), data):
         raise CheckInError("File bukan gambar yang valid")
+    if shrink:
+        from app.thumbs import fit
+        small = fit(data)
+        if small is not None and len(small) < len(data):
+            return "image/jpeg", small
+        if len(data) > MAX_PHOTO:
+            raise CheckInError("Foto tidak dapat dibaca, ambil ulang")
     return match.group(1), data
 
 

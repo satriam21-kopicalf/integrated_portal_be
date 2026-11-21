@@ -688,7 +688,7 @@ def add_photo(form: str, user: dict, visit_id: str, item: str, photo: str, lat: 
     n = db.fetchrow(f"SELECT count(*)::int AS n FROM {TP} WHERE visit_id::text = %s AND item_key = %s", (visit_id, item))["n"]
     if n >= MAX_PHOTOS_PER_ITEM:
         raise VisitError(f"Maksimal {MAX_PHOTOS_PER_ITEM} foto per butir; hapus satu dulu")
-    photo_type, data = parse_photo(photo)
+    photo_type, data = parse_photo(photo, shrink=True)
     j = judge(lat, lng, None, _outlet(row["branch_code"])) if lat is not None and lng is not None else {"distance_m": None, "outside_radius": False}
     db.fetchrow(
         f"""INSERT INTO {TP} (visit_id, item_key, photo, photo_type, taken_at, latitude, longitude, distance_m, outside_radius, uploaded_by)

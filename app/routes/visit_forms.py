@@ -60,7 +60,7 @@ class AnswersIn(BaseModel):
 
 class PhotoIn(BaseModel):
     item: str = Field(min_length=1, max_length=80)
-    photo: str = Field(min_length=20, max_length=5_000_000)
+    photo: str = Field(min_length=20, max_length=21_000_000)  # a full-size camera photo, shrunk on save
     latitude: Optional[float] = Field(None, ge=-90, le=90)
     longitude: Optional[float] = Field(None, ge=-180, le=180)
     takenAt: Optional[datetime] = None

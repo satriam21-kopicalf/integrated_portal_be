@@ -39,6 +39,12 @@ def _make(data: bytes, w: int) -> Optional[bytes]:
     return out.tobytes() if ok else None
 
 
+def fit(data: bytes, w: int = 1600) -> Optional[bytes]:
+    """A JPEG at most `w` px wide (a full-size camera photo of the mobile app made as small as the web form's), None when
+    the bytes are not an image OpenCV reads."""
+    return _make(data, w)
+
+
 def thumbnail(data: bytes, mime: Optional[str], w: Optional[int]) -> tuple[bytes, Optional[str]]:
     """(bytes, media type) of the photo at most `w` px wide, or the original when `w` is None / not an image."""
     global _size

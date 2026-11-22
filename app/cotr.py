@@ -983,14 +983,36 @@ def link_account(user_id: str, driver_code: Optional[str]) -> None:
             conn.execute(f"UPDATE {P}.cotr_driver SET user_id = %s WHERE code = %s", (user_id, driver_code))
 
 
+# 2026-11-22: only these roles see every pool; every other COTR account sees the pool of its employee only
+ALL_POOLS_ROLES = ("superadmin", "admin", "cotr_admin")
+
+
+def every_pool(user: dict) -> bool:
+    return user.get("role") in ALL_POOLS_ROLES
+
+
 def own_pool(user: dict) -> Optional[str]:
-    """#16 (2026-11-12): the pool / HUB a COTR account is bound to — its employee's pool when it is not a superadmin
-    and has no Storage & Production (the COTR management chooses any pool); None = free to choose."""
-    from app.access import has_page
-    if not user.get("id") or user.get("role") == "superadmin" or has_page(user, "cotr.production"):
+    """#16 (2026-11-12): the pool / HUB a COTR account is bound to: its employee's pool; None for the roles that see
+    every pool (ALL_POOLS_ROLES) and for an account not tied to an employee yet (the routes refuse that one)."""
+    if not user.get("id") or every_pool(user):
         return None
     d = driver_of_account(str(user["id"]))
     return d["pool"] if d and d.get("pool") else None
+
+
+def pool_of_row(kind: str, row_id: str) -> Optional[str]:
+    """The pool a reload / dispatch / request / transfer / issue / driver belongs to (the pool check of a write)."""
+    sql = {
+        "reload": f"SELECT s.pool_code FROM {P}.cotr_reload r JOIN {P}.cotr_shift s ON s.id = r.shift_id WHERE r.id::text = %s",
+        "dispatch": f"SELECT pool_code FROM {P}.cotr_dispatch WHERE id::text = %s",
+        "request": f"SELECT d.pool_code FROM {P}.cotr_request r JOIN {P}.cotr_driver d ON d.code = r.driver_code WHERE r.id::text = %s",
+        "transfer": f"SELECT pool_code FROM {P}.cotr_transfer WHERE id::text = %s",
+        "issue": f"SELECT f.pool_code FROM {P}.cotr_fleet_issue i JOIN {P}.cotr_fleet f ON f.code = i.fleet_code WHERE i.id::text = %s",
+        "check-in": f"SELECT s.pool_code FROM {P}.cotr_check_in c JOIN {P}.cotr_shift s ON s.id = c.shift_id WHERE c.id::text = %s",
+        "driver": f"SELECT pool_code FROM {P}.cotr_driver WHERE code = %s",
+    }[kind]
+    r = db.fetchrow(sql, (row_id,))
+    return r["pool_code"] if r else None
 
 
 def driver_of_account(user_id: str) -> Optional[dict]:
@@ -1063,18 +1085,21 @@ def waste_delete(waste_id: str) -> None:
 
 # ---------------------------------------------------------------- the portal: monitoring
 
-def monitor(day: date) -> dict:
-    """The shifts of a day (every driver, with its check ins, stock, recap), the reloads and requests to decide."""
+def monitor(day: date, pool: Optional[str] = None) -> dict:
+    """The shifts of a day (every driver, with its check ins, stock, recap), the reloads and requests to decide; `pool`
+    keeps one pool (the account bound to it, 2026-11-22)."""
     drivers = {d["code"]: d for d in db.fetch(
-        f"""SELECT d.*, p.name AS pool_name FROM {P}.cotr_driver d JOIN {P}.cotr_pool p ON p.code = d.pool_code ORDER BY d.code""")}
-    shifts = db.fetch(f"SELECT * FROM {P}.cotr_shift WHERE day = %s", (day,))
+        f"""SELECT d.*, p.name AS pool_name FROM {P}.cotr_driver d JOIN {P}.cotr_pool p ON p.code = d.pool_code
+             WHERE %s::text IS NULL OR d.pool_code = %s ORDER BY d.code""", (pool, pool))}
+    shifts = db.fetch(f"SELECT * FROM {P}.cotr_shift WHERE day = %s AND (%s::text IS NULL OR pool_code = %s)", (day, pool, pool))
     ids = [s["id"] for s in shifts]
     checkins = db.fetch(f"""SELECT id, shift_id, kind, at, latitude, longitude, accuracy_m, stock, note, photo IS NOT NULL AS has_photo,
                                    signature IS NOT NULL AS has_signature
                               FROM {P}.cotr_check_in WHERE shift_id = ANY(%s) ORDER BY at""", (ids,)) if ids else []
     sales = db.fetch(f"SELECT * FROM {P}.cotr_sale WHERE shift_id = ANY(%s)", (ids,)) if ids else []
     reloads = db.fetch(f"SELECT * FROM {P}.cotr_reload WHERE shift_id = ANY(%s) ORDER BY at", (ids,)) if ids else []
-    reqs = db.fetch(f"SELECT * FROM {P}.cotr_request WHERE at::date = %s OR status = 'sent' ORDER BY at", (day,))
+    reqs = [r for r in db.fetch(f"SELECT * FROM {P}.cotr_request WHERE at::date = %s OR status = 'sent' ORDER BY at", (day,))
+            if pool is None or r["driver_code"] in drivers]
     by = lambda rows, s: [r for r in rows if r["shift_id"] == s["id"]]  # noqa: E731
     # 2026-11-08: the deductions of a shift (cupping and waste, per menu at its price), what the fleet carried and where
     # the roster sent the driver
@@ -1438,13 +1463,13 @@ def _point(r: dict) -> dict:
             "accuracy": _num(r["accuracy_m"]), "speed": _num(r["speed_ms"]), "battery": r["battery"]}
 
 
-def positions(day: date) -> list[dict]:
-    """The last position of every driver with a shift on the day, with the status of the shift."""
+def positions(day: date, pool: Optional[str] = None) -> list[dict]:
+    """The last position of every driver with a shift on the day, with the status of the shift (`pool`: one pool)."""
     rows = db.fetch(
         f"""SELECT DISTINCT ON (l.driver_code) l.*, d.name, d.fleet_code, s.status
               FROM {P}.cotr_location l JOIN {P}.cotr_shift s ON s.id = l.shift_id
               JOIN {P}.cotr_driver d ON d.code = l.driver_code
-             WHERE s.day = %s ORDER BY l.driver_code, l.at DESC""", (day,))
+             WHERE s.day = %s AND (%s::text IS NULL OR s.pool_code = %s) ORDER BY l.driver_code, l.at DESC""", (day, pool, pool))
     return [{"driver": r["driver_code"], "name": r["name"], "fleet": r["fleet_code"], "shift": r["status"], **_point(r)}
             for r in rows]
 

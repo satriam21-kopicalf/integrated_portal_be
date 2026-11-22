@@ -113,4 +113,17 @@ def dashboard(day: Optional[date]) -> dict:
             "pools": pools, "drivers": drivers, "todo": todo}
 
 
-
+def of_pool(data: dict, pool: Optional[str]) -> dict:
+    """The dashboard of one pool for an account bound to it (2026-11-22): its pool, its drivers and the summary of
+    those; the to-do counts are of the whole company, so they are left out."""
+    if pool is None:
+        return data
+    pools = [p for p in data["pools"] if p["pool"] == pool]
+    drivers = [x for x in data["drivers"] if x["pool"] == pool]
+    total = lambda k: sum(p.get(k) or 0 for p in pools)  # noqa: E731
+    series = pools[0]["series"] if pools else []
+    return {**data, "pools": pools, "drivers": drivers, "todo": {k: 0 for k in data["todo"]},
+            "trend": [{"day": x["day"], "sold": next((y["sold"] for y in series if y["day"] == x["day"]), None)} for x in data["trend"]],
+            "summary": {**data["summary"], "sold": total("sold"), "revenue": total("revenue"), "drivers": len(drivers),
+                        "pools": sum(1 for p in pools if p["source"]), "waste": total("waste"), "cupping": total("cupping"),
+                        "balance": sum(p.get("balance") or 0 for p in pools if p.get("balance") is not None), "sameDayLastWeek": None}}

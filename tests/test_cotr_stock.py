@@ -229,14 +229,45 @@ def test_shipment_plan_needs_less_what_is_good(monkeypatch):
     assert r["totals"] == [{"menu": "M1", "name": "Premium", "send": 80}]
 
 
-def test_own_pool_binds_storage_accounts(monkeypatch):
+def test_own_pool_binds_every_account_but_the_admins(monkeypatch):
+    # 2026-11-22: only superadmin / admin / COTR admin see every pool, whatever pages an account has
     from app import cotr
-    import app.access as acc
     monkeypatch.setattr(cotr, "driver_of_account", lambda uid: {"pool": "HUB-TBT"})
-    monkeypatch.setattr(acc, "has_page", lambda u, p: u.get("mgmt", False))
     assert cotr.own_pool({"id": "u1", "role": "user"}) == "HUB-TBT"
-    assert cotr.own_pool({"id": "u2", "role": "user", "mgmt": True}) is None
-    assert cotr.own_pool({"id": "u3", "role": "superadmin"}) is None
+    for role in ("superadmin", "admin", "cotr_admin"):
+        assert cotr.own_pool({"id": "u2", "role": role}) is None
+
+
+def test_routes_keep_a_bound_account_in_its_pool(monkeypatch):
+    import pytest
+    from fastapi import HTTPException
+    from app import cotr
+    from app.routes import cotr as routes
+    monkeypatch.setattr(cotr, "driver_of_account", lambda uid: {"pool": "HUB-TBT"} if uid == "bound" else None)
+    monkeypatch.setattr(cotr, "pool_of_row", lambda kind, row_id: {"r1": "HUB-TBT", "r2": "HUB-PLM"}[row_id])
+    bound, loose, admin = {"id": "bound", "role": "user"}, {"id": "loose", "role": "user"}, {"id": "a", "role": "cotr_admin"}
+    assert routes._own_pool(bound, "HUB-PLM") == "HUB-TBT"  # asks another pool: gets its own
+    assert routes._own_pool(admin, "HUB-PLM") == "HUB-PLM"
+    assert routes._own_pool(admin, None) is None
+    routes._check_row(bound, "reload", "r1")
+    routes._check_row(admin, "reload", "r2")
+    for call in (lambda: routes._check_row(bound, "reload", "r2"), lambda: routes._check_pool(bound, "HUB-PLM"),
+                 lambda: routes._own_pool(loose, None)):  # an account without a pool sees nothing
+        with pytest.raises(HTTPException) as e:
+            call()
+        assert e.value.status_code == 403
+
+
+def test_dashboard_of_one_pool():
+    from app.cotr_dashboard import of_pool
+    data = {"pools": [{"pool": "A", "source": "app", "sold": 5, "waste": 1, "series": [{"day": "d1", "sold": 5}]},
+                      {"pool": "B", "source": "app", "sold": 7, "series": [{"day": "d1", "sold": 7}]}],
+            "drivers": [{"pool": "A"}, {"pool": "B"}], "todo": {"reloads": 3},
+            "trend": [{"day": "d1", "sold": 12}], "summary": {"sold": 12, "sameDayLastWeek": 9}}
+    out = of_pool(data, "A")
+    assert [p["pool"] for p in out["pools"]] == ["A"] and len(out["drivers"]) == 1
+    assert out["summary"]["sold"] == 5 and out["trend"] == [{"day": "d1", "sold": 5}] and out["todo"] == {"reloads": 0}
+    assert of_pool(data, None) is data
 
 
 def test_menu_of_takes_the_names_mapped_by_hand():

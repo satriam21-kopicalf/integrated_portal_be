@@ -121,16 +121,43 @@ def _call(fn, *args):
         raise HTTPException(422, detail=str(e)) from None
 
 
+NOT_OWN_POOL = "Akun ini hanya untuk pool / HUB-nya sendiri"
+
+
+def _bound_pool(user: dict) -> Optional[str]:
+    """2026-11-22: the pool an account is limited to; None for superadmin / admin / COTR admin (every pool). An account
+    of another role that is not tied to a COTR employee with a pool sees nothing."""
+    if cotr.every_pool(user):
+        return None
+    own = cotr.own_pool(user)
+    if not own:
+        raise HTTPException(403, detail="Akun ini belum terhubung ke pool COTR: hubungi admin COTR")
+    return own
+
+
 def _own_pool(user: dict, pool: Optional[str]) -> Optional[str]:
-    """#16: an account bound to its pool / HUB (cotr.own_pool) sees that pool only, whatever pool is asked."""
-    return cotr.own_pool(user) or pool
+    """#16: an account bound to its pool / HUB sees that pool only, whatever pool is asked."""
+    return _bound_pool(user) or pool
 
 
 def _check_pool(user: dict, pool: Optional[str]) -> None:
-    """A write to a pool that is not the account's own (see _own_pool) is refused."""
-    own = _own_pool(user, pool)
-    if pool and own and own != pool:
-        raise HTTPException(403, detail="Akun ini hanya untuk pool / HUB-nya sendiri")
+    """A write to a pool that is not the account's own is refused."""
+    own = _bound_pool(user)
+    if own and pool != own:
+        raise HTTPException(403, detail=NOT_OWN_POOL)
+
+
+def _check_row(user: dict, kind: str, row_id: str) -> None:
+    """A reload / dispatch / request / transfer / issue / check in / driver of another pool is refused."""
+    own = _bound_pool(user)
+    if own and cotr.pool_of_row(kind, row_id) != own:
+        raise HTTPException(403, detail=NOT_OWN_POOL)
+
+
+def _every_pool_only(user: dict) -> None:
+    """The data of the whole COTR company (ESB documents, journals): not for an account bound to one pool."""
+    if _bound_pool(user):
+        raise HTTPException(403, detail=NOT_OWN_POOL)
 
 
 def _log(request: Request, user: dict, action: str, summary: str, details: Optional[dict] = None) -> None:
@@ -319,17 +346,19 @@ class IssueStepIn(BaseModel):
 
 @router.get("/issues")
 def issues(status: Optional[Literal["open", "in_progress", "resolved", "rejected"]] = None, fleet: Optional[str] = None,
-           pool: Optional[str] = None, days: int = Query(90, ge=1, le=730), _: dict = Depends(require_page("cotr.fleet", "cotr.check-in"))):
-    return cotr.issues(status, fleet, pool, days)
+           pool: Optional[str] = None, days: int = Query(90, ge=1, le=730), user: dict = Depends(require_page("cotr.fleet", "cotr.check-in"))):
+    return cotr.issues(status, fleet, _own_pool(user, pool), days)
 
 
 @router.get("/issues/{issue_id}")
-def issue_detail(issue_id: str, _: dict = Depends(require_page("cotr.fleet", "cotr.check-in"))):
+def issue_detail(issue_id: str, user: dict = Depends(require_page("cotr.fleet", "cotr.check-in"))):
+    _check_row(user, "issue", issue_id)
     return _call(cotr.issue_detail, issue_id)
 
 
 @router.post("/issues/{issue_id}/step")
 def issue_step(issue_id: str, body: IssueStepIn, request: Request, user: dict = Depends(require_page("cotr.fleet"))):
+    _check_row(user, "issue", issue_id)
     out = _call(cotr.handle_issue, user, issue_id, body.model_dump())
     _log(request, user, "cotr.issue.step", f"COTR laporan armada {out['fleet']} -> {body.status}: {out['title']}", {"id": issue_id})
     return out
@@ -347,9 +376,9 @@ class AreaDecisionIn(BaseModel):
 
 @router.get("/area-requests")
 def area_requests(dateFrom: Optional[date] = None, dateTo: Optional[date] = None, status: Optional[Literal["sent", "approved", "rejected"]] = None,
-                  pool: Optional[str] = None, _: dict = Depends(require_page("cotr.schedule", "cotr.check-in"))):
+                  pool: Optional[str] = None, user: dict = Depends(require_page("cotr.schedule", "cotr.check-in"))):
     end = dateTo or today() + timedelta(days=7)
-    return cotr.area_requests(dateFrom or today() - timedelta(days=14), end, status, pool)
+    return cotr.area_requests(dateFrom or today() - timedelta(days=14), end, status, _own_pool(user, pool))
 
 
 @router.post("/area-requests/{request_id}/decide")
@@ -372,12 +401,13 @@ class AssignIn(LinesIn):
 
 
 @router.get("/monitor")
-def monitor(day: Optional[date] = None, _: dict = Depends(require_page("cotr.check-in"))):
-    return cotr.monitor(day or today())
+def monitor(day: Optional[date] = None, user: dict = Depends(require_page("cotr.check-in"))):
+    return cotr.monitor(day or today(), _bound_pool(user))
 
 
 @router.post("/reloads/{reload_id}/decide")
 def decide_reload(reload_id: str, body: DecisionIn, request: Request, user: dict = Depends(require_page("cotr.storage"))):
+    _check_row(user, "reload", reload_id)
     _call(cotr.decide_reload, user, reload_id, body.approve, body.note, body.lines)
     _log(request, user, "cotr.reload.decide", f"Reload COTR {'disetujui' if body.approve else 'ditolak'}", {"reloadId": reload_id})
     return {"ok": True}
@@ -385,6 +415,7 @@ def decide_reload(reload_id: str, body: DecisionIn, request: Request, user: dict
 
 @router.post("/reloads/{reload_id}/resolve")
 def resolve_reload(reload_id: str, body: LinesIn, request: Request, user: dict = Depends(require_page("cotr.storage"))):
+    _check_row(user, "reload", reload_id)
     _call(cotr.resolve_reload, user, reload_id, body.lines, body.note)
     _log(request, user, "cotr.reload.resolve", "Selisih reload COTR diputuskan", {"reloadId": reload_id, "lines": body.lines})
     return {"ok": True}
@@ -398,6 +429,7 @@ def storage(day: Optional[date] = None, pool: Optional[str] = None, user: dict =
 
 @router.put("/dispatch")
 def assign(body: AssignIn, request: Request, user: dict = Depends(require_page("cotr.storage"))):
+    _check_row(user, "driver", body.driver)
     out = _call(cotr.assign, user, body.day, body.driver, body.lines, body.note, body.cupping)
     _log(request, user, "cotr.dispatch.assign", f"Assignment COTR {body.driver} {body.day}", {"lines": body.lines})
     return out
@@ -405,6 +437,7 @@ def assign(body: AssignIn, request: Request, user: dict = Depends(require_page("
 
 @router.post("/dispatch/{dispatch_id}/resolve")
 def resolve_dispatch(dispatch_id: str, body: LinesIn, request: Request, user: dict = Depends(require_page("cotr.storage"))):
+    _check_row(user, "dispatch", dispatch_id)
     out = _call(cotr.resolve_dispatch, user, dispatch_id, body.lines, body.note)
     _log(request, user, "cotr.dispatch.resolve", f"Selisih assignment COTR {out['driver']} diputuskan", {"lines": body.lines})
     return out
@@ -412,6 +445,7 @@ def resolve_dispatch(dispatch_id: str, body: LinesIn, request: Request, user: di
 
 @router.post("/requests/{request_id}/decide")
 def decide_request(request_id: str, body: DecisionIn, request: Request, user: dict = Depends(require_page("cotr.check-in"))):
+    _check_row(user, "request", request_id)
     _call(cotr.decide_request, user, request_id, body.approve, body.note)
     _log(request, user, "cotr.request.decide", f"Pengajuan COTR {'disetujui' if body.approve else 'ditolak'}",
          {"requestId": request_id})
@@ -436,7 +470,13 @@ def _cotr_reader(request: Request, user: dict = Depends(current_user)) -> dict:
 
 @router.get("/masters/{entity}")
 def master_list(entity: Entity, user: dict = Depends(_cotr_reader)):
-    return cotr.master_list(entity, has_page(user, MANAGEMENT))
+    rows = cotr.master_list(entity, has_page(user, MANAGEMENT))
+    own = None if user.get("role") == "driver" else _bound_pool(user)
+    if own and entity == "pools":  # 2026-11-22: the pool pickers of a bound account offer its pool only
+        return [r for r in rows if own in (r.get("code"), r.get("parent_code"))]
+    if own and entity in ("drivers", "fleet"):
+        return [r for r in rows if r.get("pool_code") == own]
+    return rows
 
 
 @router.post("/masters/{entity}", status_code=201)
@@ -541,12 +581,13 @@ def drivers_import(body: ImportIn, request: Request, user: dict = Depends(requir
 
 
 @router.get("/locations")
-def locations(day: Optional[date] = None, _: dict = Depends(require_page("cotr.check-in"))):
-    return cotr.positions(day or today())
+def locations(day: Optional[date] = None, user: dict = Depends(require_page("cotr.check-in"))):
+    return cotr.positions(day or today(), _bound_pool(user))
 
 
 @router.get("/locations/{driver_code}")
-def driver_track(driver_code: str, day: Optional[date] = None, _: dict = Depends(require_page("cotr.check-in"))):
+def driver_track(driver_code: str, day: Optional[date] = None, user: dict = Depends(require_page("cotr.check-in"))):
+    _check_row(user, "driver", driver_code)
     return cotr.track(driver_code, day or today())
 
 
@@ -586,13 +627,15 @@ class ScheduleCopyIn(BaseModel):
 
 @router.get("/schedule")
 def schedule(dateFrom: Optional[date] = None, dateTo: Optional[date] = None, pool: Optional[str] = None,
-             _: dict = Depends(require_page("cotr.schedule"))):
+             user: dict = Depends(require_page("cotr.schedule"))):
     start = dateFrom or today() - timedelta(days=today().weekday())
-    return _call(cotr.schedule, start, dateTo or start + timedelta(days=6), pool)
+    return _call(cotr.schedule, start, dateTo or start + timedelta(days=6), _own_pool(user, pool))
 
 
 @router.put("/schedule")
 def schedule_save(body: ScheduleIn, request: Request, user: dict = Depends(require_page("cotr.schedule"))):
+    for e in body.entries:
+        _check_row(user, "driver", e.driver)
     n = _call(cotr.schedule_save, user, [e.model_dump() for e in body.entries])
     _log(request, user, "cotr.schedule.save", f"Jadwal COTR: {n} sel disimpan")
     return {"ok": True, "saved": n}
@@ -600,6 +643,11 @@ def schedule_save(body: ScheduleIn, request: Request, user: dict = Depends(requi
 
 @router.post("/schedule/copy")
 def schedule_copy(body: ScheduleCopyIn, request: Request, user: dict = Depends(require_page("cotr.schedule"))):
+    if _bound_pool(user):
+        if not body.drivers:
+            raise HTTPException(403, detail=NOT_OWN_POOL)
+        for code in body.drivers:
+            _check_row(user, "driver", code)
     n = _call(cotr.schedule_copy, user, body.source, body.target, body.days, body.drivers)
     _log(request, user, "cotr.schedule.copy", f"Jadwal COTR disalin {body.source} → {body.target} ({n} sel)")
     return {"ok": True, "copied": n}
@@ -643,6 +691,7 @@ def delete_batch(batch_id: str, request: Request, user: dict = Depends(require_p
 
 @router.post("/batches/{batch_id}/send")
 def send_batch(batch_id: str, body: SendIn, request: Request, user: dict = Depends(require_page("cotr.production"))):
+    _check_pool(user, body.pool)
     out = _call(cotr.send_batch, user, batch_id, body.pool, body.qty, body.note)
     _log(request, user, "cotr.batch.send", f"Kiriman batch ke {body.pool}: {body.qty}", {"batch": batch_id, **body.model_dump()})
     return out
@@ -650,6 +699,7 @@ def send_batch(batch_id: str, body: SendIn, request: Request, user: dict = Depen
 
 @router.post("/transfers/{transfer_id}/receive")
 def receive_transfer(transfer_id: str, request: Request, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    _check_row(user, "transfer", transfer_id)
     _call(cotr.receive_transfer, user, transfer_id)
     _log(request, user, "cotr.transfer.receive", "Kiriman produksi diterima pool", {"id": transfer_id})
     return {"ok": True}
@@ -775,6 +825,7 @@ class LotIn(BaseModel):
 
 @router.put("/batch-codes/qty")
 def batch_code_qty(body: LotIn, request: Request, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    _check_pool(user, body.pool)
     out = _call(cotr_ledger.adjust_lot, user, body.pool, body.day, body.menu, body.batchNo, body.qty)
     _log(request, user, "cotr.batch-code.adjust", f"COTR kode batch {body.batchNo} {body.pool} {body.day}: {out['old']} -> {out['new']} cup ({body.reason})",
          out | {"reason": body.reason})
@@ -806,6 +857,7 @@ def driver_labels(pool: Optional[str] = None, user: dict = Depends(require_page(
 
 @router.put("/driver-labels")
 def tie_driver_label(body: LabelTieIn, request: Request, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    _check_pool(user, body.pool)
     out = _call(cotr_ledger.tie_label, user, body.pool, body.label.strip(), body.driver or None)
     _log(request, user, "cotr.label.tie", f"Nama workbook {body.label} ({body.pool}) → {body.driver or 'bukan driver'}", out)
     return out
@@ -813,6 +865,7 @@ def tie_driver_label(body: LabelTieIn, request: Request, user: dict = Depends(re
 
 @router.delete("/driver-labels")
 def untie_driver_label(pool: str, label: str, request: Request, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    _check_pool(user, pool)
     out = cotr_ledger.untie_label(pool, label)
     _log(request, user, "cotr.label.untie", f"Tautan nama workbook {label} ({pool}) dihapus", out)
     return out
@@ -852,22 +905,28 @@ def pool_close_day(body: CloseIn, request: Request, user: dict = Depends(require
 
 @router.delete("/pool-close")
 def pool_reopen_day(pool: str, day: date, request: Request, user: dict = Depends(require_page("cotr.production"))):
+    _check_pool(user, pool)
     out = cotr_ledger.reopen_day(pool, day)
     _log(request, user, "cotr.pool.reopen", f"Closing {pool} {day.isoformat()} dibuka lagi", {"pool": pool, "day": day.isoformat()})
     return out
 
 
 @router.get("/dashboard")
-def dashboard(day: Optional[date] = None, _: dict = Depends(require_page("cotr.check-in", "cotr.storage", "cotr.production"))):
+def dashboard(day: Optional[date] = None, user: dict = Depends(require_page("cotr.check-in", "cotr.storage", "cotr.production"))):
     from app import cotr_dashboard
-    return cotr_dashboard.cached(day)
+    return cotr_dashboard.of_pool(cotr_dashboard.cached(day), _bound_pool(user))
 
 
 @router.get("/overview")
 def overview(dateFrom: date, dateTo: date, compareFrom: Optional[date] = None, compareTo: Optional[date] = None,
-             _: dict = Depends(require_page("overview", "cotr.check-in", "cotr.storage", "cotr.production"))):
-    """COTR sales of a period against a comparison period (the COTR tab of the Dashboard, 2026-11-13; app/cotr_overview.py)."""
+             user: dict = Depends(require_page("overview", "cotr.check-in", "cotr.storage", "cotr.production"))):
+    """COTR sales of a period against a comparison period (the COTR tab of the Dashboard, 2026-11-13; app/cotr_overview.py):
+    every pool together, so not for a COTR account bound to one pool."""
     from app import cotr_overview
+    if not has_page(user, "overview"):
+        _bound_pool(user)
+        if not cotr.every_pool(user):
+            raise HTTPException(403, detail=NOT_OWN_POOL)
     if dateFrom > dateTo or (dateTo - dateFrom).days >= cotr_overview.MAX_DAYS:
         raise HTTPException(422, detail="Periode 1 hari sampai 3 bulan")
     if (compareFrom is None) != (compareTo is None) or (compareFrom and compareTo and compareFrom > compareTo):
@@ -914,13 +973,16 @@ def monthly_workbook(request: Request, month: str = Query(..., pattern=r"^\d{4}-
 
 
 @router.get("/freshness")
-def freshness(_: dict = Depends(require_page("cotr.check-in", "cotr.storage", "cotr.production"))):
-    return cotr_esb.freshness()
+def freshness(user: dict = Depends(require_page("cotr.check-in", "cotr.storage", "cotr.production"))):
+    out = cotr_esb.freshness()
+    own = _bound_pool(user)
+    return out if own is None else {**out, "pools": [x for x in out["pools"] if x["pool"] == own]}
 
 
 @router.get("/esb/storage-journals")
 def esb_storage_journals(dateFrom: Optional[date] = None, dateTo: Optional[date] = None,
-                         _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+                         user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    _every_pool_only(user)
     end = dateTo or today()
     start = dateFrom or end.replace(day=1)
     if start > end or (end - start).days > 92:
@@ -961,13 +1023,15 @@ def esb_products(_: dict = Depends(require_page("cotr.menu", "cotr.production"))
 
 
 @router.get("/esb/summary")
-def esb_summary(_: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+def esb_summary(user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    _every_pool_only(user)
     return cotr_esb.summary()
 
 
 @router.get("/esb/documents")
 def esb_documents(module: str, dateFrom: Optional[date] = None, dateTo: Optional[date] = None, branch: Optional[str] = None,
-                  q: Optional[str] = Query(None, max_length=80), _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+                  q: Optional[str] = Query(None, max_length=80), user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    _every_pool_only(user)
     end = dateTo or today()
     start = dateFrom or end.replace(day=1)
     if (end - start).days > 400:
@@ -986,7 +1050,8 @@ def esb_sync_recipes(body: ApplyIn, request: Request, user: dict = Depends(requi
 
 @router.get("/esb/lines")
 def esb_lines(module: str, dateFrom: Optional[date] = None, dateTo: Optional[date] = None, branch: Optional[str] = None,
-              _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+              user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    _every_pool_only(user)
     end = dateTo or today()
     start = dateFrom or end.replace(day=1)
     if (end - start).days > 400:
@@ -995,7 +1060,8 @@ def esb_lines(module: str, dateFrom: Optional[date] = None, dateTo: Optional[dat
 
 
 @router.get("/esb/documents/{module}/{doc_num}")
-def esb_document(module: str, doc_num: str, _: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+def esb_document(module: str, doc_num: str, user: dict = Depends(require_page("cotr.production", "cotr.storage"))):
+    _every_pool_only(user)
     return _call(cotr_esb.document, module, doc_num)
 
 
@@ -1018,7 +1084,8 @@ def pool_stock(pool: Optional[str] = None, day: Optional[date] = None, user: dic
 
 @router.get("/incentives")
 def incentives(month: Optional[str] = None, scheme: Optional[str] = None, pool: Optional[str] = None,
-               _: dict = Depends(require_page("cotr.incentive"))):
+               user: dict = Depends(require_page("cotr.incentive"))):
+    pool = _own_pool(user, pool)
     try:
         day = date.fromisoformat(f"{month}-01") if month else today().replace(day=1)
     except ValueError:
@@ -1094,9 +1161,9 @@ def driver_payslips(user: dict = Depends(driver_only)):
 
 @router.get("/usage")
 def usage(dateFrom: Optional[date] = None, dateTo: Optional[date] = None, pool: Optional[str] = None,
-          _: dict = Depends(require_page("cotr.production"))):
+          user: dict = Depends(require_page("cotr.production"))):
     end = dateTo or today()
-    return cotr.usage(dateFrom or end - timedelta(days=6), end, pool)
+    return cotr.usage(dateFrom or end - timedelta(days=6), end, _own_pool(user, pool))
 
 
 @router.get("/production")
@@ -1145,6 +1212,8 @@ def photo(kind: Literal["check-in", "signature", "request", "issue"], row_id: st
         d = cotr.driver_of(user) if user["role"] == "driver" else None
         if not d or cotr.photo_owner(kind, row_id) != d["code"]:
             deny(request, user)
+    elif user["role"] != "driver":  # the team: a photo of its own pool only
+        _check_row(user, {"signature": "check-in"}.get(kind, kind), row_id)
     row = cotr.photo(kind, row_id)
     if not row or not row["photo"]:
         raise HTTPException(404, detail="Foto tidak ditemukan")

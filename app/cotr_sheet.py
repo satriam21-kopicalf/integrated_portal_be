@@ -121,6 +121,11 @@ def parse_report(rows: list[tuple], menus: dict[str, dict]) -> list[dict]:
     while i < len(rows):
         r = rows[i]
         label = r[1] if len(r) > 2 else None
+        if not (isinstance(label, str) and label.strip()) and i > 0 and len(rows[i - 1]) > 2 \
+                and str(rows[i - 1][2] or "").strip().upper() == "BALANCE" and isinstance(rows[i - 1][1], str):
+            # 2026-11-23 (Tebet, "BRI 74 MASYKUR"): the name of a block typed one row too high, on the BALANCE row of the
+            # block before it (a merged cell moved); the block was skipped every day
+            label = rows[i - 1][1]
         if isinstance(label, str) and label.strip().upper().startswith("TOTAL"):  # the totals of the sheet, not an armada
             i += 13
             continue

@@ -19,6 +19,7 @@ from app import database as db
 from app.config import get_settings
 from app.utils import data_version
 from app.routes.activity import router as activity_router
+from app.routes.social import router as social_router
 from app.routes import (auth_router, avatars_router, branches_router, exports_router, live_router,
                         overview_router, realtime_router,
                         summary_router, transactions_router, users_router)
@@ -75,6 +76,8 @@ async def lifespan(app: FastAPI):
         cotr_dashboard.warm()
         from app import outlet_cogs  # COGS & Usage of the default period, ready before the first reader (2026-11-13)
         outlet_cogs.warm()
+        from app import social  # Social Media Analytics: the listening engine, every SOCIAL_EVERY_H hours (2026-11-23)
+        social.start()
     yield
     db.close_pool()
 
@@ -158,6 +161,7 @@ app.include_router(alerts_router)  # the notification bell (Cost Control, migrat
 app.include_router(access_router)  # pages of roles & users, job titles, departments
 app.include_router(hrms_sync_router)  # job title / department of person accounts from HRMS (migration 110)
 app.include_router(activity_router)  # superadmin reads; any signed-in user reports page views
+app.include_router(social_router)  # Social Media Analytics (migration 135)
 app.include_router(realtime_router)
 app.include_router(xlsx_router)  # a table a page shows, as an Excel file
 

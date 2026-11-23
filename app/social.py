@@ -367,3 +367,29 @@ def post(platform: str, post_id: str) -> Optional[dict]:
             "lastSeen": iso(r["last_seen"]), "likes": r["likes"], "comments": r["comments"], "views": r["views"], "shares": r["shares"],
             "sentiment": r["sentiment"], "raw": r["raw"] or {}}
 
+
+
+def overview(d_from, d_to) -> dict:
+    """The analysis of the period (the Overview page): per month and platform the mentions, views, likes and comments;
+    the sentiment per platform; the accounts that reached most; the posts with the most views."""
+    p = {"a": d_from, "b": d_to}
+    rng = "coalesce(created_at, first_seen) >= %(a)s AND coalesce(created_at, first_seen) < %(b)s + interval '1 day'"
+    month = "to_char(coalesce(created_at, first_seen) AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM')"
+    monthly = db.fetch(f"""SELECT {month} AS month, platform, count(*)::int AS posts, coalesce(sum(views), 0)::bigint AS views,
+                                  coalesce(sum(likes), 0)::bigint AS likes, coalesce(sum(comments), 0)::bigint AS comments
+                             FROM {P}.social_post WHERE {rng} AND source <> 'comment' GROUP BY 1, 2 ORDER BY 1, 2""", p)
+    feel = db.fetch(f"""SELECT platform, sentiment, count(*)::int AS n FROM {P}.social_post WHERE {rng} GROUP BY 1, 2""", p)
+    authors = db.fetch(f"""SELECT author, platform, count(*)::int AS posts, coalesce(sum(views), 0)::bigint AS views,
+                                  coalesce(sum(likes), 0)::bigint AS likes
+                             FROM {P}.social_post WHERE {rng} AND author IS NOT NULL AND source <> 'comment'
+                            GROUP BY 1, 2 ORDER BY 4 DESC, 3 DESC LIMIT 10""", p)
+    top = db.fetch(f"""SELECT platform, post_id, author, left(text, 160) AS text, views, likes, comments, created_at
+                         FROM {P}.social_post WHERE {rng} AND views IS NOT NULL ORDER BY views DESC LIMIT 10""", p)
+    tot = db.fetchrow(f"""SELECT count(*)::int AS posts, coalesce(sum(views), 0)::bigint AS views, coalesce(sum(likes), 0)::bigint AS likes,
+                                 coalesce(sum(comments), 0)::bigint AS comments,
+                                 count(*) FILTER (WHERE sentiment = 'positive')::int AS positive,
+                                 count(*) FILTER (WHERE sentiment = 'negative')::int AS negative,
+                                 count(DISTINCT author)::int AS authors
+                            FROM {P}.social_post WHERE {rng}""", p)
+    return {"from": d_from.isoformat(), "to": d_to.isoformat(), "total": tot, "monthly": monthly, "sentiment": feel, "authors": authors,
+            "top": [{**r, "createdAt": r["created_at"].isoformat() if r["created_at"] else None, "created_at": None} for r in top]}

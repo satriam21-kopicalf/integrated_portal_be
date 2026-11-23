@@ -4,6 +4,7 @@ the portal itself (app/social.py).
     GET  /api/social/summary?dateFrom=&dateTo=        per platform, per day, the top authors, the last run of each source
     GET  /api/social/posts?platform=&sentiment=&q=&dateFrom=&dateTo=&limit=&offset=
     GET  /api/social/post?platform=&id=               one mention in full (the preview)
+    GET  /api/social/overview?dateFrom=&dateTo=       the analysis (Overview page), from 1 January by default
     POST /api/social/run                              superadmin / admin: collect now {source?, backfillFrom?}
     GET  /api/social/schedule, PUT /api/social/schedule/{source} {enabled, everyHours}   the schedule (migration 136)
 """
@@ -30,6 +31,14 @@ def _period(d_from: Optional[date], d_to: Optional[date]) -> tuple[date, date]:
 def summary(date_from: Optional[date] = Query(None, alias="dateFrom"), date_to: Optional[date] = Query(None, alias="dateTo"),
             _: dict = Depends(require_page(PAGE))):
     return social.summary(*_period(date_from, date_to))
+
+
+@router.get("/overview")
+def overview(date_from: Optional[date] = Query(None, alias="dateFrom"), date_to: Optional[date] = Query(None, alias="dateTo"),
+             _: dict = Depends(require_page(PAGE))):
+    """The Overview page: from 1 January of the year by default."""
+    b = date_to or today()
+    return social.overview(date_from or b.replace(month=1, day=1), b)
 
 
 @router.get("/posts")

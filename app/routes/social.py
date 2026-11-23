@@ -41,6 +41,14 @@ def overview(date_from: Optional[date] = Query(None, alias="dateFrom"), date_to:
     return social.overview(date_from or b.replace(month=1, day=1), b)
 
 
+@router.get("/insights")
+def insights(date_from: Optional[date] = Query(None, alias="dateFrom"), date_to: Optional[date] = Query(None, alias="dateTo"),
+             _: dict = Depends(require_page(PAGE))):
+    """The Overview after a media-monitoring dashboard: sentiment vs the period before, channels, tone per keyword and per
+    source, words, cities, keyword x week, trending posts. The last 30 days by default."""
+    return social.insights(*_period(date_from, date_to))
+
+
 @router.get("/posts")
 def posts(platform: Optional[str] = None, sentiment: Optional[Literal["positive", "negative", "neutral"]] = None, q: str = "",
           date_from: Optional[date] = Query(None, alias="dateFrom"), date_to: Optional[date] = Query(None, alias="dateTo"),

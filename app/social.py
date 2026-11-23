@@ -433,3 +433,78 @@ def overview(d_from, d_to) -> dict:
                             FROM {P}.social_post WHERE {rng}""", p)
     return {"from": d_from.isoformat(), "to": d_to.isoformat(), "total": tot, "keywords": per_kw, "monthly": monthly, "sentiment": feel, "authors": authors,
             "top": [{**r, "createdAt": r["created_at"].isoformat() if r["created_at"] else None, "created_at": None} for r in top]}
+
+
+# ---------------------------------------------------------------- insights (the Overview, after a media-monitoring dashboard)
+
+STOP = set("""yang dan di ke dari untuk dengan ini itu pada ada dalam juga tidak akan sudah bisa lebih kita kami saya aku kamu
+anda dia mereka atau karena jadi oleh sebagai para serta agar namun hingga sampai saat setelah sebelum telah masih baru
+banget aja sih nih yuk ya lagi buat bikin gak ga nggak udah kalo kalau tapi tp jd yg dgn utk dr sm aja deh kok dong loh lah
+pun nya biar the a an of to in on for and is are with at by from this that it be as or you your we our my me i so all not
+https http www com co id html amp quot rp ribu juta kopi calf kopicalf temancalf teman via kali satu dua tiga hari
+semua sangat paling banyak cuma hanya mau ingin akan tentu jangan bukan begitu seperti sama setiap tahun bulan minggu ini
+dalam sudah baca selengkapnya video channel subscribe follow like comment share""".split())
+CITIES = ("Jakarta", "Bekasi", "Bogor", "Depok", "Tangerang", "Bandung", "Cirebon", "Tegal", "Pekalongan", "Semarang", "Solo",
+          "Surakarta", "Yogyakarta", "Jogja", "Magelang", "Madiun", "Kediri", "Malang", "Surabaya", "Sidoarjo", "Mojokerto", "Jember",
+          "Banyuwangi", "Denpasar", "Bali", "Lampung", "Palembang", "Jambi", "Padang", "Pekanbaru", "Medan", "Batam", "Aceh",
+          "Pontianak", "Balikpapan", "Samarinda", "Banjarmasin", "Makassar", "Manado", "Kupang", "Mataram", "Serang", "Cilegon",
+          "Karawang", "Purwokerto", "Cikarang", "Sukabumi", "Tasikmalaya", "Garut", "Kudus", "Gresik", "Probolinggo", "Lumajang")
+_CITY = {c: re.compile(rf"\b{c}\b", re.I) for c in CITIES}
+_ALIAS = {"Jogja": "Yogyakarta", "Solo": "Surakarta"}
+
+
+def _words(texts: list[str], top: int = 60) -> list[dict]:
+    freq: dict[str, int] = {}
+    for t in texts:
+        for w in set(re.findall(r"[a-zA-Z]{4,}", (t or "").lower())):
+            if w not in STOP:
+                freq[w] = freq.get(w, 0) + 1
+    return [{"word": w, "n": n} for w, n in sorted(freq.items(), key=lambda x: -x[1])[:top] if n > 1]
+
+
+def _cities(texts: list[str]) -> list[dict]:
+    count: dict[str, int] = {}
+    for t in texts:
+        for c, rx in _CITY.items():
+            if rx.search(t or ""):
+                k = _ALIAS.get(c, c)
+                count[k] = count.get(k, 0) + 1
+    total = sum(count.values()) or 1
+    return [{"city": c, "n": n, "share": round(n / total * 100, 2)} for c, n in sorted(count.items(), key=lambda x: -x[1])[:10]]
+
+
+def insights(d_from, d_to) -> dict:
+    """Everything the Overview shows: the sentiment against the period before, the channels, the tone per keyword and per
+    source, the words, the cities named, keyword x week and the trending posts."""
+    days = (d_to - d_from).days + 1
+    p = {"a": d_from, "b": d_to, "pa": d_from - timedelta(days=days), "pb": d_from - timedelta(days=1)}
+    rng = "coalesce(created_at, first_seen) >= %(a)s AND coalesce(created_at, first_seen) < %(b)s + interval '1 day'"
+    prev = "coalesce(created_at, first_seen) >= %(pa)s AND coalesce(created_at, first_seen) < %(pb)s + interval '1 day'"
+    feel = {r["s"]: r for r in db.fetch(f"""SELECT coalesce(sentiment, 'neutral') AS s, count(*) FILTER (WHERE {rng})::int AS now,
+                                                   count(*) FILTER (WHERE {prev})::int AS before
+                                              FROM {P}.social_post GROUP BY 1""", p)}
+    channels = db.fetch(f"""SELECT platform, count(*)::int AS posts, coalesce(sum(views), 0)::bigint AS views FROM {P}.social_post
+                            WHERE {rng} AND source <> 'comment' GROUP BY 1""", p)
+    kw_tone = db.fetch(f"""SELECT k AS keyword, coalesce(sentiment, 'neutral') AS sentiment, count(*)::int AS n
+                             FROM {P}.social_post, unnest(keywords) k WHERE {rng} GROUP BY 1, 2""", p)
+    src = "coalesce(nullif(raw->>'channel', ''), author, platform)"
+    media = db.fetch(f"""SELECT {src} AS source, max(platform) AS platform, count(*)::int AS n,
+                                count(*) FILTER (WHERE sentiment = 'positive')::int AS positive,
+                                count(*) FILTER (WHERE sentiment = 'negative')::int AS negative
+                           FROM {P}.social_post WHERE {rng} AND source <> 'comment' GROUP BY 1 ORDER BY 3 DESC LIMIT 10""", p)
+    texts = [r["text"] for r in db.fetch(f"SELECT text FROM {P}.social_post WHERE {rng} ORDER BY coalesce(created_at, first_seen) DESC LIMIT 3000", p)]
+    week = "to_char(date_trunc('week', coalesce(created_at, first_seen) AT TIME ZONE 'Asia/Jakarta'), 'YYYY-MM-DD')"
+    heat = db.fetch(f"""SELECT k AS keyword, {week} AS week, count(*)::int AS n FROM {P}.social_post, unnest(keywords) k
+                         WHERE {rng} GROUP BY 1, 2 ORDER BY 2""", p)
+    trending = db.fetch(f"""SELECT platform, post_id, source, author, url, left(text, 400) AS text, created_at, first_seen, views, likes,
+                                   comments, sentiment, keywords, raw->>'site' AS site
+                              FROM {P}.social_post WHERE {rng} AND source <> 'comment'
+                             ORDER BY coalesce(created_at, first_seen) DESC, coalesce(views, 0) DESC LIMIT 12""", p)
+    iso = lambda v: v.isoformat() if v else None  # noqa: E731
+    return {
+        "from": d_from.isoformat(), "to": d_to.isoformat(), "days": days,
+        "sentiment": {k: {"now": (feel.get(k) or {}).get("now", 0), "before": (feel.get(k) or {}).get("before", 0)} for k in ("positive", "neutral", "negative")},
+        "channels": channels, "keywordTone": kw_tone, "media": media, "words": _words(texts), "cities": _cities(texts),
+        "heat": heat,
+        "trending": [{**{k: v for k, v in r.items() if k not in ("created_at", "first_seen")}, "createdAt": iso(r["created_at"] or r["first_seen"])} for r in trending],
+    }

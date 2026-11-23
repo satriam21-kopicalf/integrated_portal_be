@@ -22,3 +22,11 @@ def test_labels_every_keyword_a_post_names():
     assert labels("Ridzky Novasandro, Co-Founder Kopi Calf") == ["Kopi Calf", "Ridzky Novasandro", "Co-Founder Kopi Calf"]
     assert labels("Calf To Go di stasiun") == ["Calf To Go"]
     assert labels("calf muscle") == []
+
+
+def test_words_and_cities():
+    from app.social import _cities, _words
+    w = {x["word"]: x["n"] for x in _words(["Opening Kopi Calf Madiun, antri panjang", "Kopi Calf Madiun ramai antri", "yang dan di"])}
+    assert w.get("madiun") == 2 and w.get("antri") == 2 and "yang" not in w and "kopi" not in w
+    c = _cities(["Buka di Madiun", "Calf Tegal dan Madiun", "Jogja"])
+    assert c[0] == {"city": "Madiun", "n": 2, "share": 50.0} and any(x["city"] == "Yogyakarta" for x in c)

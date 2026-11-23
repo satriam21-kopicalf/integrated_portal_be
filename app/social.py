@@ -588,15 +588,16 @@ def insights(d_from, d_to) -> dict:
     media = db.fetch(f"""SELECT {src} AS source, max(platform) AS platform, count(*)::int AS n,
                                 count(*) FILTER (WHERE sentiment = 'positive')::int AS positive,
                                 count(*) FILTER (WHERE sentiment = 'negative')::int AS negative
-                           FROM {P}.social_post WHERE {rng} AND source <> 'comment' GROUP BY 1 ORDER BY 3 DESC LIMIT 10""", p)
+                           FROM {P}.social_post WHERE {rng} AND source <> 'comment' AND source <> 'account'  -- outside voices, not our own account
+                          GROUP BY 1 ORDER BY 3 DESC LIMIT 10""", p)
     texts = [r["text"] for r in db.fetch(f"SELECT text FROM {P}.social_post WHERE {rng} ORDER BY coalesce(created_at, first_seen) DESC LIMIT 3000", p)]
-    week = "to_char(date_trunc('week', coalesce(created_at, first_seen) AT TIME ZONE 'Asia/Jakarta'), 'YYYY-MM-DD')"
+    week = "to_char(date_trunc('month', coalesce(created_at, first_seen) AT TIME ZONE 'Asia/Jakarta'), 'YYYY-MM-DD')"  # per month (2026-11-23)
     heat = db.fetch(f"""SELECT k AS keyword, {week} AS week, count(*)::int AS n FROM {P}.social_post, unnest(keywords) k
                          WHERE {rng} GROUP BY 1, 2 ORDER BY 2""", p)
     trending = db.fetch(f"""SELECT platform, post_id, source, author, url, left(text, 400) AS text, created_at, first_seen, (raw->>'date_approx') = 'true' AS date_approx, views, likes,
                                    comments, sentiment, keywords, raw->>'site' AS site
                               FROM {P}.social_post WHERE {rng} AND source <> 'comment'
-                             ORDER BY coalesce(created_at, first_seen) DESC, coalesce(views, 0) DESC LIMIT 12""", p)
+                             ORDER BY created_at DESC NULLS LAST, coalesce(views, 0) DESC LIMIT 12""", p)  # the content date, never the day it was collected
     iso = lambda v: v.isoformat() if v else None  # noqa: E731
     return {
         "from": d_from.isoformat(), "to": d_to.isoformat(), "days": days,

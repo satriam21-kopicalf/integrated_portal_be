@@ -52,8 +52,8 @@ def test_a_source_stopped_early_keeps_its_rows(monkeypatch):
 def test_an_age_on_the_search_page_is_a_date():
     from datetime import datetime, timezone
     from app.social import _from_age
-    now = datetime.now(timezone.utc)
-    assert (now - _from_age("3mo ago")).days == 90
-    assert (now - _from_age("2 years ago")).days == 730
-    assert (now - _from_age("4w ago")).days == 28
+    ago = lambda t: round((datetime.now(timezone.utc) - _from_age(t)).total_seconds() / 86400)  # noqa: E731
+    assert ago("3mo ago") == 90
+    assert ago("2 years ago") == 730
+    assert ago("4w ago") == 28
     assert _from_age("Streamed live") is None

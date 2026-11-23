@@ -3,12 +3,14 @@ the portal itself (app/social.py).
 
     GET  /api/social/summary?dateFrom=&dateTo=        per platform, per day, the top authors, the last run of each source
     GET  /api/social/posts?platform=&sentiment=&q=&dateFrom=&dateTo=&limit=&offset=
-    POST /api/social/run                              superadmin / admin: collect now (in the background)
+    POST /api/social/run                              superadmin / admin: collect now {source?, backfillFrom?}
+    GET  /api/social/schedule, PUT /api/social/schedule/{source} {enabled, everyHours}   the schedule (migration 136)
 """
 from datetime import date, timedelta
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 
 from app import activity, social
 from app.access import require_page
@@ -37,10 +39,41 @@ def posts(platform: Optional[str] = None, sentiment: Optional[Literal["positive"
     return social.posts(platform, q, sentiment, a, b, limit, offset)
 
 
-@router.post("/run")
-def run_now(request: Request, user: dict = Depends(require_page(PAGE))):
+def _admin(user: dict) -> None:
     if user["role"] not in ("superadmin", "admin"):
-        raise HTTPException(403, detail="Hanya superadmin / admin yang dapat menjalankan pengambilan data")
-    social.run_now()
-    activity.record("social.run", user=user, request=request, page="/social-media", summary="Social Media Analytics: ambil data sekarang")
+        raise HTTPException(403, detail="Hanya superadmin / admin yang dapat mengatur pengambilan data")
+
+
+class RunIn(BaseModel):
+    source: Optional[Literal["youtube", "news", "tiktok"]] = None
+    backfillFrom: Optional[date] = None
+
+
+@router.post("/run")
+def run_now(request: Request, body: Optional[RunIn] = None, user: dict = Depends(require_page(PAGE))):
+    """Collect now (every source, or one); with backfillFrom the run reaches back to that date."""
+    _admin(user)
+    b = body or RunIn()
+    social.run_now(b.source, b.backfillFrom)
+    activity.record("social.run", user=user, request=request, page="/social-media",
+                    summary=f"Social Media Analytics: ambil data {b.source or 'semua sumber'}" + (f" sejak {b.backfillFrom}" if b.backfillFrom else ""))
     return {"started": True}
+
+
+@router.get("/schedule")
+def get_schedule(_: dict = Depends(require_page(PAGE))):
+    return {"data": social.schedule()}
+
+
+class ScheduleIn(BaseModel):
+    enabled: bool
+    everyHours: float = Field(ge=1, le=168)
+
+
+@router.put("/schedule/{source}")
+def put_schedule(source: Literal["youtube", "news", "tiktok"], body: ScheduleIn, request: Request, user: dict = Depends(require_page(PAGE))):
+    _admin(user)
+    out = social.set_schedule(user, source, body.enabled, body.everyHours)
+    activity.record("social.schedule", user=user, request=request, page="/social-media",
+                    summary=f"Social Media Analytics: jadwal {source} {'aktif' if body.enabled else 'mati'}, tiap {body.everyHours:g} jam")
+    return {"data": out}

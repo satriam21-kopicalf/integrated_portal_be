@@ -75,7 +75,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("rating.grabfood", "GrabFood", "Aggregator"),
     # Calf On The Road (prototype 2026-11-01, sample data in the frontend): pages of the COTR team, given per role / user
     # Social Media Analytics (2026-11-23, migration 135): what the public says about Kopi Calf
-    ("social.analytics", "Social Media Analytics", "Marketing"),
+    ("social.analytics", "Social Media Analytics", "Social Media"),
     ("cotr.check-in", "Monitoring Armada - Driver", "Calf On The Road"),
     ("cotr.storage", "Storage & Assignment", "Calf On The Road"),
     ("cotr.production", "Storage & Production", "Calf On The Road"),

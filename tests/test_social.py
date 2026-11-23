@@ -47,3 +47,13 @@ def test_a_source_stopped_early_keeps_its_rows(monkeypatch):
         raise AssertionError("expected Partial")
     except social.Partial as e:
         assert [r["post_id"] for r in e.rows] == [social.KEYWORDS[0], "b"]  # the first keyword's rows are not lost
+
+
+def test_an_age_on_the_search_page_is_a_date():
+    from datetime import datetime, timezone
+    from app.social import _from_age
+    now = datetime.now(timezone.utc)
+    assert (now - _from_age("3mo ago")).days == 90
+    assert (now - _from_age("2 years ago")).days == 730
+    assert (now - _from_age("4w ago")).days == 28
+    assert _from_age("Streamed live") is None

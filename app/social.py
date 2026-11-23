@@ -129,6 +129,7 @@ def youtube(kw: str, since: Optional[date] = None) -> list[dict]:
         found = y.extract_info(f"https://www.youtube.com/results?search_query={quote(kw)}&sp=CAI%3D", download=False) or {}
     out: list[dict] = []
     feeds: dict[str, dict[str, datetime]] = {}
+    ago = _search_ages(kw)  # {video: "3mo ago"} of the first page of the search
     for e in found.get("entries") or []:
         vid = (e or {}).get("id") or ""
         if len(vid) != 11 or not relevant(e.get("title"), e.get("description")):
@@ -137,13 +138,59 @@ def youtube(kw: str, since: Optional[date] = None) -> list[dict]:
         if ch and ch not in feeds:
             feeds[ch] = _channel_dates(ch)
         at = (feeds.get(ch) or {}).get(vid)
+        approx = None
+        if at is None and vid in ago:  # no exact date: the age the search shows, kept as approximate
+            at, approx = _from_age(ago[vid]), ago[vid]
         if since and at and at.date() < since:
             continue
         out.append(_row("youtube", "search", kw, vid, e.get("url") or f"https://www.youtube.com/watch?v={vid}",
                         e.get("channel") or e.get("uploader"), f"{e.get('title', '')}\n\n{e.get('description') or ''}", at,
                         None, None, e.get("view_count"), None,
-                        {k: e.get(k) for k in ("title", "channel", "channel_id", "duration", "uploader_id")}))
+                        {**{k: e.get(k) for k in ("title", "channel", "channel_id", "duration", "uploader_id")},
+                         **({"date_approx": True, "published_text": approx} if approx else {})}))
     return out
+
+
+_AGE = re.compile(r"(\d+)\s*(s|sec|second|m|min|minute|h|hr|hour|d|day|w|wk|week|mo|month|y|yr|year)s?\b", re.I)
+
+
+def _from_age(text: str) -> Optional[datetime]:
+    """"3mo ago" / "2 years ago" -> the moment it points to (approximate)."""
+    m = _AGE.search(text or "")
+    if not m:
+        return None
+    n, u = int(m.group(1)), m.group(2).lower()
+    days = {"s": 0, "sec": 0, "second": 0, "m": 0, "min": 0, "minute": 0, "h": 0, "hr": 0, "hour": 0, "d": 1, "day": 1,
+            "w": 7, "wk": 7, "week": 7, "mo": 30, "month": 30, "y": 365, "yr": 365, "year": 365}[u]
+    hours = n if u in ("h", "hr", "hour") else 0
+    return datetime.now(timezone.utc) - timedelta(days=n * days, hours=hours)
+
+
+def _search_ages(kw: str) -> dict[str, str]:
+    """{video id: "3mo ago"} from the search page of YouTube (its first page), no login needed."""
+    try:
+        r = _http.get("https://www.youtube.com/results", params={"search_query": kw, "sp": "CAI%3D", "hl": "en", "gl": "ID"},
+                      headers={"Accept-Language": "en"}, timeout=30)
+        m = re.search(r"var ytInitialData = (\{.*?\});</script>", r.text)
+        if not m:
+            return {}
+        out: dict[str, str] = {}
+
+        def walk(x):
+            if isinstance(x, dict):
+                v = x.get("videoRenderer")
+                if v and v.get("videoId") and (v.get("publishedTimeText") or {}).get("simpleText"):
+                    out[v["videoId"]] = v["publishedTimeText"]["simpleText"]
+                for y in x.values():
+                    walk(y)
+            elif isinstance(x, list):
+                for y in x:
+                    walk(y)
+        walk(json.loads(m.group(1)))
+        time.sleep(PAUSE / 2)
+        return out
+    except Exception:  # noqa: BLE001 - no ages then
+        return {}
 
 
 def _channel_dates(channel_id: str) -> dict[str, datetime]:
@@ -222,7 +269,8 @@ def tiktok(user: str, since: Optional[date] = None) -> list[dict]:
         d = y.extract_info(f"https://www.tiktok.com/@{user}", download=False) or {}
     vids = [v for v in d.get("entries") or [] if v and v.get("id")]
     out = [_row("tiktok", "account", "@" + user, v.get("id"), v.get("webpage_url"), user, v.get("description") or v.get("title"),
-                _day(v.get("upload_date")), v.get("like_count"), v.get("comment_count"), v.get("view_count"), v.get("repost_count"),
+                datetime.fromtimestamp(v["timestamp"], tz=timezone.utc) if v.get("timestamp") else _day(v.get("upload_date")),
+                v.get("like_count"), v.get("comment_count"), v.get("view_count"), v.get("repost_count"),
                 {k: v.get(k) for k in ("title", "duration")})
            for v in vids]
     with _ydl({"getcomments": True, "extractor_args": {"tiktok": {"max_comments": [str(TIKTOK_COMMENTS)]}}}) as y:
@@ -279,7 +327,13 @@ def save(rows: list[dict]) -> int:
                     ON CONFLICT (platform, post_id) DO UPDATE SET likes = coalesce(EXCLUDED.likes, {P}.social_post.likes),
                         comments = coalesce(EXCLUDED.comments, {P}.social_post.comments),
                         views = coalesce(EXCLUDED.views, {P}.social_post.views), shares = coalesce(EXCLUDED.shares, {P}.social_post.shares),
-                        created_at = coalesce({P}.social_post.created_at, EXCLUDED.created_at),
+                        created_at = CASE WHEN EXCLUDED.created_at IS NULL THEN {P}.social_post.created_at
+                                          WHEN EXCLUDED.raw->>'date_approx' = 'true' AND {P}.social_post.raw->>'date_approx' IS NULL
+                                               AND {P}.social_post.created_at IS NOT NULL THEN {P}.social_post.created_at
+                                          ELSE EXCLUDED.created_at END,
+                        raw = CASE WHEN EXCLUDED.raw->>'date_approx' IS NULL THEN {P}.social_post.raw - 'date_approx' - 'published_text'
+                                   WHEN {P}.social_post.created_at IS NULL OR {P}.social_post.raw->>'date_approx' = 'true' THEN {P}.social_post.raw || EXCLUDED.raw
+                                   ELSE {P}.social_post.raw END,
                         keywords = ARRAY(SELECT DISTINCT unnest({P}.social_post.keywords || EXCLUDED.keywords)), last_seen = now()
                     RETURNING (xmax = 0) AS inserted""",
                 {**r, "sentiment": sentiment(r["text"]), "keywords": labels(r["text"], r["author"]) or ([r["keyword"]] if r["keyword"] in LABELS else []),
@@ -403,6 +457,7 @@ def posts(platform: Optional[str], q: str, sentiment_: Optional[str], d_from, d_
         where.append("source <> 'comment'")
     w = " AND ".join(where)
     rows = db.fetch(f"""SELECT platform, post_id, source, keyword, url, author, left(text, 600) AS text, created_at, likes, comments, keywords,
+                               (raw->>'date_approx') = 'true' AS date_approx, raw->>'published_text' AS published_text,
                                views, shares, sentiment, first_seen FROM {P}.social_post WHERE {w}
                         ORDER BY coalesce(created_at, first_seen) DESC LIMIT %(lim)s OFFSET %(off)s""", p)
     t = db.fetchrow(f"""SELECT count(*)::int AS n, coalesce(sum(views), 0)::bigint AS views, coalesce(sum(likes), 0)::bigint AS likes,
@@ -412,7 +467,7 @@ def posts(platform: Optional[str], q: str, sentiment_: Optional[str], d_from, d_
                           FROM {P}.social_post WHERE {w}""", p)
     total = t["n"]
     sums = {k: t[k] for k in ("views", "likes", "comments", "positive", "negative")} | {"neutral": total - t["positive"] - t["negative"]}
-    return {"total": total, "sums": sums, "data": [{**r, "createdAt": r["created_at"].isoformat() if r["created_at"] else None,
+    return {"total": total, "sums": sums, "data": [{**r, "createdAt": r["created_at"].isoformat() if r["created_at"] else None, "dateApprox": bool(r["date_approx"]),
                                       "firstSeen": r["first_seen"].isoformat()} for r in rows]}
 
 
@@ -444,7 +499,8 @@ def post(platform: str, post_id: str) -> Optional[dict]:
     return {"platform": r["platform"], "post_id": r["post_id"], "source": r["source"], "keyword": r["keyword"], "url": r["url"],
             "author": r["author"], "text": r["text"], "createdAt": iso(r["created_at"]), "firstSeen": iso(r["first_seen"]),
             "lastSeen": iso(r["last_seen"]), "likes": r["likes"], "comments": r["comments"], "views": r["views"], "shares": r["shares"],
-            "sentiment": r["sentiment"], "keywords": r["keywords"] or [], "raw": r["raw"] or {}}
+            "sentiment": r["sentiment"], "keywords": r["keywords"] or [], "raw": r["raw"] or {},
+            "dateApprox": (r["raw"] or {}).get("date_approx") is True}
 
 
 
@@ -537,7 +593,7 @@ def insights(d_from, d_to) -> dict:
     week = "to_char(date_trunc('week', coalesce(created_at, first_seen) AT TIME ZONE 'Asia/Jakarta'), 'YYYY-MM-DD')"
     heat = db.fetch(f"""SELECT k AS keyword, {week} AS week, count(*)::int AS n FROM {P}.social_post, unnest(keywords) k
                          WHERE {rng} GROUP BY 1, 2 ORDER BY 2""", p)
-    trending = db.fetch(f"""SELECT platform, post_id, source, author, url, left(text, 400) AS text, created_at, first_seen, views, likes,
+    trending = db.fetch(f"""SELECT platform, post_id, source, author, url, left(text, 400) AS text, created_at, first_seen, (raw->>'date_approx') = 'true' AS date_approx, views, likes,
                                    comments, sentiment, keywords, raw->>'site' AS site
                               FROM {P}.social_post WHERE {rng} AND source <> 'comment'
                              ORDER BY coalesce(created_at, first_seen) DESC, coalesce(views, 0) DESC LIMIT 12""", p)
@@ -547,5 +603,5 @@ def insights(d_from, d_to) -> dict:
         "sentiment": {k: {"now": (feel.get(k) or {}).get("now", 0), "before": (feel.get(k) or {}).get("before", 0)} for k in ("positive", "neutral", "negative")},
         "channels": channels, "keywordTone": kw_tone, "media": media, "words": _words(texts), "cities": _cities(texts),
         "heat": heat,
-        "trending": [{**{k: v for k, v in r.items() if k not in ("created_at", "first_seen")}, "createdAt": iso(r["created_at"] or r["first_seen"])} for r in trending],
+        "trending": [{**{k: v for k, v in r.items() if k not in ("created_at", "first_seen")}, "createdAt": iso(r["created_at"]), "dateApprox": bool(r["date_approx"])} for r in trending],
     }

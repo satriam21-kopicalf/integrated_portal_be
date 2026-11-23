@@ -749,6 +749,16 @@ def pool_count(body: CountIn, request: Request, user: dict = Depends(require_pag
     return out
 
 
+@router.get("/attendance")
+def attendance(day: Optional[date] = None, pool: Optional[str] = None, user: dict = Depends(require_page("cotr.check-in"))):
+    """Stage 3 (2026-11-23): the HRMS punch of every COTR employee beside the driver-app shift; a bound account sees its pool."""
+    from app import cotr_attendance
+    bound = _bound_pool(user)
+    if bound:
+        pool = bound
+    return _call(cotr_attendance.day, day or today(), pool)
+
+
 @router.get("/pool-moves")
 def pool_moves_list(pool: str, day: date, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
     _check_pool(user, pool)

@@ -113,14 +113,27 @@ def day_figures(d: date, esb: dict, sheets: dict, system: dict, manual: dict) ->
     base = sheets[d] if d in sheets else esb[d] if d in esb else system.get(d) or {}
     source = "sheet" if d in sheets else "esb" if d in esb else "app"
     moved = esb[d] if d in esb else base
+    entered = manual.get(d) or {}
     out: dict[str, dict[str, int]] = {}
-    for src, kinds in ((base, None), (moved, IN_KINDS), (manual.get(d) or {}, IN_KINDS + ("sold", "waste", "cupping"))):
+    for src, kinds in ((base, None), (moved, IN_KINDS), (entered, ("sold", "waste", "cupping"))):
         for code, f in src.items():
             for k, v in f.items():
                 if (kinds is None and k in IN_KINDS) or (kinds is not None and k not in kinds):
                     continue
                 m = out.setdefault(code, {})
                 m[k] = m.get(k, 0) + v
+    # 2026-11-23 (stage 2): the storage enters the ESB simple transfers 1-5 days after the day of the transfer, so the
+    # night closing never had them. What the pool confirms (arrived / transfer entered in the portal) is the figure of
+    # that menu and day; ESB only fills the menus the pool did not confirm, and a later ESB figure that differs is kept
+    # aside (`esb`) to be matched, never added on top.
+    for code, f in entered.items():
+        for k in IN_KINDS:
+            if k in f:
+                m = out.setdefault(code, {})
+                before = m.get(k)
+                m[k] = f[k]
+                if before is not None and before != f[k] and d in esb:
+                    m.setdefault("esb", {})[k] = before
     return out, source, "esb" if d in esb else source
 
 
@@ -168,7 +181,11 @@ def run(pool: str, d_from: date, d_to: date) -> dict:
         figures, source, in_source = day_figures(d, esb, sheets, system, manual)
         for c in codes:
             f = {k: 0 for k in KINDS}
+            aside = {}
             for k, v in figures.get(c, {}).items():
+                if k == "esb":
+                    aside = v  # what ESB says when it differs from the pool's confirmation
+                    continue
                 f[k] += v
             opening = left[c] - gone[c]
             calc = opening + f["transfer"] + f["arrived"] - f["sold"] - f["waste"] - f["cupping"]
@@ -177,7 +194,8 @@ def run(pool: str, d_from: date, d_to: date) -> dict:
             lots = lots_of(d, c)
             exp = expired_on(lots, d)
             rows[c] = {"opening": opening, **f, "calculated": calc, "actual": actual,
-                       "balance": actual - calc if actual is not None else None, "expired": exp, "lots": lots}
+                       "balance": actual - calc if actual is not None else None, "expired": exp, "lots": lots,
+                       **({"esbDiff": aside} if aside else {})}
             left[c], gone[c] = (actual if actual is not None else calc), exp
         if d >= d_from:
             out_days.append({"day": d.isoformat(), "source": source, "arrivedSource": in_source, "rows": rows})

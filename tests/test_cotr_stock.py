@@ -307,8 +307,26 @@ def test_arrived_and_transfer_come_from_esb_on_a_workbook_day():
     manual = {d1: {"M": {"arrived": 5}}}
     f, src, insrc = day_figures(d1, esb, sheets, {}, manual)
     assert (src, insrc) == ("sheet", "esb")
-    assert f["M"] == {"sold": 100, "arrived": 140}  # sold from the workbook, arrived 135 (ESB) + 5 entered, no workbook transfer
+    # sold from the workbook; arrived = what the pool confirmed (5), the ESB 135 kept aside to match (2026-11-23)
+    assert f["M"] == {"sold": 100, "arrived": 5, "esb": {"arrived": 135}}
     f, src, insrc = day_figures(d2, esb, sheets, {}, {})
     assert (src, insrc) == ("sheet", "sheet") and f["M"] == {"sold": 90, "arrived": 50}  # ESB has nothing that day
     f, src, insrc = day_figures(d3, esb, sheets, {d3: {"M": {"arrived": 7, "sold": 3}}}, {})
     assert (src, insrc) == ("esb", "esb") and f["M"] == {"sold": 10, "arrived": 20}
+
+
+def test_pool_confirmation_counts_before_esb_comes():
+    """Stage 2 (2026-11-23): ESB simple transfers come 1-5 days late; the pool's confirmation is the figure of the day,
+    ESB fills only the menus not confirmed, and the same ESB figure later is not added on top."""
+    from datetime import date as D
+    from app.cotr_ledger import day_figures
+    d = D(2026, 11, 20)
+    manual = {d: {"KS": {"arrived": 40}}}
+    f, _, _ = day_figures(d, {}, {}, {}, manual)  # the night of the 20th: ESB has nothing yet
+    assert f["KS"]["arrived"] == 40
+    esb = {d: {"KS": {"arrived": 40}, "AM": {"arrived": 12}}}  # two days later ESB has the 20th
+    f, _, _ = day_figures(d, esb, {}, {}, manual)
+    assert f["KS"] == {"arrived": 40} and f["AM"] == {"arrived": 12}  # not 80; AM (not confirmed) from ESB
+    esb = {d: {"KS": {"arrived": 36}}}
+    f, _, _ = day_figures(d, esb, {}, {}, manual)
+    assert f["KS"] == {"arrived": 40, "esb": {"arrived": 36}}  # ESB differs: kept aside for the storage to fix

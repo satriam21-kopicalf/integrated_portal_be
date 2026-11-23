@@ -405,8 +405,14 @@ def posts(platform: Optional[str], q: str, sentiment_: Optional[str], d_from, d_
     rows = db.fetch(f"""SELECT platform, post_id, source, keyword, url, author, left(text, 600) AS text, created_at, likes, comments, keywords,
                                views, shares, sentiment, first_seen FROM {P}.social_post WHERE {w}
                         ORDER BY coalesce(created_at, first_seen) DESC LIMIT %(lim)s OFFSET %(off)s""", p)
-    total = db.fetchrow(f"SELECT count(*)::int AS n FROM {P}.social_post WHERE {w}", p)["n"]
-    return {"total": total, "data": [{**r, "createdAt": r["created_at"].isoformat() if r["created_at"] else None,
+    t = db.fetchrow(f"""SELECT count(*)::int AS n, coalesce(sum(views), 0)::bigint AS views, coalesce(sum(likes), 0)::bigint AS likes,
+                               coalesce(sum(comments), 0)::bigint AS comments,
+                               count(*) FILTER (WHERE sentiment = 'positive')::int AS positive,
+                               count(*) FILTER (WHERE sentiment = 'negative')::int AS negative
+                          FROM {P}.social_post WHERE {w}""", p)
+    total = t["n"]
+    sums = {k: t[k] for k in ("views", "likes", "comments", "positive", "negative")} | {"neutral": total - t["positive"] - t["negative"]}
+    return {"total": total, "sums": sums, "data": [{**r, "createdAt": r["created_at"].isoformat() if r["created_at"] else None,
                                       "firstSeen": r["first_seen"].isoformat()} for r in rows]}
 
 

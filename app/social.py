@@ -36,8 +36,20 @@ from app.utils import today as today_wib
 
 logger = logging.getLogger("social")
 P = "integration_portal"
-KEYWORDS = ["Kopi Calf", "kopicalf"]
-MATCH = ("kopi calf", "kopicalf", "calf coffee")      # a result must name Kopi Calf (drops what only matched loosely)
+# the keywords searched (YouTube, Google News) and the labels of a post (2026-11-23, migration 137): each label with the
+# spellings that count for it; a post names at least one, else it only matched loosely and is dropped
+LABELS: dict[str, tuple[str, ...]] = {
+    "Kopi Calf": ("kopi calf", "kopicalf", "#kopicalf"),
+    "Calf Coffee Industry": ("calf coffee industry", "calf coffee"),
+    "Calf On The Road": ("calf on the road", "calfontheroad", "#cotr"),
+    "Calf To Go": ("calf to go", "calftogo"),
+    "Danang Yuda Prawira": ("danang yuda prawira", "danang yuda"),
+    "Ridzky Novasandro": ("ridzky novasandro", "ridzky"),
+    "Founder Kopi Calf": ("founder kopi calf", "founder calf"),
+    "Co-Founder Kopi Calf": ("co-founder kopi calf", "cofounder kopi calf", "co founder kopi calf"),
+    "Teman Calf": ("teman calf", "temancalf", "#temancalf"),
+}
+KEYWORDS = list(LABELS)
 YOUTUBE_RESULTS = 30
 YOUTUBE_COMMENTS = 40
 TIKTOK_ACCOUNTS = ["kopicalf"]
@@ -74,9 +86,17 @@ def sentiment(text: Optional[str]) -> str:
     return "positive" if pos > neg else "negative" if neg > pos else "neutral"
 
 
-def relevant(*texts: Optional[str]) -> bool:
+def labels(*texts: Optional[str]) -> list[str]:
+    """Every keyword a text names (its labels), in the order of LABELS; "Co-Founder" is not counted as "Founder" too."""
     t = " ".join(x or "" for x in texts).lower()
-    return any(m in t for m in MATCH)
+    out = [k for k, spellings in LABELS.items() if any(w in t for w in spellings)]
+    if "Co-Founder Kopi Calf" in out and "Founder Kopi Calf" in out and not re.search(r"(?<!co-)(?<!co )(?<!co)founder (kopi )?calf", t):
+        out.remove("Founder Kopi Calf")
+    return out
+
+
+def relevant(*texts: Optional[str]) -> bool:
+    return bool(labels(*texts))
 
 
 def _row(platform, source, keyword, pid, url, author, text, created, likes=None, comments=None, views=None, shares=None, raw=None) -> dict:
@@ -225,15 +245,17 @@ def save(rows: list[dict]) -> int:
             seen.add(key)
             got = conn.execute(
                 f"""INSERT INTO {P}.social_post (platform, post_id, source, keyword, url, author, text, created_at, likes, comments,
-                                                  views, shares, sentiment, raw)
+                                                  views, shares, sentiment, keywords, raw)
                     VALUES (%(platform)s, %(post_id)s, %(source)s, %(keyword)s, %(url)s, %(author)s, %(text)s, %(created_at)s,
-                            %(likes)s, %(comments)s, %(views)s, %(shares)s, %(sentiment)s, %(raw)s::jsonb)
+                            %(likes)s, %(comments)s, %(views)s, %(shares)s, %(sentiment)s, %(keywords)s, %(raw)s::jsonb)
                     ON CONFLICT (platform, post_id) DO UPDATE SET likes = coalesce(EXCLUDED.likes, {P}.social_post.likes),
                         comments = coalesce(EXCLUDED.comments, {P}.social_post.comments),
                         views = coalesce(EXCLUDED.views, {P}.social_post.views), shares = coalesce(EXCLUDED.shares, {P}.social_post.shares),
-                        created_at = coalesce({P}.social_post.created_at, EXCLUDED.created_at), last_seen = now()
+                        created_at = coalesce({P}.social_post.created_at, EXCLUDED.created_at),
+                        keywords = ARRAY(SELECT DISTINCT unnest({P}.social_post.keywords || EXCLUDED.keywords)), last_seen = now()
                     RETURNING (xmax = 0) AS inserted""",
-                {**r, "sentiment": sentiment(r["text"]), "raw": json.dumps(r["raw"], ensure_ascii=False, default=str)}).fetchone()
+                {**r, "sentiment": sentiment(r["text"]), "keywords": labels(r["text"], r["author"]) or ([r["keyword"]] if r["keyword"] in LABELS else []),
+                 "raw": json.dumps(r["raw"], ensure_ascii=False, default=str)}).fetchone()
             added += bool(got and got["inserted"])
     return added
 
@@ -276,8 +298,22 @@ def tick() -> list[dict]:
     return out
 
 
+def relabel() -> int:
+    """The posts kept before the labels (migration 137) get theirs from their text."""
+    rows = db.fetch(f"SELECT platform, post_id, text, author, keyword FROM {P}.social_post WHERE keywords = '{{}}'")
+    with db.transaction() as conn:
+        for r in rows:
+            k = labels(r["text"], r["author"]) or ([r["keyword"]] if r["keyword"] in LABELS else ["Kopi Calf"])
+            conn.execute(f"UPDATE {P}.social_post SET keywords = %s WHERE platform = %s AND post_id = %s", (k, r["platform"], r["post_id"]))
+    return len(rows)
+
+
 def _loop() -> None:
     time.sleep(FIRST_S)
+    try:
+        relabel()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("social relabel: %s", e)
     while True:
         try:
             tick()
@@ -319,7 +355,7 @@ def set_schedule(user: dict, source: str, enabled: bool, every_hours: float) -> 
 
 # ---------------------------------------------------------------- reads (the page)
 
-def posts(platform: Optional[str], q: str, sentiment_: Optional[str], d_from, d_to, limit: int, offset: int) -> dict:
+def posts(platform: Optional[str], q: str, sentiment_: Optional[str], d_from, d_to, limit: int, offset: int, keyword: Optional[str] = None) -> dict:
     where = ["coalesce(created_at, first_seen) >= %(a)s", "coalesce(created_at, first_seen) < %(b)s + interval '1 day'"]
     p: dict = {"a": d_from, "b": d_to, "lim": limit, "off": offset}
     if platform:
@@ -328,8 +364,10 @@ def posts(platform: Optional[str], q: str, sentiment_: Optional[str], d_from, d_
         where.append("sentiment = %(se)s"); p["se"] = sentiment_
     if q.strip():
         where.append("(text ILIKE %(q)s OR author ILIKE %(q)s)"); p["q"] = f"%{q.strip()}%"
+    if keyword:
+        where.append("%(kw)s = ANY(keywords)"); p["kw"] = keyword
     w = " AND ".join(where)
-    rows = db.fetch(f"""SELECT platform, post_id, source, keyword, url, author, left(text, 600) AS text, created_at, likes, comments,
+    rows = db.fetch(f"""SELECT platform, post_id, source, keyword, url, author, left(text, 600) AS text, created_at, likes, comments, keywords,
                                views, shares, sentiment, first_seen FROM {P}.social_post WHERE {w}
                         ORDER BY coalesce(created_at, first_seen) DESC LIMIT %(lim)s OFFSET %(off)s""", p)
     total = db.fetchrow(f"SELECT count(*)::int AS n FROM {P}.social_post WHERE {w}", p)["n"]
@@ -365,7 +403,7 @@ def post(platform: str, post_id: str) -> Optional[dict]:
     return {"platform": r["platform"], "post_id": r["post_id"], "source": r["source"], "keyword": r["keyword"], "url": r["url"],
             "author": r["author"], "text": r["text"], "createdAt": iso(r["created_at"]), "firstSeen": iso(r["first_seen"]),
             "lastSeen": iso(r["last_seen"]), "likes": r["likes"], "comments": r["comments"], "views": r["views"], "shares": r["shares"],
-            "sentiment": r["sentiment"], "raw": r["raw"] or {}}
+            "sentiment": r["sentiment"], "keywords": r["keywords"] or [], "raw": r["raw"] or {}}
 
 
 
@@ -385,11 +423,13 @@ def overview(d_from, d_to) -> dict:
                             GROUP BY 1, 2 ORDER BY 4 DESC, 3 DESC LIMIT 10""", p)
     top = db.fetch(f"""SELECT platform, post_id, author, left(text, 160) AS text, views, likes, comments, created_at
                          FROM {P}.social_post WHERE {rng} AND views IS NOT NULL ORDER BY views DESC LIMIT 10""", p)
+    per_kw = db.fetch(f"""SELECT k AS keyword, count(*)::int AS posts, coalesce(sum(views), 0)::bigint AS views
+                            FROM {P}.social_post, unnest(keywords) k WHERE {rng} GROUP BY 1 ORDER BY 2 DESC""", p)
     tot = db.fetchrow(f"""SELECT count(*)::int AS posts, coalesce(sum(views), 0)::bigint AS views, coalesce(sum(likes), 0)::bigint AS likes,
                                  coalesce(sum(comments), 0)::bigint AS comments,
                                  count(*) FILTER (WHERE sentiment = 'positive')::int AS positive,
                                  count(*) FILTER (WHERE sentiment = 'negative')::int AS negative,
                                  count(DISTINCT author)::int AS authors
                             FROM {P}.social_post WHERE {rng}""", p)
-    return {"from": d_from.isoformat(), "to": d_to.isoformat(), "total": tot, "monthly": monthly, "sentiment": feel, "authors": authors,
+    return {"from": d_from.isoformat(), "to": d_to.isoformat(), "total": tot, "keywords": per_kw, "monthly": monthly, "sentiment": feel, "authors": authors,
             "top": [{**r, "createdAt": r["created_at"].isoformat() if r["created_at"] else None, "created_at": None} for r in top]}

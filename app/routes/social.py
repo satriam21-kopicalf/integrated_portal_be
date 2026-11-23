@@ -44,9 +44,16 @@ def overview(date_from: Optional[date] = Query(None, alias="dateFrom"), date_to:
 @router.get("/posts")
 def posts(platform: Optional[str] = None, sentiment: Optional[Literal["positive", "negative", "neutral"]] = None, q: str = "",
           date_from: Optional[date] = Query(None, alias="dateFrom"), date_to: Optional[date] = Query(None, alias="dateTo"),
-          limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), _: dict = Depends(require_page(PAGE))):
+          limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), keyword: Optional[str] = None,
+          _: dict = Depends(require_page(PAGE))):
     a, b = _period(date_from, date_to)
-    return social.posts(platform, q, sentiment, a, b, limit, offset)
+    return social.posts(platform, q, sentiment, a, b, limit, offset, keyword)
+
+
+@router.get("/keywords")
+def keywords(_: dict = Depends(require_page(PAGE))):
+    """The keywords searched and labelled (migration 137)."""
+    return {"data": social.KEYWORDS}
 
 
 @router.get("/post")

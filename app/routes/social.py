@@ -3,6 +3,7 @@ the portal itself (app/social.py).
 
     GET  /api/social/summary?dateFrom=&dateTo=        per platform, per day, the top authors, the last run of each source
     GET  /api/social/posts?platform=&sentiment=&q=&dateFrom=&dateTo=&limit=&offset=
+    GET  /api/social/post?platform=&id=               one mention in full (the preview)
     POST /api/social/run                              superadmin / admin: collect now {source?, backfillFrom?}
     GET  /api/social/schedule, PUT /api/social/schedule/{source} {enabled, everyHours}   the schedule (migration 136)
 """
@@ -37,6 +38,15 @@ def posts(platform: Optional[str] = None, sentiment: Optional[Literal["positive"
           limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), _: dict = Depends(require_page(PAGE))):
     a, b = _period(date_from, date_to)
     return social.posts(platform, q, sentiment, a, b, limit, offset)
+
+
+@router.get("/post")
+def post(platform: str, id: str, _: dict = Depends(require_page(PAGE))):
+    """One mention in full (the preview drawer of the page)."""
+    out = social.post(platform, id)
+    if not out:
+        raise HTTPException(404, detail="Data tidak ditemukan")
+    return out
 
 
 def _admin(user: dict) -> None:

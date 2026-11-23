@@ -354,3 +354,16 @@ def summary(d_from, d_to) -> dict:
     return {"schedule": schedule(), "platforms": per, "daily": [{"day": r["day"].isoformat(), "posts": r["posts"]} for r in daily], "authors": authors,
             "runs": [{**r, "startedAt": r["started_at"].isoformat(), "finishedAt": r["finished_at"].isoformat() if r["finished_at"] else None}
                      for r in runs]}
+
+
+def post(platform: str, post_id: str) -> Optional[dict]:
+    """One mention in full (the preview of the page): the whole text, every figure, the dates and what was kept of it."""
+    r = db.fetchrow(f"SELECT * FROM {P}.social_post WHERE platform = %s AND post_id = %s", (platform, post_id))
+    if not r:
+        return None
+    iso = lambda v: v.isoformat() if v else None  # noqa: E731
+    return {"platform": r["platform"], "post_id": r["post_id"], "source": r["source"], "keyword": r["keyword"], "url": r["url"],
+            "author": r["author"], "text": r["text"], "createdAt": iso(r["created_at"]), "firstSeen": iso(r["first_seen"]),
+            "lastSeen": iso(r["last_seen"]), "likes": r["likes"], "comments": r["comments"], "views": r["views"], "shares": r["shares"],
+            "sentiment": r["sentiment"], "raw": r["raw"] or {}}
+

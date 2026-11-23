@@ -86,6 +86,8 @@ PAGES: list[tuple[str, str, str]] = [
     ("cotr.schedule", "Master · Schedule", "Calf On The Road"),
     ("cotr.requests", "Master · Requests", "Calf On The Road"),
     ("cotr.incentive", "Incentive Calculator", "Calf On The Road"),
+    # migration 134 (2026-11-23): the office of COTR — QRIS and actual cash of Report Armada, approves the driver requests
+    ("cotr.finance", "COTR Office (QRIS, cash & operational)", "Calf On The Road"),
     # not a menu entry: salary, bank account and NIK of the drivers in Master Driver (migration 050)
     ("cotr.management", "COTR Management (salary & bank)", "Calf On The Road"),
 ]

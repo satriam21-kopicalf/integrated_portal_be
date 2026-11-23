@@ -137,6 +137,19 @@ def day_figures(d: date, esb: dict, sheets: dict, system: dict, manual: dict) ->
     return out, source, "esb" if d in esb else source
 
 
+def _portal_days(pool: str, d_from: date, d_to: date) -> dict[date, dict[str, dict[str, int]]]:
+    """{day: {menu: {sold, waste, cupping}}} of the Report Armada entered in the portal (migration 134)."""
+    out: dict[date, dict[str, dict[str, int]]] = {}
+    for r in db.fetch(f"""SELECT day, lines FROM {P}.cotr_report_day WHERE pool_code = %s AND source = 'portal'
+                           AND day BETWEEN %s AND %s""", (pool, d_from, d_to)):
+        for code, x in (r["lines"] or {}).items():
+            m = out.setdefault(r["day"], {}).setdefault(code, {"sold": 0, "waste": 0, "cupping": 0})
+            m["sold"] += int(x.get("t") or 0)
+            m["waste"] += int(x.get("w") or 0)
+            m["cupping"] += int(x.get("c") or 0)
+    return out
+
+
 def first_count(pool: str) -> Optional[date]:
     r = db.fetchrow(f"SELECT min(day) AS day FROM {P}.cotr_pool_count WHERE pool_code = %s", (pool,))
     return r["day"] if r else None
@@ -155,6 +168,10 @@ def run(pool: str, d_from: date, d_to: date) -> dict:
     counts = _counts(pool, start, d_to)
     system = _system(pool, start + timedelta(days=1), d_to)
     manual, sheets = _moves(pool, start + timedelta(days=1), d_to)
+    # migration 134: the Report Armada entered in the portal is the official sold / waste / cupping of the pool's day
+    # (sum of T / W / C of its armadas) where no workbook was imported that day
+    for d0, figs in _portal_days(pool, start + timedelta(days=1), d_to).items():
+        sheets.setdefault(d0, figs)
     from app import cotr_esb  # migration 090: the ESB company COTR, where the workbooks have no day
     esb = cotr_esb.figures(start + timedelta(days=1), d_to).get(pool, {})
     batches = {r["batch_no"]: r["expires_on"] for r in db.fetch(
@@ -373,13 +390,20 @@ def check_assignment(pool: Optional[str], day: date, driver: str, lines: dict) -
 
 # ---------------------------------------------------------------- Report Armada (the sheet of the pool workbooks)
 
-def report_armada(pool: str, d_from: date, d_to: date) -> dict:
+def report_armada(pool: str, d_from: date, d_to: date, prefer_portal: bool = True) -> dict:
     """Per driver of the pool, per day and menu: B (brought: start + reloads received), S (left at check out), C, W,
-    T (sold) and its total at the menu price; the cash and QRIS, and the operational costs asked (requests)."""
+    T (sold) and its total at the menu price; the cash and QRIS, and the operational costs asked (requests).
+    Migration 134: a day entered in the portal (Report Armada input, source 'portal') is the official day of that armada
+    and replaces the driver-app shift; `prefer_portal=False` gives the app figures (to match)."""
     menus = _menu_map()
     shifts = db.fetch(f"""SELECT s.*, d.name AS driver_name, d.nickname FROM {P}.cotr_shift s JOIN {P}.cotr_driver d ON d.code = s.driver_code
                            WHERE (%s::text IS NULL OR s.pool_code = %s) AND s.day BETWEEN %s AND %s ORDER BY d.name, s.day""",
                       (pool, pool, d_from, d_to))
+    if prefer_portal:
+        portal = {(r["driver_code"], r["day"]) for r in db.fetch(
+            f"""SELECT driver_code, day FROM {P}.cotr_report_day WHERE source = 'portal' AND driver_code IS NOT NULL
+                  AND (%s::text IS NULL OR pool_code = %s) AND day BETWEEN %s AND %s""", (pool, pool, d_from, d_to))}
+        shifts = [s for s in shifts if (s["driver_code"], s["day"]) not in portal]
     ids = [s["id"] for s in shifts]
     reloads = db.fetch(f"SELECT * FROM {P}.cotr_reload WHERE shift_id = ANY(%s) AND status = 'received'", (ids,)) if ids else []
     sales = db.fetch(f"SELECT shift_id, lines, payment, total FROM {P}.cotr_sale WHERE shift_id = ANY(%s) AND voided_at IS NULL", (ids,)) if ids else []
@@ -427,7 +451,9 @@ def report_armada(pool: str, d_from: date, d_to: date) -> dict:
         qris = float(r["qris"]) if r["qris"] is not None else 0.0
         d = drivers.setdefault(key, {"code": r["driver_code"], "name": r["driver_name"] or r["label"], "nickname": r["nickname"], "pool": r["pool_code"], "days": []})
         d.setdefault("label", r["label"])
-        d["days"].append({"day": _iso(r["day"]), "status": "sheet", "lines": lines, "total": total, "qris": qris, "cash": total - qris,
+        if not prefer_portal and r.get("source") == "portal":
+            continue
+        d["days"].append({"day": _iso(r["day"]), "status": "portal" if r.get("source") == "portal" else "sheet", "lines": lines, "total": total, "qris": qris, "cash": total - qris,
                           "operational": float(r["operational"]) if r["operational"] is not None else 0.0, "operationalNote": r["operational_note"],
                           "cashActual": float(r["cash_actual"]) if r["cash_actual"] is not None else None})
     for d in drivers.values():

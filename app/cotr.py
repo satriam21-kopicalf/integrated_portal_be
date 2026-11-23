@@ -1751,7 +1751,10 @@ def incentives(month: date, code: Optional[str], pool: Optional[str]) -> dict:
     scheme = scheme_for(start, code)
     sold = db.fetch(f"""SELECT sh.driver_code, l->>'code' AS code, sum((l->>'qty')::int) AS qty FROM {P}.cotr_sale s
                           JOIN {P}.cotr_shift sh ON sh.id = s.shift_id, jsonb_array_elements(s.lines) l
-                         WHERE s.voided_at IS NULL AND sh.day >= %s AND sh.day < %s GROUP BY 1, 2""", (start, end))
+                         WHERE s.voided_at IS NULL AND sh.day >= %s AND sh.day < %s
+                           AND NOT EXISTS (SELECT 1 FROM {P}.cotr_report_day r WHERE r.source = 'portal'  -- 134: the portal day wins
+                                            AND r.driver_code = sh.driver_code AND r.day = sh.day)
+                         GROUP BY 1, 2""", (start, end))
     per: dict[str, dict[str, int]] = {}
     for r in sold:
         per.setdefault(r["driver_code"], {})[r["code"]] = int(r["qty"])
@@ -1759,10 +1762,11 @@ def incentives(month: date, code: Optional[str], pool: Optional[str]) -> dict:
     app_days = {(r["driver_code"], r["day"]) for r in db.fetch(
         f"SELECT driver_code, day FROM {P}.cotr_shift WHERE day >= %s AND day < %s", (start, end))}
     sheet_days: dict[str, int] = {}
-    for r in db.fetch(f"""SELECT driver_code, day, lines FROM {P}.cotr_report_day
+    for r in db.fetch(f"""SELECT driver_code, day, lines, source FROM {P}.cotr_report_day
                            WHERE driver_code IS NOT NULL AND day >= %s AND day < %s""", (start, end)):
-        if (r["driver_code"], r["day"]) in app_days or not r["lines"]:
+        if not r["lines"] or ((r["driver_code"], r["day"]) in app_days and r["source"] != "portal"):
             continue
+
         sheet_days[r["driver_code"]] = sheet_days.get(r["driver_code"], 0) + 1
         for k, x in r["lines"].items():
             per.setdefault(r["driver_code"], {})[k] = per.get(r["driver_code"], {}).get(k, 0) + int(x.get("t") or 0)
@@ -2024,11 +2028,13 @@ def suggestions(day: date, codes: list[str]) -> dict[str, dict]:
     since = day - timedelta(days=ADVICE_DAYS)
     shifts = db.fetch(f"""SELECT sh.id, sh.driver_code, d.pool_code, sh.end_waste, sh.end_cupping FROM {P}.cotr_shift sh
                             JOIN {P}.cotr_driver d ON d.code = sh.driver_code
-                           WHERE sh.day >= %s AND sh.day < %s AND sh.status = 'closed'""", (since, day))
+                           WHERE sh.day >= %s AND sh.day < %s AND sh.status = 'closed'
+                             AND NOT EXISTS (SELECT 1 FROM {P}.cotr_report_day r WHERE r.source = 'portal' AND r.driver_code = sh.driver_code AND r.day = sh.day)""", (since, day))
     sold: dict[str, dict[str, float]] = {}
     for r in db.fetch(f"""SELECT sh.driver_code, l->>'code' AS code, sum((l->>'qty')::int) AS qty FROM {P}.cotr_sale s
                             JOIN {P}.cotr_shift sh ON sh.id = s.shift_id, jsonb_array_elements(s.lines) l
                            WHERE s.voided_at IS NULL AND sh.day >= %s AND sh.day < %s AND sh.status = 'closed'
+                             AND NOT EXISTS (SELECT 1 FROM {P}.cotr_report_day r WHERE r.source = 'portal' AND r.driver_code = sh.driver_code AND r.day = sh.day)
                            GROUP BY 1, 2""", (since, day)):
         sold.setdefault(r["driver_code"], {})[r["code"]] = float(r["qty"])
     days: dict[str, int] = {}
@@ -2045,12 +2051,12 @@ def suggestions(day: date, codes: list[str]) -> dict[str, dict]:
             taste.setdefault(c, {})[k] = taste.get(c, {}).get(k, 0) + float(n)
     shift_days = {(r["driver_code"], r["day"]) for r in db.fetch(
         f"SELECT driver_code, day FROM {P}.cotr_shift WHERE day >= %s AND day < %s", (since, day))}
-    for r in db.fetch(f"""SELECT r.driver_code, r.day, r.lines, d.pool_code FROM {P}.cotr_report_day r
+    for r in db.fetch(f"""SELECT r.driver_code, r.day, r.lines, r.source, d.pool_code FROM {P}.cotr_report_day r
                             JOIN {P}.cotr_driver d ON d.code = r.driver_code
                            WHERE r.day >= %s AND r.day < %s AND r.driver_code IS NOT NULL""", (since, day)):
         c = r["driver_code"]
-        if (c, r["day"]) in shift_days or not r["lines"]:
-            continue  # migration 089: the workbook only where the app has no shift that day
+        if not r["lines"] or ((c, r["day"]) in shift_days and r["source"] != "portal"):
+            continue  # migration 089: the workbook only where the app has no shift that day; 134: a portal day always
         days[c] = days.get(c, 0) + 1
         pool_of[c] = r["pool_code"]
         for k, x in r["lines"].items():

@@ -141,16 +141,21 @@ def _own_pool(user: dict, pool: Optional[str]) -> Optional[str]:
     return _bound_pool(user) or pool
 
 
+def _office(user: dict) -> bool:
+    """migration 134: the COTR office (page cotr.finance) checks the money of every pool."""
+    return has_page(user, "cotr.finance")
+
+
 def _check_pool(user: dict, pool: Optional[str]) -> None:
     """A write to a pool that is not the account's own is refused."""
-    own = _bound_pool(user)
+    own = None if _office(user) else _bound_pool(user)
     if own and pool != own:
         raise HTTPException(403, detail=NOT_OWN_POOL)
 
 
 def _check_row(user: dict, kind: str, row_id: str) -> None:
     """A reload / dispatch / request / transfer / issue / check in / driver of another pool is refused."""
-    own = _bound_pool(user)
+    own = None if (kind == "request" and _office(user)) else _bound_pool(user)
     if own and cotr.pool_of_row(kind, row_id) != own:
         raise HTTPException(403, detail=NOT_OWN_POOL)
 
@@ -445,7 +450,7 @@ def resolve_dispatch(dispatch_id: str, body: LinesIn, request: Request, user: di
 
 
 @router.post("/requests/{request_id}/decide")
-def decide_request(request_id: str, body: DecisionIn, request: Request, user: dict = Depends(require_page("cotr.check-in"))):
+def decide_request(request_id: str, body: DecisionIn, request: Request, user: dict = Depends(require_page("cotr.check-in", "cotr.finance"))):
     _check_row(user, "request", request_id)
     _call(cotr.decide_request, user, request_id, body.approve, body.note)
     _log(request, user, "cotr.request.decide", f"Pengajuan COTR {'disetujui' if body.approve else 'ditolak'}",
@@ -747,6 +752,48 @@ def pool_count(body: CountIn, request: Request, user: dict = Depends(require_pag
     _log(request, user, "cotr.pool-count", f"COTR sisa aktual {body.pool} {body.day}: {sum(x.qty for x in body.lines)} cup",
          {"pool": body.pool, "day": body.day.isoformat()})
     return out
+
+
+class SheetProductsIn(BaseModel):
+    pool: str = Field(min_length=1, max_length=40)
+    day: date
+    driver: str = Field(min_length=1, max_length=40)
+    lines: dict[str, dict[str, int]]
+
+
+class SheetMoneyIn(BaseModel):
+    pool: str = Field(min_length=1, max_length=40)
+    day: date
+    driver: str = Field(min_length=1, max_length=40)
+    qris: Optional[float] = None
+    cashActual: Optional[float] = None
+
+
+@router.get("/report-sheet")
+def report_sheet(pool: str, day: date, user: dict = Depends(require_page("cotr.storage", "cotr.finance", "cotr.production"))):
+    """Migration 134: Report Armada of a pool and day as the sheet (products by the storage, money by the office)."""
+    from app import cotr_report
+    _check_pool(user, pool)
+    out = _call(cotr_report.sheet, pool, day)
+    return out | {"canProducts": has_page(user, "cotr.storage"), "canMoney": _office(user)}
+
+
+@router.put("/report-sheet/products")
+def report_sheet_products(body: SheetProductsIn, request: Request, user: dict = Depends(require_page("cotr.storage"))):
+    from app import cotr_report
+    _check_pool(user, body.pool)
+    out = _call(cotr_report.save_products, user, body.pool, body.day, body.driver, body.lines)
+    _log(request, user, "cotr.report.products", f"COTR Report Armada produk {body.driver} {body.pool} {body.day}", {"lines": body.lines})
+    return out | {"canProducts": True, "canMoney": _office(user)}
+
+
+@router.put("/report-sheet/money")
+def report_sheet_money(body: SheetMoneyIn, request: Request, user: dict = Depends(require_page("cotr.finance"))):
+    from app import cotr_report
+    out = _call(cotr_report.save_money, user, body.pool, body.day, body.driver, body.qris, body.cashActual)
+    _log(request, user, "cotr.report.money", f"COTR Report Armada QRIS / cash {body.driver} {body.pool} {body.day}",
+         {"qris": body.qris, "cashActual": body.cashActual})
+    return out | {"canProducts": has_page(user, "cotr.storage"), "canMoney": True}
 
 
 @router.get("/attendance")

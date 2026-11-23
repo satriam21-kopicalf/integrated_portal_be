@@ -247,20 +247,61 @@ def save_count(user: dict, pool: str, day: date, lines: list[dict]) -> dict:
     return run(pool, day, day)
 
 
-def save_moves(user: dict, pool: str, day: date, kind: str, lines: dict[str, int], note: Optional[str]) -> dict:
-    """The cups moved in / out (transfer) or arrived at a pool on a day, entered by hand; replaces the entered ones."""
+def save_moves(user: dict, pool: str, day: date, kind: str, lines: dict[str, int], note: Optional[str],
+               peer: Optional[str] = None) -> dict:
+    """The cups moved in / out (transfer) or arrived at a pool on a day, entered by hand; replaces the entered ones.
+
+    2026-11-23 (migration 133) with `peer`:
+    - transfer: `pool` is where the cups leave, `peer` the pool they reach; the cups are positive and kept as a pair,
+      out at `pool` and in at `peer`, tied by one ref. The pair entered before for the same two pools and day is replaced.
+    - arrived: `pool` is the pool the cups reached, `peer` where they came from (shown only)."""
     if kind not in ("transfer", "arrived"):
         raise CotrError("Jenis tidak valid")
     menus = _menu_map()
+    if peer:
+        peer = peer.strip()
+        if peer == pool:
+            raise CotrError("Pool asal dan tujuan tidak boleh sama")
+        if not db.fetchrow(f"SELECT 1 FROM {P}.cotr_pool WHERE code = %s", (peer,)):
+            raise CotrError(f"Pool {peer} tidak ditemukan")
+    if kind == "transfer" and peer:
+        import uuid
+        ref = str(uuid.uuid4())
+        clean = {c: int(n) for c, n in lines.items() if int(n)}
+        if any(n < 0 for n in clean.values()):
+            raise CotrError("Isi jumlah cup yang dipindah (angka positif)")
+        with db.transaction() as conn:
+            conn.execute(f"""DELETE FROM {P}.cotr_pool_move WHERE ref IN (
+                                SELECT ref FROM {P}.cotr_pool_move WHERE pool_code = %s AND day = %s AND kind = 'transfer'
+                                   AND source = 'manual' AND peer_pool = %s AND qty < 0 AND ref IS NOT NULL)""", (pool, day, peer))
+            for code, n in clean.items():
+                if code not in menus:
+                    raise CotrError(f"Menu {code} tidak ditemukan")
+                for at, other, qty in ((pool, peer, -n), (peer, pool, n)):
+                    conn.execute(f"""INSERT INTO {P}.cotr_pool_move (pool_code, day, menu_code, kind, qty, note, created_by, peer_pool, ref)
+                                     VALUES (%s, %s, %s, 'transfer', %s, %s, %s, %s, %s)""",
+                                 (at, day, code, qty, (note or "").strip() or None, user["id"], other, ref))
+        return run(pool, day, day)
     with db.transaction() as conn:
-        conn.execute(f"DELETE FROM {P}.cotr_pool_move WHERE pool_code = %s AND day = %s AND kind = %s AND source = 'manual'", (pool, day, kind))
+        # the rows of a transfer pair (ref) are replaced with their pair only, never cut in half here
+        conn.execute(f"DELETE FROM {P}.cotr_pool_move WHERE pool_code = %s AND day = %s AND kind = %s AND source = 'manual' AND ref IS NULL",
+                     (pool, day, kind))
         for code, n in lines.items():
             if code not in menus:
                 raise CotrError(f"Menu {code} tidak ditemukan")
             if int(n) and (kind == "transfer" or int(n) > 0):
-                conn.execute(f"""INSERT INTO {P}.cotr_pool_move (pool_code, day, menu_code, kind, qty, note, created_by)
-                                 VALUES (%s, %s, %s, %s, %s, %s, %s)""", (pool, day, code, kind, int(n), (note or "").strip() or None, user["id"]))
+                conn.execute(f"""INSERT INTO {P}.cotr_pool_move (pool_code, day, menu_code, kind, qty, note, created_by, peer_pool)
+                                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                             (pool, day, code, kind, int(n), (note or "").strip() or None, user["id"], peer if kind == "arrived" else None))
     return run(pool, day, day)
+
+
+def moves_of(pool: str, day: date) -> list[dict]:
+    """The transfers and arrivals entered by hand at a pool on a day, with the other pool (migration 133)."""
+    return [{"menu": r["menu_code"], "kind": r["kind"], "qty": int(r["qty"]), "peer": r["peer_pool"], "note": r["note"]}
+            for r in db.fetch(f"""SELECT menu_code, kind, qty, peer_pool, note FROM {P}.cotr_pool_move
+                                  WHERE pool_code = %s AND day = %s AND source = 'manual' AND kind IN ('transfer', 'arrived')
+                                  ORDER BY kind, peer_pool NULLS FIRST, menu_code""", (pool, day))]
 
 
 def availability(pool: str, day: date, except_driver: Optional[str] = None) -> Optional[dict[str, dict]]:

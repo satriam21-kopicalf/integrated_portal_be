@@ -70,7 +70,8 @@ Portal (Monitoring COTR):
     GET/PUT/DELETE /api/cotr/driver-labels       the names of Report Armada without a driver, tied by hand (migration 093)
     GET  /api/cotr/pool-ledger?pool=&dateFrom=&dateTo=   page cotr.storage / cotr.production: the sheet "Product" (089)
     PUT  /api/cotr/pool-count                   {"pool", "day", "lines": [{"menu", "qty", "batchNo", "expiresOn"}]} the physical leftover
-    PUT  /api/cotr/pool-moves                   {"pool", "day", "kind": transfer|arrived, "lines": {menu: cups}, "note"}
+    PUT  /api/cotr/pool-moves                   {"pool", "day", "kind": transfer|arrived, "lines": {menu: cups}, "note", "peer"}
+                                                 (133: transfer to `peer` = a pair out here / in there; arrived from `peer`)
     POST /api/cotr/uploads                      page cotr.production: {"upload", "index", "data"} a part of a big file
     POST /api/cotr/pool-ledger/import           page cotr.production: {"pool", "file" | "upload", "dateFrom", "dateTo", "apply"} the pool
                                                 workbook (sheets Product, Report Armada) saved as source 'sheet'
@@ -724,6 +725,8 @@ class MovesIn(BaseModel):
     kind: Literal["transfer", "arrived"]
     lines: dict[str, int]
     note: Optional[str] = Field(None, max_length=300)
+    # migration 133: transfer = the pool the cups reach (a pair, out here and in there); arrived = where they came from
+    peer: Optional[str] = Field(None, max_length=40)
 
 
 @router.get("/pool-ledger")
@@ -746,11 +749,18 @@ def pool_count(body: CountIn, request: Request, user: dict = Depends(require_pag
     return out
 
 
+@router.get("/pool-moves")
+def pool_moves_list(pool: str, day: date, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    _check_pool(user, pool)
+    return {"data": _call(cotr_ledger.moves_of, pool, day)}
+
+
 @router.put("/pool-moves")
 def pool_moves(body: MovesIn, request: Request, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
     _check_pool(user, body.pool)
-    out = _call(cotr_ledger.save_moves, user, body.pool, body.day, body.kind, body.lines, body.note)
-    _log(request, user, "cotr.pool-moves", f"COTR product {body.kind} {body.pool} {body.day}", {"lines": body.lines})
+    out = _call(cotr_ledger.save_moves, user, body.pool, body.day, body.kind, body.lines, body.note, body.peer)
+    _log(request, user, "cotr.pool-moves", f"COTR product {body.kind} {body.pool}{f' → {body.peer}' if body.peer and body.kind == 'transfer' else ''} {body.day}",
+         {"lines": body.lines, "peer": body.peer})
     return out
 
 

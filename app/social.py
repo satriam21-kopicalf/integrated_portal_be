@@ -55,6 +55,7 @@ YOUTUBE_COMMENTS = 40
 TIKTOK_ACCOUNTS = ["kopicalf"]
 TIKTOK_VIDEOS = 40
 PAUSE = 2.0
+NEWS_PAUSE_BACKFILL = 5.0   # Google News answered 429 to a backfill at 2 s a request (2026-11-23)
 UA = "Mozilla/5.0 (compatible; internal-monitor/1.0)"
 FIRST_S = 120             # the first check after a worker starts
 TICK_S = 300              # then every 5 minutes: which source is due (social_schedule, migration 136)
@@ -171,11 +172,12 @@ def news(kw: str, since: Optional[date] = None) -> list[dict]:
             nxt = (d.replace(day=28) + timedelta(days=4)).replace(day=1)
             windows.append((d, nxt))
             d = nxt
-    out = []
+    out: list[dict] = []
     for w in windows:
         q = f'"{kw}"' + (f" after:{w[0].isoformat()} before:{w[1].isoformat()}" if w else "")
-        r = _http.get(f"https://news.google.com/rss/search?q={quote(q)}&hl=id&gl=ID&ceid=ID:id", timeout=30)
-        r.raise_for_status()
+        r = _polite_get(f"https://news.google.com/rss/search?q={quote(q)}&hl=id&gl=ID&ceid=ID:id")
+        if r is None:  # still refused after waiting: keep what was read, the next run goes on (2026-11-23)
+            raise Partial(out, f"Google News membatasi permintaan (429) di \"{kw}\"; dilanjutkan di putaran berikutnya")
         for it in ET.fromstring(r.content).iter("item"):
             title, link, src = it.findtext("title"), it.findtext("link"), it.find("source")
             try:
@@ -184,8 +186,28 @@ def news(kw: str, since: Optional[date] = None) -> list[dict]:
                 created = None
             out.append(_row("news", "google-news", kw, link, link, src.text if src is not None else None, title, created,
                             raw={"site": src.get("url") if src is not None else None}))
-        time.sleep(PAUSE)
+        time.sleep(NEWS_PAUSE_BACKFILL if since else PAUSE)
     return out
+
+
+class Partial(Exception):
+    """A source stopped early (a site asked to slow down): the rows read so far are kept."""
+
+    def __init__(self, rows: list[dict], message: str):
+        super().__init__(message)
+        self.rows = rows
+
+
+def _polite_get(url: str) -> Optional[requests.Response]:
+    """GET; on 429 / 503 wait (60 s, then 120 s) and try again; None when still refused."""
+    for wait in (0, 60, 120):
+        if wait:
+            time.sleep(wait)
+        r = _http.get(url, timeout=30)
+        if r.status_code not in (429, 503):
+            r.raise_for_status()
+            return r
+    return None
 
 
 def tiktok(user: str, since: Optional[date] = None) -> list[dict]:
@@ -225,7 +247,13 @@ def collect(source: str, since: Optional[date] = None) -> list[dict]:
     if source == "youtube":
         return [r for k in KEYWORDS for r in youtube(k, since)]
     if source == "news":
-        return [r for k in KEYWORDS for r in news(k, since)]
+        out: list[dict] = []
+        for k in KEYWORDS:  # a keyword stopped early keeps what every keyword before it read
+            try:
+                out += news(k, since)
+            except Partial as e:
+                raise Partial(out + e.rows, str(e)) from None
+        return out
     if source == "tiktok":
         return [r for u in TIKTOK_ACCOUNTS for r in tiktok(u, since)]
     raise ValueError(source)
@@ -267,6 +295,8 @@ def run_source(source: str, since: Optional[date] = None) -> dict:
     try:
         rows = collect(source, since)
         found, added = len(rows), save(rows)
+    except Partial as e:  # kept what was read; the backfill date stays, so the next run goes on
+        found, added, err = len(e.rows), save(e.rows), str(e)[:500]
     except Exception as e:  # noqa: BLE001
         err = str(e)[:500]
         logger.info("social %s: %s", source, err)
@@ -355,7 +385,8 @@ def set_schedule(user: dict, source: str, enabled: bool, every_hours: float) -> 
 
 # ---------------------------------------------------------------- reads (the page)
 
-def posts(platform: Optional[str], q: str, sentiment_: Optional[str], d_from, d_to, limit: int, offset: int, keyword: Optional[str] = None) -> dict:
+def posts(platform: Optional[str], q: str, sentiment_: Optional[str], d_from, d_to, limit: int, offset: int, keyword: Optional[str] = None,
+          who: Optional[str] = None, kind: Optional[str] = None) -> dict:
     where = ["coalesce(created_at, first_seen) >= %(a)s", "coalesce(created_at, first_seen) < %(b)s + interval '1 day'"]
     p: dict = {"a": d_from, "b": d_to, "lim": limit, "off": offset}
     if platform:
@@ -366,6 +397,10 @@ def posts(platform: Optional[str], q: str, sentiment_: Optional[str], d_from, d_
         where.append("(text ILIKE %(q)s OR author ILIKE %(q)s)"); p["q"] = f"%{q.strip()}%"
     if keyword:
         where.append("%(kw)s = ANY(keywords)"); p["kw"] = keyword
+    if who:  # the source of the Overview's media tone (channel, else author, else platform)
+        where.append("coalesce(nullif(raw->>'channel', ''), author, platform) = %(who)s"); p["who"] = who
+    if kind == "post":  # the posts, not the comments under them
+        where.append("source <> 'comment'")
     w = " AND ".join(where)
     rows = db.fetch(f"""SELECT platform, post_id, source, keyword, url, author, left(text, 600) AS text, created_at, likes, comments, keywords,
                                views, shares, sentiment, first_seen FROM {P}.social_post WHERE {w}

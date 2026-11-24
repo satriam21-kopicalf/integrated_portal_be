@@ -249,7 +249,10 @@ def _key(name: Optional[str]) -> str:
 
 def outlets() -> list[dict]:
     return db.fetch("""SELECT branch_code, branch_name FROM integration_esb.master_branches
-                       WHERE coalesce(is_active, true) AND NOT coalesce(is_deleted, false) ORDER BY branch_name""")
+                       WHERE coalesce(is_active, true) AND NOT coalesce(is_deleted, false)
+                         AND branch_name ILIKE '%%calf%%'                      -- the Kopi Calf outlets: not Wasgee Tea
+                         AND branch_name !~* '^(bulk order|head office)'       -- nor the bulk-order and office branches
+                       ORDER BY branch_name""")
 
 
 def automatch() -> int:

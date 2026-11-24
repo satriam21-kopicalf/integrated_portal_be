@@ -115,7 +115,9 @@ def _day(d: Optional[str]) -> Optional[datetime]:
 
 def _ydl(opts: dict):
     import yt_dlp
-    return yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True, "noprogress": True, **opts})
+    # Indonesian: without it YouTube answers a data centre in English and machine-translates the titles (2026-11-24)
+    return yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True, "noprogress": True,
+                             "http_headers": {"Accept-Language": "id-ID,id;q=0.9"}, "extractor_args": {"youtube": {"lang": ["id"]}}, **opts})
 
 
 # ---------------------------------------------------------------- sources
@@ -170,7 +172,7 @@ def _search_ages(kw: str) -> dict[str, str]:
     """{video id: "3mo ago"} from the search page of YouTube (its first page), no login needed."""
     try:
         r = _http.get("https://www.youtube.com/results", params={"search_query": kw, "sp": "CAI%3D", "hl": "en", "gl": "ID"},
-                      headers={"Accept-Language": "en"}, timeout=30)
+                      headers={"Accept-Language": "en"}, timeout=30)  # English only here: the ages ("3mo ago") are read in English
         m = re.search(r"var ytInitialData = (\{.*?\});</script>", r.text)
         if not m:
             return {}
@@ -334,7 +336,9 @@ def save(rows: list[dict]) -> int:
                         raw = CASE WHEN EXCLUDED.raw->>'date_approx' IS NULL THEN {P}.social_post.raw - 'date_approx' - 'published_text'
                                    WHEN {P}.social_post.created_at IS NULL OR {P}.social_post.raw->>'date_approx' = 'true' THEN {P}.social_post.raw || EXCLUDED.raw
                                    ELSE {P}.social_post.raw END,
-                        keywords = ARRAY(SELECT DISTINCT unnest({P}.social_post.keywords || EXCLUDED.keywords)), last_seen = now()
+                        keywords = ARRAY(SELECT DISTINCT unnest({P}.social_post.keywords || EXCLUDED.keywords)),
+                        text = coalesce(nullif(EXCLUDED.text, ''), {P}.social_post.text),  -- the title in its own language replaces a translated one
+                        last_seen = now()
                     RETURNING (xmax = 0) AS inserted""",
                 {**r, "sentiment": sentiment(r["text"]), "keywords": labels(r["text"], r["author"]) or ([r["keyword"]] if r["keyword"] in LABELS else []),
                  "raw": json.dumps(r["raw"], ensure_ascii=False, default=str)}).fetchone()

@@ -70,8 +70,8 @@ NEEDED_ON = {"MARKETING": "Tanggal dibutuhkan", "EVENT": "Tanggal event", "BILL"
 DOC_TYPES = {"NOTA": "Nota", "KWITANSI": "Kwitansi", "INVOICE": "Invoice", "STRUK": "Struk", "TRANSFER": "Bukti transfer",
              "FOTO": "Foto barang", "QUOTE": "Penawaran harga", "OTHER": "Lainnya"}
 # 2026-11-24 (migration 144): the whole life — Pending → Approved → In Progress (money out, proof awaited) → Verifikasi → Done
-STATUS_LABEL = {"DRAFT": "Draf", "SUBMITTED": "Pending · menunggu approval", "REVISION": "Revisi", "APPROVED": "Approved · siap dicairkan",
-                "PAID": "In Progress · menunggu bukti", "VERIFYING": "Verifikasi Finance", "DONE": "Done", "REJECTED": "Ditolak",
+STATUS_LABEL = {"DRAFT": "Draf", "SUBMITTED": "Pending", "REVISION": "Revisi", "APPROVED": "Approved",
+                "PAID": "In Progress", "VERIFYING": "Verifikasi", "DONE": "Done", "REJECTED": "Ditolak",
                 "CANCELLED": "Dibatalkan"}
 EDITABLE = ("DRAFT", "REVISION")
 OPEN = ("SUBMITTED", "REVISION", "APPROVED", "PAID", "VERIFYING")

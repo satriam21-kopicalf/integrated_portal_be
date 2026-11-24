@@ -62,3 +62,10 @@ def test_category_label_of_a_jenis_transaksi():
     assert category_label("TRX:7", {7: "Purchase of Tools/Assets/Machinery"}) == "Purchase of Tools/Assets/Machinery"
     assert category_label("TRX:9", {}) == "TRX:9"
     assert category_label("RAW") == "Bahan baku"
+
+
+def test_the_event_of_a_fund_takes_decimals():
+    """The last approval of a fund puts its Decimal amount on the request's timeline (it was refused: 500)."""
+    import json
+    from app.damaged_equipment import _plain
+    assert json.loads(json.dumps({"approvedAmount": Decimal("500000.00")}, default=_plain)) == {"approvedAmount": 500000.0}

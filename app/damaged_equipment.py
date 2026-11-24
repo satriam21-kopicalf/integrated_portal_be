@@ -30,6 +30,7 @@ import secrets
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from decimal import Decimal
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -612,12 +613,18 @@ def _next_number(conn) -> str:
     return f"DE-{month}-{n:04d}"
 
 
+def _plain(v: Any) -> Any:
+    """Decimal and dates in the details of an event: the last approval of a fund carries its amount as a Decimal (the
+    missing conversion refused every approval of a Maintenance & Procurement fund, found 2026-11-24)."""
+    return float(v) if isinstance(v, Decimal) else str(v)
+
+
 def _event(conn, request_id: str, user: Optional[dict], kind: str, from_status: Optional[str] = None, to_status: Optional[str] = None,
            note: Optional[str] = None, details: Optional[dict] = None) -> None:
     conn.execute(f"""INSERT INTO {P}.de_event (request_id, actor_id, actor_name, kind, from_status, to_status, note, details)
                      VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)""",
                  (request_id, user["id"] if user else None, (user.get("full_name") or user["username"]) if user else None, kind,
-                  from_status, to_status, note, json.dumps(details or {}, ensure_ascii=False)))
+                  from_status, to_status, note, json.dumps(details or {}, ensure_ascii=False, default=_plain)))
 
 
 def submit(user: dict, request_id: str, lat: Optional[float], lng: Optional[float], accuracy: Optional[float],

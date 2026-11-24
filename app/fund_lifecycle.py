@@ -60,7 +60,9 @@ def rules() -> list[dict]:
            [(k, pg.KINDS[k], "de") for k in pg.DE_KINDS] + \
            [(f"PERSONAL:{o['id']}", o["name"], "personal") for o in db.fetch(
                f"SELECT id, name FROM {P}.fund_option WHERE list = 'PURPOSE' AND is_active ORDER BY sort, name")]
-    return [{"key": k, "label": label, "group": group, **_rule_view(have.get(k))} for k, label, group in keys]
+    def of(k: str) -> dict:
+        return rule_for({"kind": "PERSONAL", "purpose_id": int(k[9:])}) if k.startswith("PERSONAL:") and k not in have else _rule_view(have.get(k))
+    return [{"key": k, "label": label, "group": group, **of(k)} for k, label, group in keys]
 
 
 def set_rule(user: dict, key: str, body: dict) -> list[dict]:

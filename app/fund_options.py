@@ -85,6 +85,28 @@ def update(user: dict, option_id: int, body: dict) -> dict:
     return _view(r)
 
 
+def usage(option_id: int) -> int:
+    """How many requests and cost lines use an option (2026-11-24): a used one is deactivated, never deleted."""
+    r = db.fetchrow(f"""SELECT (SELECT count(*) FROM {P}.pengajuan WHERE %(id)s IN (purpose_id, transaction_type_id, project_id, account_type_id))
+                             + (SELECT count(*) FROM {P}.de_cost_item WHERE transaction_id = %(id)s) AS n""", {"id": option_id})
+    return int(r["n"] or 0)
+
+
+def delete(user: dict, option_id: int) -> dict:
+    """Deletes an option never used (else it stays, deactivated, so the old requests keep their label)."""
+    cur = db.fetchrow(f"SELECT * FROM {P}.fund_option WHERE id = %s", (option_id,))
+    if cur is None:
+        raise LookupError("Pilihan tidak ditemukan")
+    n = usage(option_id)
+    if n:
+        raise OptionError(f"\"{cur['name']}\" sudah dipakai {n} kali: nonaktifkan saja agar data lama tetap terbaca")
+    with db.transaction() as conn:
+        conn.execute(f"DELETE FROM {P}.fund_rule WHERE key = %s", (f"PERSONAL:{option_id}",))
+        conn.execute(f"DELETE FROM {P}.approval_step WHERE form = 'pengajuan' AND kind = %s", (f"PERSONAL:{option_id}",))
+        conn.execute(f"DELETE FROM {P}.fund_option WHERE id = %s", (option_id,))
+    return _view(cur)
+
+
 def dept_plafons() -> list[dict]:
     return [{"department": r["department"], "amount": float(r["amount"])}
             for r in db.fetch(f"SELECT department, amount FROM {P}.fund_dept_plafon ORDER BY department")]

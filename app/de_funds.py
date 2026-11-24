@@ -65,6 +65,20 @@ def lines_from(costs: list[dict]) -> list[dict]:
     return out
 
 
+def payee_of(payee: dict) -> tuple[str, str, str, str]:
+    """(bank / VA provider, account / VA number, name, BANK | VA): a Virtual Account (Shopee, Tokopedia …, migration 144)
+    needs its provider and number; a bank account its bank, number and owner."""
+    ptype = "VA" if payee.get("type") == "VA" else "BANK"
+    bank, account, name = (str(payee.get(k) or "").strip()[:120] for k in ("bank", "account", "name"))
+    if ptype == "VA":
+        if not (bank and account):
+            raise DeError("Isi Virtual Account tujuan: penyedia (mis. Shopee, Tokopedia) dan nomor VA")
+        return bank, account, name or bank, ptype
+    if not (bank and account and name):
+        raise DeError("Isi rekening tujuan: bank, nomor rekening dan nama pemilik")
+    return bank, account, name, ptype
+
+
 def request_funds(user: dict, de_id: str, payee: dict, note: Optional[str]) -> dict:
     """Ask Finance for the money of the request (again after a revision). Returns the request for the team."""
     from app import damaged_equipment as de
@@ -76,9 +90,7 @@ def request_funds(user: dict, de_id: str, payee: dict, note: Optional[str]) -> d
     lines = lines_from(cost_items(de_id))
     if not lines:
         raise DeError("Isi estimasi biaya dulu (Biaya & invoice): dana diajukan dari baris biaya")
-    bank, account, name = (str(payee.get(k) or "").strip()[:120] for k in ("bank", "account", "name"))
-    if not (bank and account and name):
-        raise DeError("Isi rekening tujuan: bank, nomor rekening dan nama pemilik")
+    bank, account, name, ptype = payee_of(payee)
     fund = fund_of(de_id)
     if fund is not None and fund["status"] not in ("REVISION", "REJECTED"):
         raise DeError(f"Dana sudah diajukan ({fund['number']}, {pg.STATUS_LABEL[fund['status']].lower()})")
@@ -102,10 +114,12 @@ def request_funds(user: dict, de_id: str, payee: dict, note: Optional[str]) -> d
             conn.execute(f"""INSERT INTO {P}.pengajuan_line (pengajuan_id, sort, category, description, amount)
                              VALUES (%s, %s, %s, %s, %s)""", (fund_id, i, ln["category"], ln["description"], ln["amount"]))
         conn.execute(f"""UPDATE {P}.pengajuan SET status = 'SUBMITTED', approval_step = 1, submitted_at = now(), purpose = %s,
-                             payee_bank = %s, payee_account = %s, payee_name = %s, note = %s, total_out = %s, requested_amount = %s,
-                             approved_at = NULL, approved_by = NULL, approved_amount = NULL, updated_at = now()
+                             payee_bank = %s, payee_account = %s, payee_name = %s, payee_type = %s, va_provider = %s, note = %s,
+                             total_out = %s, requested_amount = %s, approved_at = NULL, approved_by = NULL, approved_amount = NULL,
+                             updated_at = now()
                          WHERE id::text = %s""",
-                     (purpose, bank, account, name, (note or "").strip()[:2000] or None, total, total, fund_id))
+                     (purpose, bank, account, name, ptype, bank if ptype == "VA" else None, (note or "").strip()[:2000] or None,
+                      total, total, fund_id))
         pg._event(conn, fund_id, user, "SUBMIT", "REVISION" if revise else "DRAFT", "SUBMITTED", None,
                   {"requested": total, "lines": len(lines), "resubmit": revise, "deRequest": row["number"]})
         de_event(conn, de_id, user, "FUND", None, "SUBMITTED", note,
@@ -114,10 +128,11 @@ def request_funds(user: dict, de_id: str, payee: dict, note: Optional[str]) -> d
     return de.team_full(de_id)
 
 
-def attach_quotes(user: dict, de_id: str, fund_id: str) -> int:
+def attach_quotes(user: dict, de_id: str, fund_id: str, kind: str = "OTHER") -> int:
     """The estimates / invoices of the request copied to the fund (Finance may not open the request's page); a file
     already on the fund (same content) is skipped. Copies, never shared paths: deleting one never deletes the other."""
-    have = {r["sha256"] for r in db.fetch(f"SELECT sha256 FROM {P}.pengajuan_file WHERE pengajuan_id::text = %s", (fund_id,))}
+    have = {r["sha256"] for r in db.fetch(f"SELECT sha256 FROM {P}.pengajuan_file WHERE pengajuan_id::text = %s AND kind = %s",
+                                         (fund_id, kind))}
     rows = db.fetch(f"""SELECT storage_path, sha256, file_name FROM {P}.de_media WHERE request_id::text = %s AND kind = 'INVOICE'
                         ORDER BY uploaded_at""", (de_id,))
     added = 0
@@ -125,7 +140,7 @@ def attach_quotes(user: dict, de_id: str, fund_id: str) -> int:
         path = media_root() / r["storage_path"]
         if r["sha256"] in have or not path.is_file():
             continue
-        pg.add_file(user, fund_id, "OTHER", path.read_bytes(), r["file_name"] or "invoice", "INVOICE", None)
+        pg.add_file(user, fund_id, kind, path.read_bytes(), r["file_name"] or "invoice", "INVOICE", None)
         have.add(r["sha256"])
         added += 1
     return added
@@ -149,44 +164,45 @@ def settlement(fund_amount: Decimal, actual: Decimal, paid: bool) -> tuple[str, 
 
 
 def settle(conn, row: dict, user: dict) -> Optional[dict]:
-    """At Done: the difference between the actual cost and the fund, once (called inside the Done transaction)."""
-    fund = conn.execute(f"""SELECT id::text, number, status, kind, branch_code, branch_name, payee_bank, payee_account, payee_name,
-                                   approved_amount, paid_amount, refund_amount, user_id, username, full_name
-                              FROM {P}.pengajuan WHERE de_request_id::text = %s AND settles_id IS NULL AND status IN ('APPROVED', 'PAID')""",
-                        (row["id"],)).fetchone()
-    if fund is None or fund["refund_amount"] is not None or conn.execute(
-            f"SELECT 1 FROM {P}.pengajuan WHERE settles_id::text = %s LIMIT 1", (fund["id"],)).fetchone():
+    """At Done (2026-11-24, migration 144): the request is finished — its handover done, so the goods received / the work
+    done — and its invoices are on it: a fund already paid (In Progress) goes to Verifikasi with the actual cost as the amount
+    spent; Finance checks it and settles the difference in the same request (money back, or the shortfall paid). A fund not
+    paid yet only gets a note: Finance pays, then the proof follows. Called inside the Done transaction."""
+    fund = conn.execute(f"""SELECT id::text, number, status, paid_amount, topup_amount FROM {P}.pengajuan
+                            WHERE de_request_id::text = %s AND settles_id IS NULL AND kind IN ('MAINTENANCE', 'PROCUREMENT')
+                              AND status IN ('APPROVED', 'PAID')""", (row["id"],)).fetchone()
+    if fund is None:
         return None
-    paid = fund["status"] == "PAID"
-    base = _money(fund["paid_amount"] if paid else fund["approved_amount"])
-    what, amount = settlement(base, _money(row.get("actual_cost")), paid)
-    if what == "TOP_UP":
-        number = pg._next_number(conn)
-        top = conn.execute(
-            f"""INSERT INTO {P}.pengajuan (user_id, username, full_name, branch_code, branch_name, kind, de_request_id, settles_id,
-                    number, status, approval_step, submitted_at, first_submitted_at, purpose, requester_name, payee_bank,
-                    payee_account, payee_name, total_out, requested_amount)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'SUBMITTED', 1, now(), now(), %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id::text""",
-            (fund["user_id"], fund["username"], fund["full_name"], fund["branch_code"], fund["branch_name"], fund["kind"], row["id"],
-             fund["id"], number, f"Kekurangan biaya aktual {row['number']} (dana {fund['number']})", user.get("full_name") or user["username"],
-             fund["payee_bank"], fund["payee_account"], fund["payee_name"], amount, amount)).fetchone()["id"]
-        conn.execute(f"""INSERT INTO {P}.pengajuan_line (pengajuan_id, sort, category, description, amount)
-                         VALUES (%s, 0, 'OTHER', %s, %s)""", (top, f"Kekurangan biaya aktual {row['number']}", amount))
-        pg._event(conn, top, user, "SUBMIT", "DRAFT", "SUBMITTED", None, {"requested": amount, "settles": fund["number"]})
-        details = {"fund": fund["number"], "topUp": number, "amount": float(amount)}
-    elif what == "REFUND":
-        conn.execute(f"UPDATE {P}.pengajuan SET refund_amount = %s, updated_at = now() WHERE id::text = %s", (amount, fund["id"]))
-        pg._event(conn, fund["id"], user, "NOTE", None, None, f"Biaya aktual lebih kecil: dana kembali Rp {amount:,.0f}",
-                  {"refund": amount})
-        details = {"fund": fund["number"], "refund": float(amount)}
-    else:
-        details = {"fund": fund["number"], "even" if what == "EVEN" else "payActual": float(amount)}
-        if what == "UNPAID_LESS":
-            pg._event(conn, fund["id"], user, "NOTE", None, None,
-                      f"Biaya aktual {row['number']} lebih kecil Rp {amount:,.0f} dari yang disetujui: bayar sesuai aktual", details)
-    de_event(conn, row["id"], user, "FUND", None, what, None, details)
-    return {"kind": what, "amount": float(amount)}
+    actual = _money(row.get("actual_cost"))
+    if fund["status"] == "APPROVED":
+        pg._event(conn, fund["id"], user, "NOTE", None, None,
+                  f"{row['number']} selesai, biaya aktual Rp {actual:,.0f}: setelah dibayar, bukti dikirim untuk verifikasi".replace(",", "."),
+                  {"actual": actual})
+        de_event(conn, row["id"], user, "FUND", None, "DONE_UNPAID", None, {"fund": fund["number"], "actual": float(actual)})
+        return {"kind": "UNPAID", "amount": float(actual)}
+    from app import fund_lifecycle
+    diff = fund_lifecycle.difference(fund["paid_amount"], fund["topup_amount"], actual)
+    conn.execute(f"""UPDATE {P}.pengajuan SET status = 'VERIFYING', actual_amount = %s, actual_note = %s, proof_submitted_at = now(),
+                         updated_at = now() WHERE id::text = %s""", (actual, f"Biaya aktual {row['number']} (selesai)", fund["id"]))
+    pg._event(conn, fund["id"], user, "PROOF", "PAID", "VERIFYING", None, {"actual": actual, "difference": diff, "deRequest": row["number"]})
+    de_event(conn, row["id"], user, "FUND", "PAID", "VERIFYING", None, {"fund": fund["number"], "actual": float(actual), "difference": float(diff)})
+    return {"kind": "VERIFYING", "amount": float(diff), "fundId": fund["id"]}
+
+
+def send_proof(user: dict, de_id: str) -> dict:
+    """The team sends the proof of a paid fund by hand (the request handed over / done, its invoices attached)."""
+    from app import damaged_equipment as de
+    from app import fund_lifecycle
+    row = get_row(de_id)
+    fund = fund_of(de_id)
+    if row is None or fund is None or fund["status"] != "PAID":
+        raise DeError("Bukti dikirim setelah dana dicairkan Finance")
+    if row["status"] not in ("HANDOVER", "DONE"):
+        raise DeError("Kirim bukti setelah serah terima: barang diterima / pekerjaan selesai")
+    attach_quotes(user, de_id, fund["id"], kind="PROOF")
+    fund_lifecycle.submit_proof(user, fund["id"], row.get("actual_cost") or row.get("est_cost"),
+                                f"Biaya aktual {row['number']}", by_team=True)
+    return de.team_full(de_id)
 
 
 # ---------------------------------------------------------------- technicians' Cash in Advance (migration 143)

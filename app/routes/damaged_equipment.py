@@ -438,9 +438,10 @@ def team_note(request_id: str, body: NoteIn, request: Request, user: dict = Depe
 
 
 class FundIn(BaseModel):
-    bank: str = Field(min_length=1, max_length=120)
+    type: str = Field("BANK", pattern="^(BANK|VA)$")  # a bank account or a Virtual Account (marketplaces, migration 144)
+    bank: str = Field(min_length=1, max_length=120)   # the bank, or the VA provider (Shopee, Tokopedia …)
     account: str = Field(min_length=1, max_length=120)
-    name: str = Field(min_length=1, max_length=120)
+    name: Optional[str] = Field(None, max_length=120)
     note: Optional[str] = Field(None, max_length=2000)
 
 
@@ -451,6 +452,16 @@ def team_funds(request_id: str, body: FundIn, request: Request, user: dict = Dep
     row = _team_row(request, user, request_id)
     out = _with_work_urls(_run(de_funds.request_funds, user, request_id, body.model_dump(), body.note))
     _record(request, user, f"{row['number']}: dana diajukan ke Finance", request_id, note=body.note)
+    return out
+
+
+@router.post("/api/de/monitor/{request_id}/fund-proof")
+def team_fund_proof(request_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    """The proof of the paid fund (the invoices, the actual cost) goes to Finance for verification (migration 144)."""
+    from app import de_funds
+    row = _team_row(request, user, request_id)
+    out = _with_work_urls(_run(de_funds.send_proof, user, request_id))
+    _record(request, user, f"{row['number']}: bukti dana dikirim ke Finance", request_id)
     return out
 
 

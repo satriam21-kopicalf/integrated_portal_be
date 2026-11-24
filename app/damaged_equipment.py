@@ -776,6 +776,7 @@ def change_status(user: dict, request_id: str, to: str, note: Optional[str]) -> 
         if row.get("mode") == "VENDOR" and (row["actual_cost"] is None or not count("INVOICE")):
             raise DeError("Pekerjaan vendor: isi biaya aktual dan lampirkan invoice sebelum Done")
     reopen = to in ("IN_PROGRESS", "ORDERED") and row["status"] == "HANDOVER"
+    settled = None
     with db.transaction() as conn:
         conn.execute(f"""UPDATE {P}.de_request SET status = %s, hold_from = %s, updated_at = now(),
                          closed_at = CASE WHEN %s IN ('DONE', 'REJECTED') THEN now() END WHERE id::text = %s""",
@@ -790,7 +791,7 @@ def change_status(user: dict, request_id: str, to: str, note: Optional[str]) -> 
                          (request_id,))
         if to == "DONE":
             conn.execute(f"UPDATE {P}.de_request SET approved_by = %s WHERE id::text = %s", (user.get("full_name") or user["username"], request_id))
-            de_funds.settle(conn, row, user)  # the difference between the actual cost and the fund
+            settled = de_funds.settle(conn, row, user)  # a paid fund goes to Verifikasi with the actual cost (migration 144)
         if to == "PENDING" and row["status"] != "ON_HOLD":  # a new approval starts at the first step
             conn.execute(f"UPDATE {P}.de_request SET approval_step = 1 WHERE id::text = %s", (request_id,))
         if row["status"] == "IN_PROGRESS" or to in ("DONE", "REJECTED"):  # the work stops: open technician links close
@@ -801,6 +802,8 @@ def change_status(user: dict, request_id: str, to: str, note: Optional[str]) -> 
                              released_at = now(), released_note = %s WHERE request_id::text = %s AND status = 'ACTIVE'""",
                          (to, None if to == "DONE" else "Pengajuan ditolak", request_id))
         _event(conn, request_id, user, "STATUS", row["status"], to, note)
+    if to == "DONE" and settled and settled.get("fundId"):  # the invoices go with it as its proof
+        de_funds.attach_quotes(user, request_id, settled["fundId"], kind="PROOF")
     recompute(request_id)  # Done / reject: the labour stops here
     return team_full(request_id)
 

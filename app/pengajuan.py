@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 from app import database as db
 from app.config import get_settings
 from app.pic_checkin import CheckInError, branch_options
+from app.utils import today as today_wib
 
 P = "integration_portal"
 WIB = ZoneInfo("Asia/Jakarta")
@@ -68,10 +69,12 @@ LINE_DATE_REQUIRED = ("PETTY_CASH", "EMERGENCY")
 NEEDED_ON = {"MARKETING": "Tanggal dibutuhkan", "EVENT": "Tanggal event", "BILL": "Jatuh tempo"}  # required for these
 DOC_TYPES = {"NOTA": "Nota", "KWITANSI": "Kwitansi", "INVOICE": "Invoice", "STRUK": "Struk", "TRANSFER": "Bukti transfer",
              "FOTO": "Foto barang", "QUOTE": "Penawaran harga", "OTHER": "Lainnya"}
-STATUS_LABEL = {"DRAFT": "Draf", "SUBMITTED": "Menunggu approval", "REVISION": "Revisi", "APPROVED": "Menunggu pembayaran",
-                "PAID": "Dibayar", "REJECTED": "Ditolak"}
+# 2026-11-24 (migration 144): the whole life — Pending → Approved → In Progress (money out, proof awaited) → Verifikasi → Done
+STATUS_LABEL = {"DRAFT": "Draf", "SUBMITTED": "Pending · menunggu approval", "REVISION": "Revisi", "APPROVED": "Approved · siap dicairkan",
+                "PAID": "In Progress · menunggu bukti", "VERIFYING": "Verifikasi Finance", "DONE": "Done", "REJECTED": "Ditolak",
+                "CANCELLED": "Dibatalkan"}
 EDITABLE = ("DRAFT", "REVISION")
-OPEN = ("SUBMITTED", "REVISION", "APPROVED")
+OPEN = ("SUBMITTED", "REVISION", "APPROVED", "PAID", "VERIFYING")
 ACTIONS = ("APPROVE", "REVISION", "REJECTED", "PAID")
 NOTE_REQUIRED = ("REVISION", "REJECTED")
 MAX_STEPS = 8
@@ -154,7 +157,7 @@ def files_of(pengajuan_id: str) -> list[dict]:
 def add_file(user: dict, pengajuan_id: str, kind: str, data: bytes, file_name: str, doc_type: str, line_id: Optional[int]) -> dict:
     """kind LINE (a receipt of one expense), INCOME (the proof of the money in), OTHER (anything else), PAYMENT (Finance),
     REFUND (Finance: the money a Maintenance & Procurement fund gave back)."""
-    if kind not in ("LINE", "INCOME", "OTHER", "PAYMENT", "REFUND"):
+    if kind not in ("LINE", "INCOME", "OTHER", "PAYMENT", "REFUND", "PROOF", "TOPUP"):
         raise PengajuanError("Jenis lampiran tidak dikenal")
     if doc_type not in DOC_TYPES:
         raise PengajuanError("Jenis dokumen tidak dikenal")
@@ -214,7 +217,9 @@ COLS = """p.id::text, p.number, p.status, p.user_id::text, p.username, p.full_na
     p.first_submitted_at, p.approved_at, p.approved_by, p.paid_at, p.paid_by, p.closed_at, p.kind, p.approval_step,
     p.requester_name, p.requester_phone, p.payee_bank, p.payee_account, p.payee_name, p.purpose, p.needed_on, p.plafon,
     p.requested_amount, p.email, p.department, p.job_title, p.purpose_id, p.transaction_type_id, p.project_id,
-    p.account_type_id, p.settles_id::text, p.de_request_id::text, p.refund_amount, p.refunded_at, p.refunded_by, p.refunded_note"""
+    p.account_type_id, p.settles_id::text, p.de_request_id::text, p.refund_amount, p.refunded_at, p.refunded_by, p.refunded_note,
+    p.proof_due_on, p.proof_submitted_at, p.actual_amount, p.actual_note, p.verified_amount, p.verified_note, p.verified_at, p.verified_by,
+    p.done_at, p.topup_amount, p.topup_paid_at, p.payee_type, p.va_provider, p.invoice_no"""
 
 
 def get_row(pengajuan_id: str) -> Optional[dict]:
@@ -268,6 +273,8 @@ def view(row: dict, full: bool = False) -> dict:
         "refundAmount": _num(row.get("refund_amount")), "refundedAt": _iso(row.get("refunded_at")), "refundedBy": row.get("refunded_by"),
         "refundedNote": row.get("refunded_note"),
     }
+    from app import fund_lifecycle
+    out.update(fund_lifecycle.view_fields(row))
     if row.get("de_request_id"):  # asked by the Maintenance & Procurement team (app/de_funds.py)
         de = db.fetchrow(f"SELECT number, kind, vendor, full_name FROM {P}.de_request WHERE id::text = %s", (row["de_request_id"],))
         out["deRequest"] = {"id": row["de_request_id"], "number": de["number"], "kind": de["kind"], "vendor": de["vendor"],
@@ -288,6 +295,8 @@ def view(row: dict, full: bool = False) -> dict:
         out["missing"] = missing(row, out["lines"], out["files"]) if row["status"] in EDITABLE else []
         out["steps"] = [{"position": s["position"], "label": s["label"], "type": s["type"], "users": [u["name"] for u in s["users"]]}
                         for s in steps_of(row)]
+        out["rule"] = fund_lifecycle.rule_for(row)
+        out["proofMissing"] = fund_lifecycle.missing_proof(out["rule"], out["files"], row.get("actual_amount")) if row["status"] == "PAID" else []
         if row["kind"] == "PETTY_CASH" and row["status"] in EDITABLE:
             out["plafon"] = _num(plafon_of(row["branch_code"]))
         if row["kind"] == "PETTY_CASH":
@@ -666,8 +675,13 @@ def save_draft(user: dict, pengajuan_id: str, body: dict) -> dict:
     for key, col in (("openingNote", "opening_note"), ("incomeNote", "income_note"), ("note", "note"), ("purpose", "purpose")):
         if key in body:
             sets[col] = (str(body[key] or "")).strip()[:1000] or None
+    if "payeeType" in body:
+        if body["payeeType"] not in ("BANK", "VA"):
+            raise PengajuanError("Jenis rekening tujuan tidak dikenal")
+        sets["payee_type"] = body["payeeType"]
     for key, col, size in (("requesterName", "requester_name", 80), ("requesterPhone", "requester_phone", 30), ("payeeBank", "payee_bank", 60),
-                           ("payeeAccount", "payee_account", 40), ("payeeName", "payee_name", 80)):
+                           ("payeeAccount", "payee_account", 40), ("payeeName", "payee_name", 80), ("vaProvider", "va_provider", 60),
+                           ("invoiceNo", "invoice_no", 80)):
         if key in body:
             sets[col] = " ".join(str(body[key] or "").split())[:size] or None
     lines = body.get("lines")
@@ -787,7 +801,8 @@ def _event(conn, pengajuan_id: str, user: Optional[dict], kind: str, from_status
 def submit(user: dict, pengajuan_id: str) -> dict:
     row = own(user, pengajuan_id, editable=True)
     lines, files = lines_of(pengajuan_id), files_of(pengajuan_id)
-    todo = missing(row, lines, files)
+    from app import fund_lifecycle
+    todo = missing(row, lines, files) + fund_lifecycle.check_send(row, files, today_wib())
     if todo:
         raise PengajuanError("Belum bisa dikirim: " + "; ".join(todo))
     other = overlapping(row)
@@ -835,8 +850,9 @@ def can(user: dict, row: dict) -> dict:
     steps = steps_of(row)
     step = current_step(row, steps)
     mine = takes(user, step)
-    refund = row["status"] == "PAID" and row.get("refund_amount") is not None and not row.get("refunded_at")
+    refund = row["status"] in ("PAID", "VERIFYING") and row.get("refund_amount") is not None and not row.get("refunded_at")
     return {"next": allowed_next(user, row, steps), "reviewLines": mine and row["status"] == "SUBMITTED",
+            "verify": row["status"] == "VERIFYING" and takes(user, _pay(steps)),
             "payment": mine and row["status"] == "APPROVED", "step": step["label"] if step else None,
             "refund": refund and takes(user, _pay(steps)),
             "stepUsers": [u["name"] for u in step["users"]] if step else []}
@@ -845,7 +861,7 @@ def can(user: dict, row: dict) -> dict:
 def confirm_refund(user: dict, pengajuan_id: str, note: Optional[str]) -> dict:
     """Finance (the payment step) confirms the money a Maintenance & Procurement fund gave back (app/de_funds.py)."""
     row = get_row(pengajuan_id)
-    if row is None or row["status"] != "PAID" or row.get("refund_amount") is None:
+    if row is None or row["status"] not in ("PAID", "VERIFYING") or row.get("refund_amount") is None:
         raise LookupError("Pengajuan tidak ditemukan")
     if row.get("refunded_at"):
         raise PengajuanError("Pengembalian dana sudah dikonfirmasi")
@@ -857,7 +873,7 @@ def confirm_refund(user: dict, pengajuan_id: str, note: Optional[str]) -> dict:
     with db.transaction() as conn:
         conn.execute(f"""UPDATE {P}.pengajuan SET refunded_at = now(), refunded_by = %s, refunded_note = %s, updated_at = now()
                          WHERE id::text = %s""", (_actor(user), note, pengajuan_id))
-        _event(conn, pengajuan_id, user, "REFUND", "PAID", "PAID", note, {"refund": row["refund_amount"]})
+        _event(conn, pengajuan_id, user, "REFUND", row["status"], row["status"], note, {"refund": row["refund_amount"]})
         from app import de_funds
         de_funds.on_fund_status(conn, row, user, "REFUNDED", note, {"amount": row["refund_amount"]})
     return full(pengajuan_id)
@@ -903,12 +919,15 @@ def change_status(user: dict, pengajuan_id: str, to: str, note: Optional[str], p
         if not any(f["kind"] == "PAYMENT" for f in files_of(pengajuan_id)):
             raise PengajuanError("Lampirkan bukti transfer dulu")
         details.update(amount=amount, on=on)
+        from app import fund_lifecycle
+        status, due = fund_lifecycle.after_paid(fund_lifecycle.rule_for(row), on)
+        details["proofDueOn"] = due
         sets += ["paid_at = now()", "paid_by = %(actor)s", "paid_amount = %(paid)s", "paid_on = %(paid_on)s", "paid_note = %(note)s",
-                 "closed_at = now()"]
+                 "proof_due_on = %(due)s"] + (["closed_at = now()", "done_at = now()"] if status == "DONE" else [])
     if to == "REJECTED":
         sets.append("closed_at = now()")
     params = {"id": pengajuan_id, "to": status, "pos": position, "actor": _actor(user), "approved": details.get("approvedAmount"),
-              "paid": details.get("amount"), "paid_on": details.get("on"), "note": note}
+              "paid": details.get("amount"), "paid_on": details.get("on"), "note": note, "due": details.get("proofDueOn")}
     with db.transaction() as conn:
         conn.execute(f"""UPDATE {P}.pengajuan SET status = %(to)s, approval_step = %(pos)s, updated_at = now(){''.join(', ' + s for s in sets)}
                          WHERE id::text = %(id)s""", params)
@@ -1121,7 +1140,10 @@ def missing_personal(row: dict, files: list[dict]) -> list[str]:
         out.append("Pilih outlet")
     if not row.get("account_type_id"):
         out.append("Pilih jenis rekening tujuan")
-    if not (row.get("payee_bank") or "").strip() or not (row.get("payee_account") or "").strip() or not (row.get("payee_name") or "").strip():
+    if row.get("payee_type") == "VA":
+        if not (row.get("payee_account") or "").strip() or not ((row.get("va_provider") or row.get("payee_bank") or "").strip()):
+            out.append("Isi Virtual Account tujuan: penyedia (mis. Shopee, Tokopedia) dan nomor VA")
+    elif not (row.get("payee_bank") or "").strip() or not (row.get("payee_account") or "").strip() or not (row.get("payee_name") or "").strip():
         out.append("Isi rekening tujuan: bank, nomor rekening dan nama pemilik")
     if flags.get("type") == "SETTLEMENT" and not row.get("settles_id"):
         out.append("Pilih Cash in Advance yang diselesaikan")

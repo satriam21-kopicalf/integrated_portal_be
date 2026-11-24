@@ -44,6 +44,9 @@ from app.utils import parse_branches, today
 
 router = APIRouter(tags=["pengajuan"])
 FORM, MON = "form.pengajuan", "mon.pengajuan"
+# the proof of a request is sent by its owner: an outlet / person (the form) or the Maintenance & Procurement team (its
+# technicians' Cash in Advance, migration 143) — the ownership is checked in any case
+PROOF_PAGES = (FORM, "mon.damaged-equipment")
 
 
 def _need(request: Request, user: dict, *pages: str) -> None:
@@ -132,6 +135,10 @@ class DraftIn(BaseModel):
     requestedAmount: Optional[float] = None
     branchCode: Optional[str] = Field(None, max_length=40)
     settlesId: Optional[str] = Field(None, max_length=40)
+    # 2026-11-24 (migration 144): a bank account or a Virtual Account; a vendor payment's invoice number
+    payeeType: Optional[str] = Field(None, pattern="^(BANK|VA)$")
+    vaProvider: Optional[str] = Field(None, max_length=60)
+    invoiceNo: Optional[str] = Field(None, max_length=80)
 
 
 @router.get("/api/pengajuan/form")
@@ -324,6 +331,84 @@ def team_refunded(pengajuan_id: str, body: NoteIn, request: Request, user: dict 
     return _team_view(user, pengajuan_id)
 
 
+# ---------------------------------------------------------------- after the money went out (migration 144)
+
+class ProofIn(BaseModel):
+    actualAmount: Optional[float] = Field(None, ge=0)
+    note: Optional[str] = Field(None, max_length=2000)
+
+
+@router.post("/api/pengajuan/requests/{pengajuan_id}/proof-files", status_code=201)
+async def add_proof_file(pengajuan_id: str, request: Request, docType: str = Query("NOTA", max_length=10),
+                         name: str = Query("bukti", max_length=160), user: dict = Depends(current_user)) -> dict:
+    """The requester's proof while the request is In Progress (money out): receipts, invoice, goods received."""
+    await run_in_threadpool(_need, request, user, *PROOF_PAGES)
+    row = await run_in_threadpool(_run, pg.own, user, pengajuan_id)
+    if row["status"] != "PAID":
+        raise HTTPException(422, detail="Bukti dilampirkan setelah dana cair dan sebelum verifikasi")
+    data = await _body(request)
+    await run_in_threadpool(_run, pg.add_file, user, pengajuan_id, "PROOF", data, name, docType, None)
+    return await run_in_threadpool(pg.full, pengajuan_id)
+
+
+@router.delete("/api/pengajuan/requests/{pengajuan_id}/proof-files/{file_id}")
+def delete_proof_file(pengajuan_id: str, file_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    _need(request, user, *PROOF_PAGES)
+    row = _run(pg.own, user, pengajuan_id)
+    if row["status"] != "PAID":
+        raise HTTPException(422, detail="Bukti hanya dapat diubah sebelum dikirim ke Finance")
+    pg.delete_file(pengajuan_id, file_id, ("PROOF",))
+    return pg.full(pengajuan_id)
+
+
+@router.post("/api/pengajuan/requests/{pengajuan_id}/proof")
+def send_proof(pengajuan_id: str, body: ProofIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    """In Progress → Verifikasi: the proof and the amount really spent go to Finance."""
+    from app import fund_lifecycle
+    _need(request, user, *PROOF_PAGES)
+    out = _run(fund_lifecycle.submit_proof, user, pengajuan_id, body.actualAmount, body.note)
+    activity.record("pengajuan", user=user, request=request, page="/forms/pengajuan", summary=f"Mengirim bukti {out['number']}",
+                    details={"id": pengajuan_id, "actual": body.actualAmount})
+    return out
+
+
+class VerifyIn(BaseModel):
+    action: str = Field(pattern="^(ADJUST|MISSING|TOPUP|DONE)$")
+    amount: Optional[float] = Field(None, ge=0)
+    note: Optional[str] = Field(None, max_length=2000)
+
+
+@router.post("/api/pengajuan/monitor/{pengajuan_id}/verify")
+def team_verify(pengajuan_id: str, body: VerifyIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    """Finance on a request in Verifikasi: adjust the accepted amount, send back for missing proof, pay the shortfall, Done."""
+    from app import fund_lifecycle
+    row = _team_row(request, user, pengajuan_id)
+    _run(fund_lifecycle.verify, user, pengajuan_id, body.action, body.amount, body.note)
+    _record(request, user, f"{row['number']}: verifikasi {body.action}", pengajuan_id, action=body.action, amount=body.amount, note=body.note)
+    return _team_view(user, pengajuan_id)
+
+
+@router.post("/api/pengajuan/monitor/{pengajuan_id}/topup-files", status_code=201)
+async def team_topup_file(pengajuan_id: str, request: Request, docType: str = Query("TRANSFER", max_length=10),
+                          name: str = Query("bukti-transfer-kekurangan", max_length=160), user: dict = Depends(current_user)) -> dict:
+    """Finance: the transfer of the shortfall (more spent than paid), while the request is in Verifikasi."""
+    row = await run_in_threadpool(_team_row, request, user, pengajuan_id)
+    if not pg.can(user, row).get("verify"):
+        raise HTTPException(422, detail="Bukti transfer kekurangan diunggah Finance saat verifikasi")
+    data = await _body(request)
+    await run_in_threadpool(_run, pg.add_file, user, pengajuan_id, "TOPUP", data, name, docType, None)
+    return await run_in_threadpool(_team_view, user, pengajuan_id)
+
+
+@router.delete("/api/pengajuan/monitor/{pengajuan_id}/topup-files/{file_id}")
+def team_delete_topup_file(pengajuan_id: str, file_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    row = _team_row(request, user, pengajuan_id)
+    if not pg.can(user, row).get("verify") or row.get("topup_paid_at"):
+        raise HTTPException(422, detail="Bukti transfer kekurangan hanya dapat diubah sebelum dicatat")
+    pg.delete_file(pengajuan_id, file_id, ("TOPUP",))
+    return _team_view(user, pengajuan_id)
+
+
 # ---------------------------------------------------------------- settings (approvals, plafon)
 
 class StepIn(BaseModel):
@@ -360,7 +445,7 @@ def _superadmin(request: Request, user: dict) -> None:
 @router.get("/api/pengajuan/settings")
 def settings(request: Request, user: dict = Depends(current_user)) -> dict:
     _need(request, user, MON)
-    from app import fund_options
+    from app import fund_lifecycle, fund_options
     options = fund_options.all_options()
     flows = {k: pg.flow(k) for k in pg.KINDS}
     flows.update({f"PERSONAL:{o['id']}": pg.flow(f"PERSONAL:{o['id']}") for o in options["PURPOSE"]})
@@ -368,7 +453,50 @@ def settings(request: Request, user: dict = Depends(current_user)) -> dict:
             "canEdit": user.get("role") == "superadmin", "canPlafon": _plafon_editor(user),
             # the lists of the personal form and the plafon per department (management: superadmin / admin)
             "options": options, "lists": pg.list_names(), "listDefaults": fund_options.LISTS, "deptPlafon": fund_options.dept_plafons(),
-            "departments": fund_options.departments(), "canOptions": _options_editor(user), "kindLabels": pg.kind_labels()}
+            "departments": fund_options.departments(), "canOptions": _options_editor(user), "kindLabels": pg.kind_labels(),
+            # the life after the money went out (migration 144): the rules of every kind and the global settings, Finance's
+            "rules": fund_lifecycle.rules(), "lifecycle": fund_lifecycle.settings(), "canRules": _finance_editor(user),
+            "proofDocs": {d: pg.DOC_TYPES[d] for d in fund_lifecycle.DOCS}}
+
+
+def _finance_editor(user: dict) -> bool:
+    """The rules of the requests: management (superadmin / admin) and Finance (the payment step of the petty cash)."""
+    return _options_editor(user) or _plafon_editor(user)
+
+
+class RuleIn(BaseModel):
+    proofAfter: bool = False
+    proofDays: int = Field(7, ge=1, le=180)
+    proofDocs: list[str] = Field(default_factory=list, max_length=8)
+    vendor: bool = False
+
+
+@router.put("/api/pengajuan/settings/rules/{key}")
+def set_rule(key: str, body: RuleIn, request: Request, user: dict = Depends(current_user)) -> list[dict]:
+    from app import fund_lifecycle
+    _need(request, user, MON)
+    if not _finance_editor(user):
+        deny(request, user)
+    out = _run(fund_lifecycle.set_rule, user, key, body.model_dump())
+    activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan", summary=f"Mengatur aturan pengajuan {key}",
+                    details={"key": key, **body.model_dump()})
+    return out
+
+
+class LifecycleIn(BaseModel):
+    blockOverdueProof: Optional[bool] = None
+    minLeadDays: Optional[int] = Field(None, ge=0, le=60)
+
+
+@router.put("/api/pengajuan/settings/lifecycle")
+def set_lifecycle(body: LifecycleIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    from app import fund_lifecycle
+    _need(request, user, MON)
+    if not _finance_editor(user):
+        deny(request, user)
+    out = _run(fund_lifecycle.set_settings, body.model_dump(exclude_none=True))
+    activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan", summary="Mengatur pengaturan pengajuan", details=out)
+    return out
 
 
 @router.put("/api/pengajuan/settings/flow/{kind}")
@@ -457,6 +585,17 @@ def edit_option(option_id: int, body: OptionPatch, request: Request, user: dict 
     activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan",
                     summary=f"Mengubah {fund_options.LISTS[out['list']]}: {out['name']}{'' if out['isActive'] else ' (nonaktif)'}", details=out)
     return out
+
+
+@router.delete("/api/pengajuan/settings/options/{option_id}")
+def delete_option(option_id: int, request: Request, user: dict = Depends(current_user)) -> dict:
+    """Deletes an option never used; a used one is deactivated instead (the old requests keep their label)."""
+    from app import fund_options
+    _need_options(request, user)
+    out = _run(fund_options.delete, user, option_id)
+    activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan",
+                    summary=f"Menghapus {fund_options.LISTS[out['list']]}: {out['name']}", details=out)
+    return {"deleted": out["id"]}
 
 
 @router.put("/api/pengajuan/settings/dept-plafon")

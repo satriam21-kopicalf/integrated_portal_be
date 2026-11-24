@@ -20,6 +20,7 @@ from app.config import get_settings
 from app.utils import data_version
 from app.routes.activity import router as activity_router
 from app.routes.social import router as social_router
+from app.routes.aggregator import router as aggregator_router
 from app.routes import (auth_router, avatars_router, branches_router, exports_router, live_router,
                         overview_router, realtime_router,
                         summary_router, transactions_router, users_router)
@@ -80,6 +81,8 @@ async def lifespan(app: FastAPI):
         social.start()
         from app import social_transcribe  # speech to text of the TikTok videos, local Whisper (migration 138)
         social_transcribe.start()
+        from app import aggregator  # Aggregator Insight: BotFood every hour, reviews filled back (migration 139)
+        aggregator.start()
     yield
     db.close_pool()
 
@@ -164,6 +167,7 @@ app.include_router(access_router)  # pages of roles & users, job titles, departm
 app.include_router(hrms_sync_router)  # job title / department of person accounts from HRMS (migration 110)
 app.include_router(activity_router)  # superadmin reads; any signed-in user reports page views
 app.include_router(social_router)  # Social Media Analytics (migration 135)
+app.include_router(aggregator_router)  # Aggregator Insight (migration 139)
 app.include_router(realtime_router)
 app.include_router(xlsx_router)  # a table a page shows, as an Excel file
 

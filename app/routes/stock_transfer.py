@@ -188,6 +188,13 @@ def stock_list(branch: Optional[str] = None, month: Optional[str] = Query(None, 
     return stock_list_month.stock_list(month, _branches(branch), usage)
 
 
+@router.get("/api/monitoring/stock/unexplained")
+def unexplained(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"), branch: Optional[str] = None, _: dict = Depends(require_page(LIST))) -> dict:
+    """The items no recipe uses, with the usage the counts show (2026-11-25)."""
+    from app import stock_list_month
+    return stock_list_month.suggestions(month, _branches(branch))
+
+
 class TransitIn(BaseModel):
     branch: str = Field(min_length=1, max_length=40)
     code: str = Field(min_length=1, max_length=80)

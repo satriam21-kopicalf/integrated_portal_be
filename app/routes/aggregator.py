@@ -12,15 +12,23 @@
 from datetime import date, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from app import aggregator, aggregator_reports
+from app import activity, aggregator, aggregator_reports
+from app import aggregator_quality as quality
 from app.access import require_page
 from app.utils import today
 
 router = APIRouter(prefix="/api/aggregator", tags=["aggregator insight"])
-VIEW = require_page("agg.overview", "agg.schedule", "agg.opening", "agg.oos")
+VIEW = require_page("agg.overview", "agg.schedule", "agg.opening", "agg.oos", "agg.reviews", "agg.complaints", "agg.void", "agg.menu", "agg.reports")
+REVIEWS = require_page("agg.reviews")
+COMPLAINTS = require_page("agg.complaints")
+TICKET = require_page("agg.complaints", "agg.reviews")
+VOID = require_page("agg.void")
+MENU = require_page("agg.menu")
+REPORTS = require_page("agg.reports")
+OVERVIEW = require_page("agg.overview")
 EDIT = require_page("agg.schedule")
 OPENING = require_page("agg.opening")
 OOS = require_page("agg.oos")
@@ -58,6 +66,142 @@ def oos(date_from: Optional[date] = Query(None, alias="dateFrom"), date_to: Opti
         _: dict = Depends(OOS)):
     """Out of Stock: out now, and how often / how long each item went out in the period."""
     return aggregator_reports.oos(*_range(date_from, date_to), platform, packaging, stale_days)
+
+
+def _ask(fn, *args):
+    try:
+        return fn(*args)
+    except LookupError as e:
+        raise HTTPException(404, detail=str(e)) from None
+    except ValueError as e:  # QualityError, a date that cannot be read
+        raise HTTPException(422, detail=str(e)) from None
+
+
+# ---------------------------------------------------------------- stage 3 (app/aggregator_quality.py, migration 151)
+
+@router.get("/reviews")
+def reviews(date_from: Optional[date] = Query(None, alias="dateFrom"), date_to: Optional[date] = Query(None, alias="dateTo"),
+            platform: PLATFORM = None, _: dict = Depends(REVIEWS)):
+    return quality.reviews(*_range(date_from, date_to), platform)
+
+
+@router.get("/complaints")
+def complaints(date_from: Optional[date] = Query(None, alias="dateFrom"), date_to: Optional[date] = Query(None, alias="dateTo"),
+               platform: PLATFORM = None, _: dict = Depends(COMPLAINTS)):
+    return quality.complaints(*_range(date_from, date_to), platform)
+
+
+class ComplaintIn(BaseModel):
+    reviewId: Optional[str] = Field(None, max_length=30)
+    branchCode: Optional[str] = Field(None, max_length=40)
+    platform: Optional[str] = Field(None, max_length=20)
+    orderNo: Optional[str] = Field(None, max_length=60)
+    day: Optional[str] = Field(None, max_length=10)
+    source: Optional[str] = Field(None, max_length=10)
+    category: Optional[str] = Field(None, max_length=60)
+    detail: Optional[str] = Field(None, max_length=2000)
+
+
+@router.post("/complaints", status_code=201)
+def add_complaint(body: ComplaintIn, request: Request, user: dict = Depends(TICKET)):
+    out = _ask(quality.create_complaint, user, body.model_dump())
+    activity.record("aggregator", user=user, request=request, page="/aggregator-insight/complaints", summary=f"Komplain #{out['id']}", details=body.model_dump())
+    return out
+
+
+class ComplaintPatch(BaseModel):
+    status: Optional[str] = Field(None, max_length=10)
+    category: Optional[str] = Field(None, max_length=60)
+    resolution: Optional[str] = Field(None, max_length=2000)
+    compensation: Optional[float] = None
+
+
+@router.patch("/complaints/{complaint_id}")
+def edit_complaint(complaint_id: int, body: ComplaintPatch, request: Request, user: dict = Depends(COMPLAINTS)):
+    out = _ask(quality.update_complaint, user, complaint_id, body.model_dump(exclude_unset=True))
+    activity.record("aggregator", user=user, request=request, page="/aggregator-insight/complaints", summary=f"Komplain #{complaint_id}: {out['status']}", details=body.model_dump(exclude_unset=True))
+    return out
+
+
+@router.get("/voids")
+def voids(date_from: Optional[date] = Query(None, alias="dateFrom"), date_to: Optional[date] = Query(None, alias="dateTo"),
+          platform: PLATFORM = None, _: dict = Depends(VOID)):
+    return quality.voids(*_range(date_from, date_to), platform)
+
+
+class VoidReason(BaseModel):
+    keys: list[str] = Field(min_length=1, max_length=500)
+    reason: str = Field(max_length=60)
+    note: Optional[str] = Field(None, max_length=500)
+
+
+@router.put("/voids/reason")
+def void_reason(body: VoidReason, request: Request, user: dict = Depends(VOID)):
+    n = _ask(quality.set_void_reason, user, body.keys, body.reason, body.note)
+    activity.record("aggregator", user=user, request=request, page="/aggregator-insight/void", summary=f"Alasan {n} void: {body.reason}", details=body.model_dump())
+    return {"saved": n}
+
+
+class VoidIn(BaseModel):
+    branchCode: str = Field(max_length=40)
+    platform: str = Field(max_length=20)
+    orderNo: str = Field(max_length=60)
+    day: str = Field(max_length=10)
+    amount: float = 0
+    reason: str = Field(max_length=60)
+    note: Optional[str] = Field(None, max_length=500)
+
+
+@router.post("/voids", status_code=201)
+def add_void(body: VoidIn, request: Request, user: dict = Depends(VOID)):
+    out = _ask(quality.add_void, user, body.model_dump())
+    activity.record("aggregator", user=user, request=request, page="/aggregator-insight/void", summary=f"Void manual {body.orderNo}", details=body.model_dump())
+    return {"id": out}
+
+
+@router.get("/menu")
+def menu(platform: PLATFORM = None, _: dict = Depends(MENU)):
+    return quality.menu(platform)
+
+
+@router.get("/menu/fit")
+def menu_fit(platform: PLATFORM = None, branch: Optional[str] = Query(None, max_length=40), _: dict = Depends(MENU)):
+    return quality.fit(platform, branch) | {"outlets": [{"code": k, "name": v} for k, v in quality._branch_names().items()]}
+
+
+@router.get("/report")
+def report(date_from: Optional[date] = Query(None, alias="dateFrom"), date_to: Optional[date] = Query(None, alias="dateTo"),
+           platform: PLATFORM = None, _: dict = Depends(REPORTS)):
+    return quality.report(*_range(date_from, date_to), platform)
+
+
+@router.get("/brief")
+def brief(_: dict = Depends(OVERVIEW)):
+    """The last 7 days for the Overview page."""
+    z = today()
+    return quality.brief(z - timedelta(days=6), z)
+
+
+@router.get("/hours")
+def hours(_: dict = Depends(OPENING)):
+    return {"data": quality.hours_list()}
+
+
+class HourRow(BaseModel):
+    code: str = Field(max_length=40)
+    open: Optional[str] = Field(None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    close: Optional[str] = Field(None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+class HoursIn(BaseModel):
+    rows: list[HourRow] = Field(min_length=1, max_length=400)
+
+
+@router.put("/hours")
+def set_hours(body: HoursIn, request: Request, user: dict = Depends(OPENING)):
+    _ask(quality.set_hours, user, [r.model_dump() for r in body.rows])
+    activity.record("aggregator", user=user, request=request, page="/aggregator-insight/opening", summary=f"Jam buka {len(body.rows)} outlet", details={"n": len(body.rows)})
+    return {"data": quality.hours_list()}
 
 
 @router.get("/status")

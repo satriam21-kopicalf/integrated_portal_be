@@ -56,6 +56,46 @@ def figures(prev: float, moves: dict[str, float], transit_in: float, transit_out
             "variancePct": round(variance / system, 6) if variance is not None and system else None}
 
 
+def unexplained(rows: list[dict], least: int = 1) -> set[str]:
+    """The items that move but no recipe, option rule, additional item or ESB usage explains in any branch: all they lose is
+    read as a difference (plastic clips …). Pure (tested)."""
+    seen: dict[str, list[dict]] = {}
+    for r in rows:
+        seen.setdefault(r["code"], []).append(r)
+    return {c for c, v in seen.items() if not any(abs(x["system"]) > 1e-9 for x in v) and sum(1 for x in v if (x.get("actual") or 0) > 1e-9) >= least}
+
+
+def suggestions(month: str, branches: Optional[list[str]]) -> dict:
+    """For every unexplained item: what the outlets really used (count to count) per outlet-day, and per 100 bills — the
+    figure Cost Control may enter as an Additional item, so the Stock List can estimate it."""
+    from app import database as db
+    data = stock_list(month, branches, "esb")
+    days = {h["branch"]: (date.fromisoformat(h["to"]) - date.fromisoformat(h["from"])).days + 1 for h in data["branches"] if h["endDate"] and h["prevDate"]}
+    span = {h["branch"]: (h["from"], h["to"]) for h in data["branches"] if h["branch"] in days}
+    bills: dict[str, float] = {}
+    if span:
+        for r in db.fetch("""SELECT branch_code, sales_date, sum(bills) AS n FROM integration_portal.agg_sales_daily
+                              WHERE tx_type = 'sales' AND sales_date BETWEEN %s AND %s AND branch_code = ANY(%s) GROUP BY 1, 2""",
+                          (min(a for a, _ in span.values()), max(z for _, z in span.values()), sorted(span))):
+            a, z = span[r["branch_code"]]
+            if a <= r["sales_date"].isoformat() <= z:
+                bills[r["branch_code"]] = bills.get(r["branch_code"], 0.0) + float(r["n"] or 0)
+    out: dict[str, dict] = {}
+    for r in data["rows"]:
+        if not r.get("noUsage") or r["branch"] not in days or r["actual"] is None:
+            continue
+        x = out.setdefault(r["code"], {"code": r["code"], "name": r["name"], "category": r["category"], "unit": r["unit"], "outlets": 0, "used": 0.0, "days": 0, "bills": 0.0,
+                                       "value": 0.0})
+        x["outlets"] += 1
+        x["used"] += r["actual"]
+        x["days"] += days[r["branch"]]
+        x["bills"] += bills.get(r["branch"], 0.0)
+        x["value"] += r["actual"] * (r["price"] or 0)
+    rows = [{**x, "used": round(x["used"], 3), "value": round(x["value"]), "perDay": round(x["used"] / x["days"], 4) if x["days"] else None,
+             "per100Bills": round(x["used"] / x["bills"] * 100, 4) if x["bills"] else None} for x in out.values() if x["used"] > 0]
+    return {"month": month, "data": sorted(rows, key=lambda x: -x["value"])}
+
+
 def stock_list(month: str, branches: Optional[list[str]], usage: str = "recipe") -> dict:
     key = f"{usage}:{month}:{','.join(sorted(branches)) if branches is not None else '*'}"
     hit = _cache.get(key)
@@ -230,6 +270,9 @@ def _build(month: str, branches: Optional[list[str]], usage: str = "recipe") -> 
             rows.append({"branch": b, "branchName": h["branchName"], "code": code, "name": (info.get(code) or {}).get("name") or code,
                          "category": (info.get(code) or {}).get("category") or "", "unit": unit, **f, "price": pr,
                          "estimateValue": round(f["estimate"] * pr, 2) if pr is not None else None})
+    no_usage = unexplained(rows)
+    for r in rows:
+        r["noUsage"] = r["code"] in no_usage
     for h in heads:
         mine = [r for r in rows if r["branch"] == h["branch"]]
         h["items"] = len(mine)

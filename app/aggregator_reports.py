@@ -310,6 +310,11 @@ def opening(d_from: date, d_to: date, channel: Optional[str] = None) -> dict:
                           WHERE at >= %s - interval '3 days' AND at < %s ORDER BY at""", (start, end)):
         ev[e["channel_id"]].append(e)
     handlers = _handlers(d_from, d_to)
+    from app import aggregator_quality
+    try:
+        own = aggregator_quality.hours()  # the hours the team entered, for the outlets BotFood has none for
+    except Exception:  # noqa: BLE001 - before migration 151
+        own = {}
     first_event = db.fetchrow(f"SELECT min(at) AS a FROM {P}.agg_status_event")["a"]
     daily = {(r["channel_id"], r["day"]): r for r in db.fetch(
         f"SELECT * FROM {P}.agg_daily WHERE day BETWEEN %s AND %s", (d_from, d_to))}
@@ -327,8 +332,13 @@ def opening(d_from: date, d_to: date, channel: Optional[str] = None) -> dict:
             ot = next((e["open_time"] for e in reversed(todays) if e["open_time"]), None) or c["open_time"]
             ct = next((e["close_time"] for e in reversed(todays) if e["close_time"]), None) or c["close_time"]
             rep = daily.get((c["id"], d))
+            mine = own.get(c["branch_code"]) if c["branch_code"] else None
+            if mine:
+                ot, ct = ot or mine["open_time"], ct or mine["close_time"]
             if rep:  # a past day: BotFood's own report
                 ot, ct = rep["open_time"] or ot, rep["close_time"] or ct
+                if mine and not rep["open_time"]:  # its stretches against the hours of the team
+                    rep = {**rep, "open_time": ot, "close_time": ct, "open_state": None if rep["open_state"] != "not_open" or stretches(rep.get("timeline")) else "not_open"}
                 r = {**from_daily(rep, g), "source": "report", "itemsPct": float(rep["items_pct"]) if rep["items_pct"] is not None else None}
             else:
                 have = first_event is not None and day1 > first_event.astimezone(WIB)

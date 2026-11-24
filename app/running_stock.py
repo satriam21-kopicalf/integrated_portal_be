@@ -298,6 +298,51 @@ def _running(branches: Optional[list[str]]) -> dict[str, dict]:
 
 
 
+def mix(esb: dict[str, tuple[float, str]], recipe: dict[str, dict], given: dict[str, dict], tail: dict[str, dict], to_unit) -> dict[str, dict]:
+    """The usage of the days ESB has made (what it books from the sales) + the non-sales of the recipe cards (ESB books no
+    stock for them) + the recipe cards of the days ESB has not made. Additional items, which ESB does not know, come from the
+    recipe side. Pure (tested)."""
+    out: dict[str, dict] = {}
+
+    def add(code: str, qty: float, unit: str) -> None:
+        row = out.get(code)
+        if row is None:
+            out[code] = {"code": code, "qty": qty, "unit": unit}
+        else:
+            row["qty"] += to_unit(qty, unit, row["unit"]) or 0.0
+    for code, (q, u) in esb.items():
+        add(code, q, u)
+    for src in (given, tail):
+        for k, v in src.items():
+            if v.get("code"):
+                add(v["code"], float(v["qty"]), str(v.get("unit") or "").upper())
+    for k, v in recipe.items():
+        if v.get("code") and v["code"] not in out:
+            out[v["code"]] = {"code": v["code"], "qty": float(v["qty"]), "unit": str(v.get("unit") or "").upper()}
+    return out
+
+
+def usage_mixed(branch: str, start: date, end: date) -> dict[str, dict]:
+    """The usage of a branch as the Stock List reads it (ESB first, 2026-11-25); the recipe cards alone when ESB has none."""
+    from datetime import timedelta
+    from app import menu_costing as mc
+    from app import stock_list_month
+    given: dict[str, dict[str, dict]] = {}
+    recipe = system_usage({branch: start}, end, None, given).get(branch, {})
+    try:
+        esb, until = stock_list_month.esb_usage({branch: (start, end)})
+    except Exception:  # noqa: BLE001 - the ESB usage unreachable
+        return recipe
+    if branch not in until or not esb.get(branch):
+        return recipe
+    tail_from = max(start, until[branch] + timedelta(days=1))
+    tail_given: dict[str, dict[str, dict]] = {}
+    tail = system_usage({branch: tail_from}, end, None, tail_given).get(branch, {}) if tail_from <= end else {}
+    # `given` holds the whole window: the tail's share of it is already inside the tail
+    own = {k: {**v, "qty": float(v["qty"]) - float(tail_given.get(branch, {}).get(k, {}).get("qty", 0))} for k, v in given.get(branch, {}).items()}
+    return mix(esb[branch], recipe, own, tail, mc.to_unit)
+
+
 def estimate_before(branch: str, day: date) -> dict:
     """The estimated stock of a branch at the start of `day` (Stock Opname Review, weekly / monthly, 2026-11-18): its
     previous portal count + every move, − waste approved, − system usage from that count to the day before.
@@ -312,7 +357,7 @@ def estimate_before(branch: str, day: date) -> dict:
     starts = {branch: start}
     moved = stock_moves.moves(start, end, [branch]).get(branch, {}) if end >= start else {}
     waste = _waste(starts, end).get(branch, {}) if end >= start else {}
-    used = system_usage(starts, end).get(branch, {}) if end >= start else {}
+    used = usage_mixed(branch, start, end) if end >= start else {}
     units = {code: u for code, (_, u) in prev["items"].items()}
     for v in used.values():
         if v.get("code") and v["code"] not in units:

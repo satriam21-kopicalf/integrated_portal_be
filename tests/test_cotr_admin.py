@@ -21,7 +21,7 @@ def test_a_cotr_account_never_opens_the_dashboard_or_sales(monkeypatch):
 def test_the_cotr_admin_opens_every_cotr_page_only(monkeypatch):
     _setup(monkeypatch)
     pages = set(access.pages_for({"id": "a", "role": "cotr_admin", "business_line": "cotr"}))
-    assert pages == {p for p in access.PAGE_KEYS if access.cotr_page(p)}
+    assert pages == {p for p in access.PAGE_KEYS if access.cotr_page(p)} | {"form.pengajuan"}  # Fund Request of the unit COTR
     assert "overview" not in pages and "guide" in pages and access.account_admin({"role": "cotr_admin"})
     assert not access.account_admin({"role": "user"})
 

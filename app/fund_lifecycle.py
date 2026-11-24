@@ -58,6 +58,7 @@ def rules() -> list[dict]:
     labels = pg.kind_labels()
     keys = [(k, labels.get(k) or pg.KINDS[k], "outlet") for k in pg.OUTLET_KINDS] + \
            [(k, pg.KINDS[k], "de") for k in pg.DE_KINDS] + \
+           [("VENDOR", pg.KINDS["VENDOR"], "outlet")] + \
            [(f"PERSONAL:{o['id']}", o["name"], "personal") for o in db.fetch(
                f"SELECT id, name FROM {P}.fund_option WHERE list = 'PURPOSE' AND is_active ORDER BY sort, name")]
     def of(k: str) -> dict:
@@ -66,7 +67,7 @@ def rules() -> list[dict]:
 
 
 def set_rule(user: dict, key: str, body: dict) -> list[dict]:
-    if not (key in ("PETTY_CASH", "EMERGENCY", "MARKETING", "EVENT", "BILL", "MAINTENANCE", "PROCUREMENT")
+    if not (key in ("PETTY_CASH", "EMERGENCY", "MARKETING", "EVENT", "BILL", "MAINTENANCE", "PROCUREMENT", "VENDOR")
             or (key.startswith("PERSONAL:") and key[9:].isdigit())):
         raise LifecycleError("Jenis pengajuan tidak dikenal")
     days = int(body.get("proofDays") or 7)

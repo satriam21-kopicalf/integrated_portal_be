@@ -34,7 +34,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from app import activity, branch_groups
+from app import activity, branch_groups, fund_units
 from app import pengajuan as pg
 from app.access import deny, has_page
 from app.pic_checkin import CheckInError
@@ -69,7 +69,8 @@ def _team_row(request: Request, user: dict, pengajuan_id: str) -> dict:
     _need(request, user, MON)
     row = pg.get_row(pengajuan_id)
     scope = allowed_branches()
-    if row is None or row["status"] == "DRAFT" or (scope is not None and row["branch_code"] and row["branch_code"] not in scope):
+    if row is None or row["status"] == "DRAFT" or (scope is not None and row["branch_code"] and row["branch_code"] not in scope) \
+            or not fund_units.in_monitor(user, row):
         raise HTTPException(404, detail="Pengajuan tidak ditemukan")
     return row
 
@@ -95,6 +96,7 @@ async def _body(request: Request) -> bytes:
 class NewIn(BaseModel):
     branchCode: Optional[str] = Field(None, max_length=40)  # a personal request may have no outlet (2026-11-20)
     kind: str = Field("PETTY_CASH", max_length=20)
+    unit: Optional[str] = Field(None, max_length=20)  # personal / vendor: the unit that asks (2026-11-24)
 
 
 class LineIn(BaseModel):
@@ -139,6 +141,12 @@ class DraftIn(BaseModel):
     payeeType: Optional[str] = Field(None, pattern="^(BANK|VA)$")
     vaProvider: Optional[str] = Field(None, max_length=60)
     invoiceNo: Optional[str] = Field(None, max_length=80)
+    # 2026-11-24 (migration 148): the unit and the vendor payment
+    unit: Optional[str] = Field(None, max_length=20)
+    vendorName: Optional[str] = Field(None, max_length=120)
+    paymentTerm: Optional[str] = Field(None, max_length=3)
+    invoiceDate: Optional[str] = Field(None, max_length=10)
+    outstandingAmount: Optional[float] = None
 
 
 @router.get("/api/pengajuan/form")
@@ -150,7 +158,7 @@ def form(request: Request, user: dict = Depends(current_user)) -> dict:
 @router.post("/api/pengajuan/requests", status_code=201)
 def new_request(body: NewIn, request: Request, user: dict = Depends(current_user)) -> dict:
     _need(request, user, FORM)
-    return _run(pg.create_draft, user, body.branchCode, body.kind)
+    return _run(pg.create_draft, user, body.branchCode, body.kind, body.unit)
 
 
 @router.get("/api/pengajuan/requests/{pengajuan_id}")
@@ -222,7 +230,7 @@ def file(file_id: str, request: Request, user: dict = Depends(current_user)) -> 
         raise HTTPException(404, detail="File tidak ditemukan")
     own = row["user_id"] == str(user["id"]) and has_page(user, FORM)
     scope = allowed_branches()
-    team = row["status"] != "DRAFT" and has_page(user, MON) and (scope is None or not row["branch_code"] or row["branch_code"] in scope)
+    team = row["status"] != "DRAFT" and fund_units.in_monitor(user, row) and has_page(user, MON) and (scope is None or not row["branch_code"] or row["branch_code"] in scope)
     if not (own or team):
         deny(request, user)
     if f["path"] is None:
@@ -251,7 +259,7 @@ class NoteIn(BaseModel):
 
 @router.get("/api/pengajuan/monitor")
 def monitor(request: Request, dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None),
-            branch: Optional[str] = None, group: Optional[str] = Query(None, max_length=60), user: dict = Depends(current_user)) -> dict:
+            branch: Optional[str] = None, group: Optional[str] = Query(None, max_length=60), unit: Optional[str] = Query(None, max_length=20), user: dict = Depends(current_user)) -> dict:
     _need(request, user, MON)
     end = dateTo or today()
     start = dateFrom or end - timedelta(days=89)
@@ -260,8 +268,11 @@ def monitor(request: Request, dateFrom: Optional[date] = Query(None), dateTo: Op
     scoped = scoped_branch(branch)
     branches = None if scoped is None else ([] if scoped == NO_BRANCH else parse_branches(scoped))
     branches = branch_groups.narrow(branches, group)
+    mine = fund_units.monitors(user)
+    units = [u for u in fund_units.units() if mine is None or u["code"] in mine]
+    shown = [u["code"] for u in units] if not unit or unit == "ALL" else [unit] if unit in {u["code"] for u in units} else []
     return {"period": {"from": start.isoformat(), "to": end.isoformat()}, "me": str(user["id"]), "superadmin": user.get("role") == "superadmin",
-            **pg.monitor(start, end, branches)}
+            "units": units, "openByUnit": fund_units.open_counts(), **pg.monitor(start, end, branches, shown)}
 
 
 @router.get("/api/pengajuan/monitor/{pengajuan_id}")
@@ -462,6 +473,7 @@ def settings(request: Request, user: dict = Depends(current_user)) -> dict:
     options = fund_options.all_options()
     flows = {k: pg.flow(k) for k in pg.KINDS}
     flows.update({f"PERSONAL:{o['id']}": pg.flow(f"PERSONAL:{o['id']}") for o in options["PURPOSE"]})
+    flows.update({k: pg.flow(k) for k in fund_units.unit_flows()})  # "<kind>@<unit>": the units with a flow of their own
     return {"kinds": pg.KINDS, "flows": flows, "users": pg.approver_options(), "plafon": pg.plafons(), "outlets": pg.outlet_options(),
             "canEdit": user.get("role") == "superadmin", "canPlafon": _plafon_editor(user),
             # the lists of the personal form and the plafon per department (management: superadmin / admin)
@@ -469,7 +481,7 @@ def settings(request: Request, user: dict = Depends(current_user)) -> dict:
             "departments": fund_options.departments(), "canOptions": _options_editor(user), "kindLabels": pg.kind_labels(),
             # the life after the money went out (migration 144): the rules of every kind and the global settings, Finance's
             "rules": fund_lifecycle.rules(), "lifecycle": fund_lifecycle.settings(), "canRules": _finance_editor(user),
-            "proofDocs": {d: pg.DOC_TYPES[d] for d in fund_lifecycle.DOCS}}
+            "units": fund_units.units(), "proofDocs": {d: pg.DOC_TYPES[d] for d in fund_lifecycle.DOCS}}
 
 
 def _finance_editor(user: dict) -> bool:
@@ -624,6 +636,41 @@ def delete_option(option_id: int, request: Request, user: dict = Depends(current
     activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan",
                     summary=f"Menghapus {fund_options.LISTS[out['list']]}: {out['name']}", details=out)
     return {"deleted": out["id"]}
+
+
+class PayerIn(BaseModel):
+    payer: str = Field(min_length=1, max_length=80)
+
+
+@router.put("/api/pengajuan/settings/units/{code}")
+def set_unit_payer(code: str, body: PayerIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    """The PT that pays a unit (superadmins and Finance); requests already sent keep theirs."""
+    _need(request, user, MON)
+    if not _finance_editor(user):
+        deny(request, user)
+    out = _run(fund_units.set_payer, code, body.payer)
+    activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan", summary=f"PT pembayar {code}: {body.payer}",
+                    details={"unit": code, "payer": body.payer})
+    return {"units": out}
+
+
+class UserUnitsIn(BaseModel):
+    units: List[str] = Field(default_factory=list, max_length=20)
+
+
+@router.get("/api/pengajuan/user-units/{user_id}")
+def user_units(user_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
+    _superadmin(request, user)
+    return {"units": fund_units.units(), "chosen": fund_units.chosen(user_id)}
+
+
+@router.put("/api/pengajuan/user-units/{user_id}")
+def set_user_units(user_id: str, body: UserUnitsIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _superadmin(request, user)
+    out = _run(fund_units.set_chosen, user_id, body.units)
+    activity.record("user", user=user, request=request, page="/users", summary=f"Unit Fund Request akun: {', '.join(out) or 'semua'}",
+                    details={"userId": user_id, "units": out})
+    return {"chosen": out}
 
 
 @router.put("/api/pengajuan/settings/dept-plafon")

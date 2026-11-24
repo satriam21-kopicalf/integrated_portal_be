@@ -273,7 +273,8 @@ def pages_for(user: dict) -> list[str]:
     for page, allowed in user_overrides(str(user["id"])).items():
         (base.add if allowed else base.discard)(page)
     if user.get("role") == COTR_ADMIN or user.get("business_line") == "cotr":
-        base = {p for p in base if cotr_page(p)}
+        asks = "form.pengajuan" in base or user.get("role") == COTR_ADMIN  # Fund Request of the unit COTR (2026-11-24)
+        base = {p for p in base if cotr_page(p)} | ({"form.pengajuan"} if asks else set())
     return [k for k in PAGE_KEYS if k in base]
 
 
@@ -292,7 +293,7 @@ def operations_only(user: dict) -> bool:
     """A form account (PIC, technician …) with nothing the portal alone has: it uses Operations, not the portal.
     Superadmins and accounts with other menus (Monitoring, Cost Control, Aggregator …) keep the portal; an account
     without any form (the outlet / hub accounts: Stock Opname and Waste) too."""
-    if user.get("role") == "superadmin":
+    if user.get("role") in ("superadmin", "outlet"):  # outlet / hub: a form never takes the portal away (Stock Opname)
         return False
     pages = set(pages_for(user))
     return any(p.startswith("form.") for p in pages) and pages <= OPERATIONS_PAGES

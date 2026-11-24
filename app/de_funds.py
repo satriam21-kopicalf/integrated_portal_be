@@ -16,6 +16,7 @@ from decimal import Decimal
 from typing import Any, Optional
 
 from app import database as db
+from app import fund_units
 from app import pengajuan as pg
 from app.damaged_equipment import P, DeError, _event as de_event, cost_items, get_row, media_root
 
@@ -120,6 +121,7 @@ def request_funds(user: dict, de_id: str, payee: dict, note: Optional[str]) -> d
                          WHERE id::text = %s""",
                      (purpose, bank, account, name, ptype, bank if ptype == "VA" else None, (note or "").strip()[:2000] or None,
                       total, total, fund_id))
+        fund_units.stamp(conn, fund_id, fund_units.unit_of_branch(row["branch_code"]))
         pg._event(conn, fund_id, user, "SUBMIT", "REVISION" if revise else "DRAFT", "SUBMITTED", None,
                   {"requested": total, "lines": len(lines), "resubmit": revise, "deRequest": row["number"]})
         de_event(conn, de_id, user, "FUND", None, "SUBMITTED", note,
@@ -281,6 +283,7 @@ def request_advance(user: dict, de_id: str, body: dict) -> dict:
             (user["id"], user["username"], user.get("full_name"), me["email"], me["department"], me["jobTitle"], tech["name"],
              row["branch_code"], row["branch_name"], purpose_id, trx["id"], acct["id"], text, amount, bank, account, name, de_id, number)
         ).fetchone()["id"]
+        fund_units.stamp(conn, pid, fund_units.unit_of_branch(row["branch_code"]))
         pg._event(conn, pid, user, "SUBMIT", "DRAFT", "SUBMITTED", None,
                   {"requested": amount, "deRequest": row["number"], "technician": tech["name"], "advance": True})
         conn.execute(f"UPDATE {P}.de_technician SET bank = %s, account_no = %s, account_name = %s, updated_at = now() WHERE id = %s",

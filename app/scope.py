@@ -38,7 +38,7 @@ SALES_PATHS = ("/api/overview", "/api/summary", "/api/transactions", "/api/live"
 # The Operations monitors too (2026-11-10): PIC Check In, Product, Outlet, WW-WR, Overview (/api/monitoring/), Damaged
 # Equipment and Fund Request, so Kopi Calf and Wasgee are never mixed there either
 COST_CONTROL_PATHS = ("/api/cost-control/", "/api/monitoring/", "/api/waste/monitor", "/api/waste/reviews", "/api/waste/daily",
-                      "/api/waste/usage", "/api/waste/investigations", "/api/de/monitor", "/api/pengajuan/monitor",
+                      "/api/waste/usage", "/api/waste/investigations", "/api/de/monitor",  # Fund Request: by unit (app/fund_units.py), not by brand
                       # 2026-11-19: Rating (GrabFood, Google Maps) and Waste vs ESB follow the brand too
                       "/api/rating/", "/api/waste/esb-compare")
 # the companies of another brand than the main one (Wasgee Tea); the other ESB companies (roastery, hubs …) are Kopi Calf

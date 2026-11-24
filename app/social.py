@@ -452,7 +452,7 @@ def posts(platform: Optional[str], q: str, sentiment_: Optional[str], d_from, d_
     if sentiment_:
         where.append("sentiment = %(se)s"); p["se"] = sentiment_
     if q.strip():
-        where.append("(text ILIKE %(q)s OR author ILIKE %(q)s)"); p["q"] = f"%{q.strip()}%"
+        where.append("(text ILIKE %(q)s OR author ILIKE %(q)s OR transcript ILIKE %(q)s)"); p["q"] = f"%{q.strip()}%"
     if keyword:
         where.append("%(kw)s = ANY(keywords)"); p["kw"] = keyword
     if who:  # the source of the Overview's media tone (channel, else author, else platform)
@@ -504,6 +504,7 @@ def post(platform: str, post_id: str) -> Optional[dict]:
             "author": r["author"], "text": r["text"], "createdAt": iso(r["created_at"]), "firstSeen": iso(r["first_seen"]),
             "lastSeen": iso(r["last_seen"]), "likes": r["likes"], "comments": r["comments"], "views": r["views"], "shares": r["shares"],
             "sentiment": r["sentiment"], "keywords": r["keywords"] or [], "raw": r["raw"] or {},
+            "transcript": r.get("transcript"), "transcriptError": r.get("transcript_error"),
             "dateApprox": (r["raw"] or {}).get("date_approx") is True}
 
 

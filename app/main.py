@@ -78,6 +78,8 @@ async def lifespan(app: FastAPI):
         outlet_cogs.warm()
         from app import social  # Social Media Analytics: the listening engine, every SOCIAL_EVERY_H hours (2026-11-23)
         social.start()
+        from app import social_transcribe  # speech to text of the TikTok videos, local Whisper (migration 138)
+        social_transcribe.start()
     yield
     db.close_pool()
 

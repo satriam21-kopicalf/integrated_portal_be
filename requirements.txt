@@ -11,3 +11,5 @@ opencv-python-headless==4.11.0.86
 reportlab==4.4.4
 openpyxl==3.1.5
 yt-dlp==2026.10.26
+faster-whisper==1.2.1
+av==15.1.0  # faster-whisper 1.2 passes metadata_errors, removed in av 16+

@@ -9,19 +9,54 @@
     POST /api/aggregator/slots                  {code, label, sort}
     GET  /api/aggregator/branch-map, PUT /api/aggregator/branch-map/{bfBranchId} {branchCode}   BotFood outlet → ours
 """
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app import aggregator
+from app import aggregator, aggregator_reports
 from app.access import require_page
 from app.utils import today
 
 router = APIRouter(prefix="/api/aggregator", tags=["aggregator insight"])
-VIEW = require_page("agg.overview", "agg.schedule")
+VIEW = require_page("agg.overview", "agg.schedule", "agg.opening", "agg.oos")
 EDIT = require_page("agg.schedule")
+OPENING = require_page("agg.opening")
+OOS = require_page("agg.oos")
+PLATFORM = Optional[str]
+
+
+def _range(d_from: Optional[date], d_to: Optional[date], days: int = 6) -> tuple[date, date]:
+    b = d_to or today()
+    a = d_from or b - timedelta(days=days)
+    if (b - a).days > 92:
+        raise HTTPException(400, "Periode maksimal 93 hari")
+    return a, b
+
+
+@router.get("/opening")
+def opening(date_from: Optional[date] = Query(None, alias="dateFrom"), date_to: Optional[date] = Query(None, alias="dateTo"),
+            platform: PLATFORM = None, _: dict = Depends(OPENING)):
+    """Opening & Closing per outlet, platform and day (according to BotFood, with the grace period)."""
+    return aggregator_reports.opening(*_range(date_from, date_to), platform)
+
+
+class Grace(BaseModel):
+    minutes: int = Field(ge=0, le=180)
+
+
+@router.put("/opening/grace")
+def set_grace(body: Grace, _: dict = Depends(OPENING)):
+    aggregator_reports.set_grace(body.minutes)
+    return {"grace": body.minutes}
+
+
+@router.get("/oos")
+def oos(date_from: Optional[date] = Query(None, alias="dateFrom"), date_to: Optional[date] = Query(None, alias="dateTo"),
+        platform: PLATFORM = None, packaging: bool = False, _: dict = Depends(OOS)):
+    """Out of Stock: out now, and how often / how long each item went out in the period."""
+    return aggregator_reports.oos(*_range(date_from, date_to), platform, packaging)
 
 
 @router.get("/status")

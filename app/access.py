@@ -79,6 +79,8 @@ PAGES: list[tuple[str, str, str]] = [
     # Aggregator Insight (2026-11-24, migration 139): the work and reports of the Aggregator team (BotFood data, handle schedule)
     ("agg.overview", "Overview", "Aggregator Insight"),
     ("agg.schedule", "Handle Schedule", "Aggregator Insight"),
+    ("agg.opening", "Opening & Closing", "Aggregator Insight"),
+    ("agg.oos", "Out of Stock", "Aggregator Insight"),
     ("cotr.check-in", "Monitoring Armada - Driver", "Calf On The Road"),
     ("cotr.storage", "Storage & Assignment", "Calf On The Road"),
     ("cotr.production", "Storage & Production", "Calf On The Road"),

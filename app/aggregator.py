@@ -29,6 +29,7 @@ BASE = "https://api.botfood.id/api/v1/"
 WIB = ZoneInfo("Asia/Jakarta")
 PAUSE = 1.5                       # between two BotFood requests
 EVERY_S = 3600                    # the global report and the new reviews
+HISTORY_S = 900                   # the change events of the day (open / close, stock), migration 140
 REVIEW_BACKFILL_TO = date(2026, 11, 1)
 LOCK_DIR = os.getenv("AGG_LOCK_DIR", "/data/media")
 
@@ -193,7 +194,9 @@ def run(kind: str) -> dict:
     """One pull, logged in agg_pull; never raises."""
     rid, rows, err = _log(kind), None, None
     try:
-        rows = {"global": pull_global, "reviews": pull_new_reviews, "backfill": backfill_one_day}[kind]()
+        from app import aggregator_reports
+        rows = {"global": pull_global, "reviews": pull_new_reviews, "backfill": backfill_one_day,
+                "histories": aggregator_reports.pull_histories}[kind]()
     except Exception as e:  # noqa: BLE001
         err = str(e)[:500]
         logger.info("aggregator %s: %s", kind, err)
@@ -203,9 +206,12 @@ def run(kind: str) -> dict:
 
 def _loop() -> None:
     time.sleep(150)
-    last = 0.0
+    last = hist = 0.0
     while True:
         try:
+            if token() and time.time() - hist >= HISTORY_S:  # today's change events: BotFood keeps only today
+                hist = time.time()
+                run("histories")
             if token() and time.time() - last >= EVERY_S:
                 last = time.time()
                 run("global")

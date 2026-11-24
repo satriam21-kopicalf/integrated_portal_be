@@ -259,9 +259,16 @@ def automatch() -> int:
         idx.setdefault(_key(o["branch_name"]), []).append(o["branch_code"])
     n = 0
     with db.transaction() as conn:
+        taken = {r["branch_code"] for r in conn.execute(f"SELECT branch_code FROM {P}.agg_branch_map WHERE branch_code IS NOT NULL").fetchall()}
         for m in conn.execute(f"SELECT bf_branch_id, bf_name FROM {P}.agg_branch_map WHERE branch_code IS NULL AND matched = 'auto'").fetchall():
             hit = idx.get(_key(m["bf_name"])) or []
+            if not hit:  # 'Kopi Calf, Kopo' ↔ 'Kopi Calf To Go Kopo Bandung', 'Mangun Jaya' ↔ 'Mangunjaya': one outlet only
+                k = _key(m["bf_name"])
+                ws = set(k.split())
+                hit = [c for kk, cs in idx.items() if kk and (kk.replace(" ", "") == k.replace(" ", "") or set(kk.split()) <= ws or ws <= set(kk.split()))
+                       for c in cs if c not in taken]
             if len(hit) == 1:
+                taken.add(hit[0])
                 conn.execute(f"UPDATE {P}.agg_branch_map SET branch_code = %s, updated_at = now() WHERE bf_branch_id = %s", (hit[0], m["bf_branch_id"]))
                 n += 1
     return n

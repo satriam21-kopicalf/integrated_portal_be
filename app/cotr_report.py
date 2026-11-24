@@ -78,6 +78,14 @@ def sheet(pool: str, d: date) -> dict:
             "armadas": armadas}
 
 
+def sheet_all(d: date) -> dict:
+    """The armadas of every active HUB, each with its pool (the pool is the one it is saved to)."""
+    pools = db.fetch(f"SELECT code, name FROM {P}.cotr_pool WHERE kind = 'parent' AND is_active ORDER BY name")
+    sheets = [(p, sheet(p["code"], d)) for p in pools]
+    return {"pool": None, "day": d.isoformat(), "menus": sheets[0][1]["menus"] if sheets else [],
+            "armadas": [{**a, "pool": p["code"], "poolName": p["name"]} for p, s in sheets for a in s["armadas"]]}
+
+
 def _row(conn, pool: str, d: date, driver: str) -> dict:
     drv = db.fetchrow(f"""SELECT d.code, d.name, d.pool_code, d.fleet_code FROM {P}.cotr_driver d WHERE d.code = %s""", (driver,))
     if not drv or drv["pool_code"] != pool:

@@ -253,7 +253,20 @@ def run_all(d_from: date, d_to: date) -> dict:
             "menus": menus, "days": sorted(days.values(), key=lambda x: x["day"])}
 
 
-def save_count(user: dict, pool: str, day: date, lines: list[dict]) -> dict:
+def revisions(pool: str, d_from: date, d_to: date) -> list[dict]:
+    """What was revised on the physical leftover of a pool (old, new, reason, by, at), the latest first."""
+    return [{"day": r["day"].isoformat(), "menu": r["menu_code"], "old": r["old_qty"], "new": r["new_qty"], "reason": r["reason"],
+             "by": r["by_name"], "at": _iso(r["created_at"])}
+            for r in db.fetch(f"""SELECT * FROM {P}.cotr_pool_revision WHERE pool_code = %s AND day BETWEEN %s AND %s
+                                  ORDER BY created_at DESC, id LIMIT 300""", (pool, d_from, d_to))]
+
+
+def changed(old: dict[str, int], new: dict[str, int]) -> dict[str, tuple[int, int]]:
+    """{menu: (old, new)} of the menus whose physical leftover differs. Pure (tested)."""
+    return {m: (old.get(m, 0), new.get(m, 0)) for m in sorted({*old, *new}) if old.get(m, 0) != new.get(m, 0)}
+
+
+def save_count(user: dict, pool: str, day: date, lines: list[dict], reason: Optional[str] = None) -> dict:
     """The physical leftover of a pool at the end of a day (Sisa Aktual Fisik) per menu and batch code; replaces the
     count of that day. The first count of a pool is its opening stock."""
     if day > today():
@@ -271,6 +284,16 @@ def save_count(user: dict, pool: str, day: date, lines: list[dict]) -> dict:
         rows.append((code, (x.get("batchNo") or "").strip().upper() or None, qty,
                      date.fromisoformat(x["expiresOn"]) if x.get("expiresOn") else None))
     with db.transaction() as conn:
+        had = {r["menu_code"]: int(r["qty"]) for r in conn.execute(
+            f"SELECT menu_code, sum(qty) AS qty FROM {P}.cotr_pool_count WHERE pool_code = %s AND day = %s GROUP BY 1", (pool, day)).fetchall()}
+        if had:  # a count changed afterwards (2026-11-24): the old figure is kept with the reason
+            new: dict[str, int] = {}
+            for code, _, qty, _ in rows:
+                new[code] = new.get(code, 0) + qty
+            for code, (a, b) in changed(had, new).items():
+                conn.execute(f"""INSERT INTO {P}.cotr_pool_revision (pool_code, day, menu_code, old_qty, new_qty, reason, by_name, created_by)
+                                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                             (pool, day, code, a, b, (reason or "").strip()[:300] or None, user.get("full_name") or user["username"], user["id"]))
         conn.execute(f"DELETE FROM {P}.cotr_pool_count WHERE pool_code = %s AND day = %s", (pool, day))
         for code, batch, qty, exp in rows:
             conn.execute(f"""INSERT INTO {P}.cotr_pool_count (pool_code, day, menu_code, batch_no, qty, expires_on, created_by)

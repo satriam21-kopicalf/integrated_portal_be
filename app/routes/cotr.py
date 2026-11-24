@@ -722,6 +722,7 @@ class CountIn(BaseModel):
     pool: str = Field(min_length=1, max_length=40)
     day: date
     lines: list[CountLine] = Field(max_length=500)
+    reason: Optional[str] = Field(None, max_length=300)  # why a saved count is revised
 
 
 class MovesIn(BaseModel):
@@ -748,10 +749,16 @@ def pool_ledger(pool: Optional[str] = None, dateFrom: Optional[date] = None, dat
 @router.put("/pool-count")
 def pool_count(body: CountIn, request: Request, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
     _check_pool(user, body.pool)
-    out = _call(cotr_ledger.save_count, user, body.pool, body.day, [x.model_dump(mode="json") for x in body.lines])
+    out = _call(cotr_ledger.save_count, user, body.pool, body.day, [x.model_dump(mode="json") for x in body.lines], body.reason)
     _log(request, user, "cotr.pool-count", f"COTR sisa aktual {body.pool} {body.day}: {sum(x.qty for x in body.lines)} cup",
-         {"pool": body.pool, "day": body.day.isoformat()})
+         {"pool": body.pool, "day": body.day.isoformat(), "reason": body.reason})
     return out
+
+
+@router.get("/pool-revisions")
+def pool_revisions(pool: str, dateFrom: date, dateTo: date, user: dict = Depends(require_page("cotr.storage", "cotr.production"))):
+    _check_pool(user, pool)
+    return {"data": _call(cotr_ledger.revisions, pool, dateFrom, dateTo)}
 
 
 class SheetProductsIn(BaseModel):
@@ -770,11 +777,14 @@ class SheetMoneyIn(BaseModel):
 
 
 @router.get("/report-sheet")
-def report_sheet(pool: str, day: date, user: dict = Depends(require_page("cotr.storage", "cotr.finance", "cotr.production"))):
+def report_sheet(day: date, pool: Optional[str] = None, user: dict = Depends(require_page("cotr.storage", "cotr.finance", "cotr.production"))):
     """Migration 134: Report Armada of a pool and day as the sheet (products by the storage, money by the office)."""
     from app import cotr_report
-    _check_pool(user, pool)
-    out = _call(cotr_report.sheet, pool, day)
+    own = None if _office(user) else _bound_pool(user)
+    pool = pool or own  # none = every pool (2026-11-24)
+    if pool:
+        _check_pool(user, pool)
+    out = _call(cotr_report.sheet, pool, day) if pool else _call(cotr_report.sheet_all, day)
     return out | {"canProducts": has_page(user, "cotr.storage"), "canMoney": _office(user)}
 
 

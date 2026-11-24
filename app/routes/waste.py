@@ -43,7 +43,7 @@ from app import activity, branch_groups, waste
 from app.access import deny, has_page, require_page
 from app.activity import client_ip
 from app.routes.auth import current_user
-from app.scope import NO_BRANCH, allowed_branches, scoped_branch
+from app.scope import NO_BRANCH, allowed_branches, scoped_branch, in_scope
 from app.utils import parse_branches, today
 from app.thumbs import image_response
 
@@ -127,6 +127,15 @@ def _refuse(exc: Exception):
 def entries(branch: Optional[str] = None, day: Optional[date] = Query(None, alias="date"),
             user: dict = Depends(require_page("waste"))) -> dict:
     return waste.form(user, branch, day)
+
+
+@router.get("/entries/{entry_id}/corrections")
+def own_corrections(entry_id: str, user: dict = Depends(require_page("waste"))) -> dict:
+    """What Cost Control corrected on an entry, for the place it belongs to (2026-11-24)."""
+    row = waste.photo_of(entry_id)
+    if row is None or not in_scope(row["branch_code"]):
+        raise HTTPException(404, detail="Waste tidak ditemukan")
+    return {"data": waste.corrections(entry_id)}
 
 
 @router.get("/stock")

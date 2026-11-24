@@ -14,6 +14,9 @@ needs a look, scanned in the background every SCAN_S seconds:
     fund_proof personal (2026-11-24, migration 147): the proof of a Fund Request past its due day, to its requester (again
                every 3 days) and one summary a day to whoever verifies it; gone once the proof is sent
 
+    so_recount, so_fix, waste_fix   personal, every PERSONAL_S (2026-11-24): the outlet / PIC accounts of a place are told when
+               Cost Control asks for a recount (gone once sent again) or corrects a figure of their SO or waste
+
 `dedup` makes a scan harmless to repeat (several workers, a restart). Who opens Good Receipt or COGS & Usage sees the
 bell; each user marks alerts read for themselves. Alerts older than KEEP_DAYS are deleted.
 """
@@ -33,6 +36,8 @@ P = "integration_portal"
 T, T_READ = f"{P}.cc_alert", f"{P}.cc_alert_read"
 PAGES = ("cc.goods-receipt", "cc.cogs", "cc.info", "cc.purchase-plan", "cc.ratio", "cc.sales-calc", "cc.reviews", "cc.waste-review")
 SCAN_S = 1800
+PERSONAL_S = 300
+PIC_PLACES = 3       # an account of more places (area, team) is not told of every outlet
 FIRST_SCAN_S = 90
 LOOK_BACK = 3        # days of documents scanned for the per-line alerts
 SHORT = 0.5          # a GR line below half of its PO
@@ -190,6 +195,78 @@ def overdue_proofs(today: date) -> list[dict]:
     return fund_proofs(rows, payers, today)
 
 
+def outlet_notices(recounts: list[dict], fixes: list[dict], wastes: list[dict], people: dict[str, list[str]]) -> list[dict]:
+    """The notices of the places to their accounts. Pure (tested): `people` = place code to its accounts."""
+    out: list[dict] = []
+
+    def tell(place: str, a: dict) -> None:
+        for u in people.get(place, []):
+            out.append({**a, "dedup": f"{a['dedup']}:{u}", "branch": place, "user": u})
+    for r in recounts:
+        tell(r["place"], {"dedup": f"so_recount:{r['id']}:{r['at']}", "kind": "so_recount", "severity": "high", "doc": r["number"],
+                          "title": f"Hitung ulang SO {r['day']:%d/%m/%Y}",
+                          "body": f"{r['name']}: Cost Control meminta hitung ulang" + (f" · “{r['note']}”" if r.get("note") else ""),
+                          "link": f"/stock-opname/{r['id']}"})
+    for r in fixes:
+        items = "; ".join(r["items"][:4]) + (f" … (+{len(r['items']) - 4})" if len(r["items"]) > 4 else "")
+        tell(r["place"], {"dedup": f"so_fix:{r['id']}:{r['at']}", "kind": "so_fix", "severity": "info", "doc": r["number"],
+                          "title": f"SO {r['day']:%d/%m/%Y} dikoreksi Cost Control ({len(r['items'])} item)",
+                          "body": f"{r['name']}: {items}", "link": f"/stock-opname/{r['id']}"})
+    groups: dict[tuple, list[dict]] = {}
+    for r in wastes:  # one notice per place, day of the waste and day of the correction
+        groups.setdefault((r["place"], r["day"], r["on"]), []).append(r)
+    for (place, day, on), rs in groups.items():
+        items = "; ".join(f"{r['item']} {r['field']}: {r['old']} → {r['new']}" for r in rs[:3]) + (f" … (+{len(rs) - 3})" if len(rs) > 3 else "")
+        tell(place, {"dedup": f"waste_fix:{place}:{day}:{on}:{len(rs)}", "kind": "waste_fix", "severity": "info", "doc": None,
+                     "title": f"Waste {day:%d/%m/%Y} dikoreksi Cost Control ({len(rs)})", "body": items, "link": "/waste"})
+    return out
+
+
+def _outlet_rows() -> tuple[list[dict], list[dict], list[dict], dict[str, list[str]]]:
+    place = f"""coalesce(b.branch_code, f.code)"""
+    joins = f"""JOIN kc_master.facility f ON f.id = c.facility_id
+                LEFT JOIN kc_master.facility_esb_map m ON m.facility_id = c.facility_id
+                LEFT JOIN {SCHEMA}.master_branches b ON b.company_code = m.company_code AND b.branch_id::text = m.esb_id"""
+    recounts = [{**r, "at": r["at"].isoformat() if r["at"] else ""} for r in db.fetch(
+        f"""SELECT c.id::text, c.number, c.business_date AS day, c.reviewed_at AS at, c.review_note AS note, f.name, {place} AS place
+              FROM kc_inventory.stock_count c {joins}
+             WHERE c.status = 'RECOUNT_REQUESTED' AND c.business_date > current_date - 45""")]
+    fixes: dict[str, dict] = {}
+    for r in db.fetch(
+            f"""SELECT c.id::text, c.number, c.business_date AS day, f.name, {place} AS place, i.name AS item, l.qty_base AS new, o.qty_base AS old,
+                       l.base_uom AS unit, l.corrected_at AS at, l.correction_note AS note
+                  FROM kc_inventory.stock_count_line l JOIN kc_inventory.stock_count c ON c.id = l.count_id {joins}
+                  JOIN kc_master.item i ON i.id = l.item_id LEFT JOIN kc_inventory.stock_count_line o ON o.id = l.recount_of
+                 WHERE l.is_current AND l.corrected_at > now() - interval '1 day' ORDER BY l.corrected_at"""):
+        # one notice per count and hour of corrections
+        x = fixes.setdefault(f"{r['id']}:{r['at']:%Y%m%d%H}", {**r, "at": f"{r['at']:%Y%m%d%H}", "items": []})
+        x["items"].append(f"{r['item']} {_num(float(r['old'])) + ' → ' if r['old'] is not None else ''}{_num(float(r['new'] or 0))} {r['unit']}"
+                          + (f" ({r['note']})" if r["note"] else ""))
+    wastes = db.fetch(
+        f"""SELECT x.id::text, e.branch_code AS place, e.business_date AS day, e.item_name AS item, x.field, x.old_value AS old, x.new_value AS new,
+                   x.reason, x.by_name AS by,
+                   (x.created_at AT TIME ZONE 'Asia/Jakarta')::date AS "on"
+              FROM {P}.waste_correction x JOIN {P}.waste_entry e ON e.id = x.entry_id WHERE x.created_at > now() - interval '1 day'""")
+    codes = sorted({r["place"] for r in (*recounts, *fixes.values(), *wastes) if r["place"]})
+    people: dict[str, list[str]] = {}
+    if codes:
+        for r in db.fetch(f"""SELECT ub.branch_code AS b, u.id::text AS u FROM {P}.user_branch ub JOIN {P}.user_account u ON u.id = ub.user_id
+                               WHERE u.is_active AND ub.branch_code = ANY(%s) AND (u.role = 'outlet' OR (u.role = 'user' AND
+                                     (SELECT count(*) FROM {P}.user_branch x WHERE x.user_id = u.id) <= %s))""", (codes, PIC_PLACES)):
+            people.setdefault(r["b"], []).append(r["u"])
+    return recounts, list(fixes.values()), wastes, people
+
+
+def scan_outlets() -> int:
+    rows = _outlet_rows()
+    found, added = outlet_notices(*rows), 0
+    with db.transaction() as conn:
+        for a in found:
+            added += _add(conn, a)
+        conn.execute(f"DELETE FROM {T} WHERE kind = 'so_recount' AND NOT (doc_num = ANY(%s))", (sorted(r["number"] for r in rows[0]),))
+    return added
+
+
 def _health(today: date, hour: int) -> list[dict]:
     """The daily alerts of the Pusat Informasi (app/data_health.py): ESB not synced, outlets without SO or waste report,
     materials without a price, menus without a card, Transfer Stock not finished (2026-11-13)."""
@@ -229,14 +306,21 @@ def scan(now: Optional[datetime] = None) -> dict:
 
 def _loop() -> None:
     time.sleep(FIRST_SCAN_S)
+    last = 0.0
     while True:
         try:
-            out = scan()
-            if out.get("added"):
-                logger.info("alerts: %s new", out["added"])
+            scan_outlets()
         except Exception:  # noqa: BLE001 - the bell is extra: never stop the worker
-            logger.exception("alerts: scan failed")
-        time.sleep(SCAN_S)
+            logger.exception("alerts: outlet notices failed")
+        if time.monotonic() - last >= SCAN_S or not last:
+            last = time.monotonic()
+            try:
+                out = scan()
+                if out.get("added"):
+                    logger.info("alerts: %s new", out["added"])
+            except Exception:  # noqa: BLE001
+                logger.exception("alerts: scan failed")
+        time.sleep(PERSONAL_S)
 
 
 def start() -> None:

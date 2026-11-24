@@ -1012,6 +1012,9 @@ def _report(d_from: date, d_to: date, branches: Optional[list[str]], horizon: in
 # quantity at the end of its day.
 
 PORTAL_SO_FROM = date(2026, 10, 28)
+# the daily packaging count (since 8 Nov 2026) holds ~55 items, not the raw materials: read as a stock opname it made every
+# item outside it 0 (Stock List, MRP, transfers, the estimate of the Weekly SO). Only the weekly / monthly counts (2026-11-24).
+PARTIAL_COUNTS = ("DAILY_PACKAGING",)
 LIVE_COUNTS = ("SUBMITTED", "RECOUNT_REQUESTED", "APPROVED", "EXPORTED")
 UNIT_FACTOR = {("KG", "GR"): 1000, ("KG", "G"): 1000, ("L", "ML"): 1000, ("LTR", "ML"): 1000, ("LITER", "ML"): 1000}
 
@@ -1045,11 +1048,11 @@ def portal_counts(day: date, branches: Optional[list[str]], back: int = 1, ahead
               JOIN kc_inventory.stock_count_line l ON l.count_id = c.id AND l.is_current
                    AND (l.qty_base IS NOT NULL OR coalesce(l.qty_wip, 0) > 0)
               JOIN kc_master.item it ON it.id = l.item_id
-             WHERE c.status = ANY(%(live)s) AND c.business_date BETWEEN %(lo)s AND %(hi)s
+             WHERE c.status = ANY(%(live)s) AND c.business_date BETWEEN %(lo)s AND %(hi)s AND c.count_type <> ALL(%(partial)s)
                AND (b.branch_code IS NOT NULL OR fa.code = ANY(%(test)s))
                AND (%(br)s::text[] IS NULL OR coalesce(b.branch_code, fa.code) = ANY(%(br)s))
              GROUP BY 1, 2, 3, 4, 5, 6, 7""",
-        {"live": list(LIVE_COUNTS), "lo": lo, "hi": hi, "br": branches, "test": list(test_branches.sources())})
+        {"live": list(LIVE_COUNTS), "partial": list(PARTIAL_COUNTS), "lo": lo, "hi": hi, "br": branches, "test": list(test_branches.sources())})
     if branches is None:  # every branch: the test branches stay out of the real figures (app/test_branches.py)
         rows = [r for r in rows if not test_branches.is_test(r["branch_code"])]
     best: dict[str, date] = {}

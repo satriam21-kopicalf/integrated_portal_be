@@ -54,9 +54,10 @@ def set_grace(body: Grace, _: dict = Depends(OPENING)):
 
 @router.get("/oos")
 def oos(date_from: Optional[date] = Query(None, alias="dateFrom"), date_to: Optional[date] = Query(None, alias="dateTo"),
-        platform: PLATFORM = None, packaging: bool = False, _: dict = Depends(OOS)):
+        platform: PLATFORM = None, packaging: bool = False, stale_days: int = Query(14, alias="staleDays", ge=1, le=365),
+        _: dict = Depends(OOS)):
     """Out of Stock: out now, and how often / how long each item went out in the period."""
-    return aggregator_reports.oos(*_range(date_from, date_to), platform, packaging)
+    return aggregator_reports.oos(*_range(date_from, date_to), platform, packaging, stale_days)
 
 
 @router.get("/status")

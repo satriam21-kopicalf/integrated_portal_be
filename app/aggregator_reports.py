@@ -312,7 +312,7 @@ def _cat(c: Optional[str]) -> str:
     return c
 
 
-def oos(d_from: date, d_to: date, channel: Optional[str] = None, packaging: bool = False) -> dict:
+def oos(d_from: date, d_to: date, channel: Optional[str] = None, packaging: bool = False, stale_days: int = 14) -> dict:
     """Out now per outlet / platform / category, and per item in the period: how often it went out, for how long."""
     chans = {c["id"]: c for c in _channels() if not channel or c["channel"] == channel}
     now = datetime.now(WIB)
@@ -323,12 +323,16 @@ def oos(d_from: date, d_to: date, channel: Optional[str] = None, packaging: bool
         return packaging or "PACKAGING" not in cat
 
     current = []
+    stale = 0  # inactive for longer than stale_days: a menu switched off, not an item out of stock
     cats: dict[tuple[int, str], str] = {}
     for i in db.fetch(f"SELECT channel_id, name, category, in_stock, last_not_active_at FROM {P}.agg_item"):
         cat = _cat(i["category"])
         cats[(i["channel_id"], i["name"].lower())] = cat
         c = chans.get(i["channel_id"])
         if c and i["in_stock"] is False and keep(cat):
+            if i["last_not_active_at"] and (now - i["last_not_active_at"].astimezone(WIB)).days > stale_days:
+                stale += 1
+                continue
             current.append({"outlet": c["branch_name"] or c["name"], "branchCode": c["branch_code"], "platform": c["channel"], "category": cat,
                             "item": i["name"], "since": i["last_not_active_at"].isoformat() if i["last_not_active_at"] else None})
     ev = db.fetch(f"""SELECT channel_id, item_name, in_stock, remarks, at FROM {P}.agg_stock_event
@@ -373,7 +377,7 @@ def oos(d_from: date, d_to: date, channel: Optional[str] = None, packaging: bool
         by_cat[r["category"]] += 1
     first = db.fetchrow(f"SELECT min(at) AS a FROM {P}.agg_stock_event")["a"]
     return {
-        "summary": {"outNow": len(current), "outletsWithOos": len(by_outlet), "itemsInPeriod": len(items),
+        "summary": {"outNow": len(current), "inactiveLong": stale, "staleDays": stale_days, "outletsWithOos": len(by_outlet), "itemsInPeriod": len(items),
                     "timesInPeriod": sum(r["times"] for r in items), "minutesInPeriod": sum(r["minutes"] for r in items),
                     "dataFrom": first.isoformat() if first else None},
         "byCategory": sorted(({"category": k, "n": v} for k, v in by_cat.items()), key=lambda r: -r["n"]),

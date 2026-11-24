@@ -659,6 +659,15 @@ def set_unit_payer(code: str, body: PayerIn, request: Request, user: dict = Depe
     return {"units": out}
 
 
+@router.get("/api/pengajuan/units")
+def my_units(user: dict = Depends(current_user)) -> dict:
+    """The units the account reads in the monitoring (the brand switch of the portal)."""
+    if not has_page(user, MON):
+        return {"data": []}
+    mine = fund_units.monitors(user)
+    return {"data": [{"code": u["code"], "name": u["name"]} for u in fund_units.units() if mine is None or u["code"] in mine]}
+
+
 class ReceiversIn(BaseModel):
     payer: str = Field(min_length=1, max_length=80)
     userIds: List[str] = Field(default_factory=list, max_length=50)

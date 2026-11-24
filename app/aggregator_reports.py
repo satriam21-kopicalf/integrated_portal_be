@@ -108,13 +108,14 @@ def pull_daily(day: date) -> int:
     return n
 
 
-def pull_daily_due() -> Optional[int]:
-    """Yesterday's report, once BotFood has made it (after 05:00 WIB) and while it is not kept yet."""
+def daily_due() -> bool:
+    """Yesterday's report: once BotFood has made it (after 05:00 WIB) and while it is not kept yet."""
     now = datetime.now(WIB)
-    y = (now - timedelta(days=1)).date()
-    if now.hour < 5 or db.fetchrow(f"SELECT 1 FROM {P}.agg_daily WHERE day = %s LIMIT 1", (y,)):
-        return None
-    return pull_daily(y)
+    return now.hour >= 5 and not db.fetchrow(f"SELECT 1 FROM {P}.agg_daily WHERE day = %s LIMIT 1", ((now - timedelta(days=1)).date(),))
+
+
+def pull_daily_due() -> Optional[int]:
+    return pull_daily((datetime.now(WIB) - timedelta(days=1)).date()) if daily_due() else None
 
 
 DAILY_FROM = date(2026, 1, 1)

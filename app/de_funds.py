@@ -8,8 +8,8 @@ flow management sets for its kind in Configurations, then Finance pays it.
   * gate(): a request with an estimated cost does not start (In progress / Ordered) before its fund is approved.
   * a REVISION from Finance: the team corrects the cost lines and asks again; the same pengajuan is sent again and its
     approvals start over. A REJECTED fund: the team asks a new one.
-  * settle() at Done: actual cost − the fund (paid, else approved). More: a top-up pengajuan (settles_id → the fund)
-    with the difference. Less, once paid: the fund gets refund_amount and Finance confirms the money back (REFUNDED).
+  * settle() at Done: a paid fund goes to Verifikasi with what its cost lines really cost (the technicians' labour is not
+    part of the fund); Finance settles the difference in the same request (app/fund_lifecycle.py, migration 144).
 Every step of the fund is an event on the request's timeline too.
 """
 from decimal import Decimal
@@ -23,7 +23,7 @@ FUND_KIND = {"REPAIR": "MAINTENANCE", "PROCUREMENT": "PROCUREMENT"}
 CATEGORY = {"MATERIAL": "MATERIAL", "SERVICE": "SERVICE", "TRANSPORT": "TRANSPORT", "OTHER": "OTHER"}
 ASK_FROM = ("ACCEPTED", "IN_PROGRESS", "ORDERED", "ON_HOLD")  # after the team accepted the request, before the handover
 GATED = ("IN_PROGRESS", "ORDERED")
-CLEARED = ("APPROVED", "PAID")
+CLEARED = ("APPROVED", "PAID", "VERIFYING", "DONE")
 
 
 def _money(v: Any) -> Decimal:
@@ -163,6 +163,12 @@ def settlement(fund_amount: Decimal, actual: Decimal, paid: bool) -> tuple[str, 
     return "EVEN", Decimal(0)
 
 
+def spent_on_lines(de_id: str) -> Optional[Decimal]:
+    """What the cost lines really cost: the fund pays the lines, never the labour. None while no line has its actual."""
+    vals = [c["actualAmount"] for c in cost_items(de_id) if c["actualAmount"] is not None]
+    return sum((_money(v) for v in vals), Decimal(0)) if vals else None
+
+
 def settle(conn, row: dict, user: dict) -> Optional[dict]:
     """At Done (2026-11-24, migration 144): the request is finished — its handover done, so the goods received / the work
     done — and its invoices are on it: a fund already paid (In Progress) goes to Verifikasi with the actual cost as the amount
@@ -173,20 +179,19 @@ def settle(conn, row: dict, user: dict) -> Optional[dict]:
                               AND status IN ('APPROVED', 'PAID')""", (row["id"],)).fetchone()
     if fund is None:
         return None
-    actual = _money(row.get("actual_cost"))
+    actual = spent_on_lines(row["id"])  # None: Finance sets the accepted amount when verifying
+    num = float(actual) if actual is not None else None
     if fund["status"] == "APPROVED":
         pg._event(conn, fund["id"], user, "NOTE", None, None,
-                  f"{row['number']} selesai, biaya aktual Rp {actual:,.0f}: setelah dibayar, bukti dikirim untuk verifikasi".replace(",", "."),
-                  {"actual": actual})
-        de_event(conn, row["id"], user, "FUND", None, "DONE_UNPAID", None, {"fund": fund["number"], "actual": float(actual)})
-        return {"kind": "UNPAID", "amount": float(actual)}
+                  f"{row['number']} selesai: setelah dana dibayar, bukti dikirim untuk verifikasi", {"actual": num})
+        return {"kind": "UNPAID", "amount": num}
     from app import fund_lifecycle
-    diff = fund_lifecycle.difference(fund["paid_amount"], fund["topup_amount"], actual)
+    diff = fund_lifecycle.difference(fund["paid_amount"], fund["topup_amount"], actual) if actual is not None else None
     conn.execute(f"""UPDATE {P}.pengajuan SET status = 'VERIFYING', actual_amount = %s, actual_note = %s, proof_submitted_at = now(),
                          updated_at = now() WHERE id::text = %s""", (actual, f"Biaya aktual {row['number']} (selesai)", fund["id"]))
     pg._event(conn, fund["id"], user, "PROOF", "PAID", "VERIFYING", None, {"actual": actual, "difference": diff, "deRequest": row["number"]})
-    de_event(conn, row["id"], user, "FUND", "PAID", "VERIFYING", None, {"fund": fund["number"], "actual": float(actual), "difference": float(diff)})
-    return {"kind": "VERIFYING", "amount": float(diff), "fundId": fund["id"]}
+    de_event(conn, row["id"], user, "FUND", "PAID", "VERIFYING", None, {"fund": fund["number"], "actual": num})
+    return {"kind": "VERIFYING", "amount": num, "fundId": fund["id"]}
 
 
 def send_proof(user: dict, de_id: str) -> dict:
@@ -199,8 +204,11 @@ def send_proof(user: dict, de_id: str) -> dict:
         raise DeError("Bukti dikirim setelah dana dicairkan Finance")
     if row["status"] not in ("HANDOVER", "DONE"):
         raise DeError("Kirim bukti setelah serah terima: barang diterima / pekerjaan selesai")
+    actual = spent_on_lines(de_id)
+    if actual is None:
+        raise DeError("Isi harga aktual di baris biaya dulu (Biaya & invoice)")
     attach_quotes(user, de_id, fund["id"], kind="PROOF")
-    fund_lifecycle.submit_proof(user, fund["id"], row.get("actual_cost") or row.get("est_cost"),
+    fund_lifecycle.submit_proof(user, fund["id"], actual,
                                 f"Biaya aktual {row['number']}", by_team=True)
     return de.team_full(de_id)
 
@@ -216,13 +224,13 @@ def advance_purpose() -> Optional[int]:
 
 def advances_of(de_id: str) -> list[dict]:
     """The technicians' advances of a request, each with its settlement (Laporan Penyelesaian) when there is one."""
-    rows = db.fetch(f"""SELECT p.id::text, p.number, p.status, p.requester_name, p.requested_amount, p.approved_amount, p.paid_amount,
+    rows = db.fetch(f"""SELECT p.id::text, p.user_id::text, p.number, p.status, p.requester_name, p.requested_amount, p.approved_amount, p.paid_amount,
                                p.created_at, s.number AS settle_number, s.status AS settle_status, s.requested_amount AS settle_amount
                         FROM {P}.pengajuan p
                         LEFT JOIN LATERAL (SELECT number, status, requested_amount FROM {P}.pengajuan x
                                            WHERE x.settles_id = p.id AND x.status <> 'REJECTED' ORDER BY x.created_at DESC LIMIT 1) s ON true
                         WHERE p.de_request_id::text = %s AND p.kind = 'PERSONAL' ORDER BY p.created_at""", (de_id,))
-    return [{"id": r["id"], "number": r["number"], "status": r["status"], "statusLabel": pg.STATUS_LABEL[r["status"]],
+    return [{"id": r["id"], "userId": r["user_id"], "number": r["number"], "status": r["status"], "statusLabel": pg.STATUS_LABEL[r["status"]],
              "technician": r["requester_name"], "amount": pg._num(r["requested_amount"]), "approvedAmount": pg._num(r["approved_amount"]),
              "paidAmount": pg._num(r["paid_amount"]), "settlement": {"number": r["settle_number"], "status": r["settle_status"],
              "statusLabel": pg.STATUS_LABEL[r["settle_status"]], "amount": pg._num(r["settle_amount"])} if r["settle_number"] else None}

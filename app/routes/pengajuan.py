@@ -155,7 +155,7 @@ def new_request(body: NewIn, request: Request, user: dict = Depends(current_user
 
 @router.get("/api/pengajuan/requests/{pengajuan_id}")
 def get_request(pengajuan_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
-    _need(request, user, FORM)
+    _need(request, user, *PROOF_PAGES)
     _run(pg.own, user, pengajuan_id)
     return pg.full(pengajuan_id)
 

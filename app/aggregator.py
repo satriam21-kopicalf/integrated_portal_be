@@ -205,7 +205,13 @@ def run(kind: str) -> dict:
     return {"kind": kind, "rows": rows, "error": err}
 
 
+def _backfill_open(key: str, to: date) -> bool:
+    r = db.fetchrow(f"SELECT value FROM {P}.agg_state WHERE key = %s", (key,))
+    return bool(r and r["value"] and date.fromisoformat(r["value"]) >= to)
+
+
 def _loop() -> None:
+    from app import aggregator_reports
     time.sleep(150)
     last = hist = 0.0
     while True:
@@ -217,16 +223,12 @@ def _loop() -> None:
                 last = time.time()
                 run("global")
                 run("reviews")
-                run("daily")
-            if token():
+                if aggregator_reports.daily_due():
+                    run("daily")
+            if token() and _backfill_open("review_backfill_day", REVIEW_BACKFILL_TO):
+                run("backfill")
+            if token() and _backfill_open("daily_backfill_day", aggregator_reports.DAILY_FROM):
                 run("daily_backfill")
-                run("daily")
-            if token():
-                run("daily_backfill")
-            elif token():
-                if run("backfill")["rows"] is None and db.fetchrow(
-                        f"SELECT 1 FROM {P}.agg_state WHERE key = 'review_backfill_day' AND value < %s", (REVIEW_BACKFILL_TO.isoformat(),)):
-                    time.sleep(600)  # the backfill is complete
         except Exception as e:  # noqa: BLE001 - the loop never dies
             logger.warning("aggregator loop: %s", e)
         time.sleep(30)

@@ -43,7 +43,12 @@ def _rule_view(r: Optional[dict]) -> dict:
 
 
 def rule_for(row: dict) -> dict:
-    return _rule_view(db.fetchrow(f"SELECT * FROM {P}.fund_rule WHERE key = %s", (rule_key(row),)))
+    r = db.fetchrow(f"SELECT * FROM {P}.fund_rule WHERE key = %s", (rule_key(row),))
+    if r is None and row.get("kind") == "PERSONAL":  # a Keperluan Dana made later: a Cash in Advance always owes its proof
+        from app import fund_options
+        o = fund_options.get(row.get("purpose_id")) or {}
+        return {**DEFAULT_RULE, "proofAfter": (o.get("settings") or {}).get("type") == "ADVANCE"}
+    return _rule_view(r)
 
 
 def rules() -> list[dict]:
@@ -106,6 +111,15 @@ def after_paid(rule: dict, paid_on: date) -> tuple[str, Optional[date]]:
 def difference(paid: Any, topup: Any, accepted: Any) -> Decimal:
     """accepted − what went out (paid + the shortfall paid on top): > 0 Finance still owes, < 0 money to come back."""
     return _money(accepted) - (_money(paid) + _money(topup))
+
+
+def outstanding(paid: Any, topup: Any, refunded: Any, accepted: Any) -> Decimal:
+    """What is still to settle: accepted − (paid + shortfall paid − money already back)."""
+    return _money(accepted) - (_money(paid) + _money(topup) - _money(refunded))
+
+
+def _refunded(row: dict) -> Any:
+    return row.get("refund_amount") if row.get("refunded_at") else None
 
 
 def missing_proof(rule: dict, files: list[dict], actual: Any) -> list[str]:
@@ -171,10 +185,13 @@ def submit_proof(user: dict, pengajuan_id: str, actual: Any, note: Optional[str]
         raise LookupError("Pengajuan tidak ditemukan")
     if row["status"] != "PAID":
         raise LifecycleError("Bukti dikirim saat dana sudah cair dan belum diverifikasi")
+    if row["kind"] in pg.DE_KINDS and not by_team:
+        raise LifecycleError("Bukti dana Maintenance & Procurement dikirim dari request-nya, setelah barang diterima / pekerjaan selesai")
     amount = None if actual in (None, "") else _money(actual)
     if amount is not None and (amount < 0 or amount > Decimal("1000000000000")):
         raise LifecycleError("Nominal terpakai tidak valid")
-    todo = missing_proof(rule_for(row), pg.files_of(pengajuan_id), amount)
+    # the team's fund: the goods received / work done is the handover of its request, the files asked are its invoices
+    todo = missing_proof({} if by_team else rule_for(row), pg.files_of(pengajuan_id), amount)
     if todo:
         raise LifecycleError("Belum bisa dikirim: " + "; ".join(todo))
     note = (note or "").strip()[:2000] or None
@@ -200,7 +217,7 @@ def verify(user: dict, pengajuan_id: str, action: str, amount: Any, note: Option
         raise PermissionError("Verifikasi bukti oleh tahap pembayaran Finance")
     note = (note or "").strip()[:2000] or None
     accepted = row["verified_amount"] if row.get("verified_amount") is not None else row.get("actual_amount")
-    diff = difference(row["paid_amount"], row.get("topup_amount"), accepted)
+    diff = outstanding(row["paid_amount"], row.get("topup_amount"), _refunded(row), accepted)
     actor = pg._actor(user)
     waiting_refund = False
     with db.transaction() as conn:
@@ -210,7 +227,8 @@ def verify(user: dict, pengajuan_id: str, action: str, amount: Any, note: Option
                 raise LifecycleError("Isi nominal yang diakui Finance")
             if not note:
                 raise LifecycleError("Tulis alasan penyesuaian")
-            conn.execute(f"""UPDATE {P}.pengajuan SET verified_amount = %s, verified_note = %s, updated_at = now() WHERE id::text = %s""",
+            conn.execute(f"""UPDATE {P}.pengajuan SET verified_amount = %s, verified_note = %s, updated_at = now(),
+                             refund_amount = CASE WHEN refunded_at IS NULL THEN NULL ELSE refund_amount END WHERE id::text = %s""",
                          (value, note, pengajuan_id))
             pg._event(conn, pengajuan_id, user, "VERIFY", "VERIFYING", "VERIFYING", note,
                       {"action": "ADJUST", "from": accepted, "to": value, "difference": difference(row["paid_amount"], row.get("topup_amount"), value)})
@@ -236,12 +254,14 @@ def verify(user: dict, pengajuan_id: str, action: str, amount: Any, note: Option
             if diff > 0:
                 raise LifecycleError(f"Masih ada kekurangan Rp {diff:,.0f}: bayar kekurangannya dulu".replace(",", "."))
             if diff < 0:
+                if row.get("refunded_at"):
+                    raise LifecycleError(f"Pengembalian masih kurang Rp {-diff:,.0f}: sesuaikan nominal yang diakui".replace(",", "."))
                 if row.get("refund_amount") is None:
                     conn.execute(f"UPDATE {P}.pengajuan SET refund_amount = %s, updated_at = now() WHERE id::text = %s", (-diff, pengajuan_id))
                     pg._event(conn, pengajuan_id, user, "NOTE", None, None,
                               f"Sisa dana Rp {-diff:,.0f} dikembalikan; Done setelah bukti pengembalian dikonfirmasi".replace(",", "."), {"refund": -diff})
                     waiting_refund = True
-                elif not row.get("refunded_at"):
+                else:
                     raise LifecycleError("Konfirmasi dulu bukti pengembalian sisa dana")
             if not waiting_refund:
                 _close(conn, row, user, actor, pengajuan_id, accepted, diff, note)
@@ -274,6 +294,8 @@ def view_fields(row: dict) -> dict:
         "verifiedAt": row["verified_at"].isoformat() if row.get("verified_at") else None, "verifiedBy": row.get("verified_by"),
         "doneAt": row["done_at"].isoformat() if row.get("done_at") else None,
         "topupAmount": num(row.get("topup_amount")), "topupPaidAt": row["topup_paid_at"].isoformat() if row.get("topup_paid_at") else None,
-        "difference": num(difference(row.get("paid_amount"), row.get("topup_amount"), accepted)) if accepted is not None and row.get("paid_amount") is not None else None,
+        "difference": num(difference(row.get("paid_amount"), None, accepted)) if accepted is not None and row.get("paid_amount") is not None else None,
+        "outstanding": num(outstanding(row.get("paid_amount"), row.get("topup_amount"), _refunded(row), accepted))
+        if accepted is not None and row.get("paid_amount") is not None else None,
         "payeeType": row.get("payee_type") or "BANK", "vaProvider": row.get("va_provider"), "invoiceNo": row.get("invoice_no"),
     }

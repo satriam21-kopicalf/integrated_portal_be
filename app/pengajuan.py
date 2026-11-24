@@ -354,7 +354,7 @@ def current_step(row: dict, steps: Optional[list[dict]] = None) -> Optional[dict
     if row["status"] == "SUBMITTED":
         appr = _approvals(steps)
         return appr[min(max(row["approval_step"], 1), len(appr)) - 1] if appr else None
-    if row["status"] == "APPROVED":
+    if row["status"] in ("APPROVED", "VERIFYING"):  # Finance: the payment, then the proof
         return _pay(steps)
     return None
 
@@ -840,7 +840,7 @@ def discard(user: dict, pengajuan_id: str) -> None:
 # ---------------------------------------------------------------- team (mon.pengajuan)
 
 def allowed_next(user: dict, row: dict, steps: Optional[list[dict]] = None) -> list[str]:
-    if not takes(user, current_step(row, steps)):
+    if row["status"] not in ("SUBMITTED", "APPROVED") or not takes(user, current_step(row, steps)):
         return []
     return ["APPROVE", "REVISION", "REJECTED"] if row["status"] == "SUBMITTED" else ["PAID", "REVISION"]
 
@@ -982,11 +982,13 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]]) -> di
     rows = db.fetch(f"SELECT {COLS} FROM {P}.pengajuan p WHERE {' AND '.join(where)} ORDER BY p.submitted_at DESC LIMIT 2000", params)
     ids = [r["id"] for r in rows]
     lines: dict[str, list] = {}
+    trx = _option_names()
     stats: dict[str, dict] = {}
     if ids:
         for ln in db.fetch(f"""SELECT pengajuan_id::text AS pid, id, spent_on, category, description, amount, review, review_note
                                FROM {P}.pengajuan_line WHERE pengajuan_id::text = ANY(%s) ORDER BY sort, id""", (ids,)):
             lines.setdefault(ln["pid"], []).append({"id": ln["id"], "spentOn": _iso(ln["spent_on"]), "category": ln["category"],
+                                                    "categoryLabel": category_label(ln["category"], trx),
                                                     "description": ln["description"], "amount": _num(ln["amount"]), "review": ln["review"],
                                                     "reviewNote": ln["review_note"]})
         for s in db.fetch(f"""SELECT f.pengajuan_id::text AS pid, count(*)::int AS files,

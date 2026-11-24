@@ -56,3 +56,16 @@ def test_payee_bank_or_virtual_account():
         payee_of({"bank": "BCA", "account": "123"})
     with pytest.raises(DeError):
         payee_of({"type": "VA", "account": "8808123"})
+
+
+def test_outstanding_counts_the_shortfall_paid_and_the_money_back():
+    from app.fund_lifecycle import outstanding
+    assert outstanding(1_000_000, 200_000, None, 1_200_000) == 0
+    assert outstanding(1_000_000, None, 150_000, 850_000) == 0
+    assert outstanding(1_000_000, None, None, 850_000) == -150_000
+    assert outstanding(1_000_000, None, 100_000, 850_000) == -50_000
+
+
+def test_the_gate_stays_open_after_the_payment():
+    from app.de_funds import CLEARED
+    assert {"APPROVED", "PAID", "VERIFYING", "DONE"} <= set(CLEARED)

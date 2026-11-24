@@ -67,9 +67,13 @@ def assertion(user: dict, secret: str, company: str = "") -> str:
         "facilities": [] if role in accounts.GLOBAL_ROLES else facilities_of(list(user.get("branch_codes") or [])),
         "exp": int(time.time()) + 60,
     }
+    limit = accounts.branch_limit(user) if user["role"] in accounts.LIMITABLE_ROLES else None
     if company and company.lower() != "all":
         from app.scope import brand_branches
-        payload["only"] = facilities_of(list(brand_branches(company.upper())))
+        codes = list(brand_branches(company.upper()))
+        payload["only"] = facilities_of(codes if limit is None else [c for c in codes if c in set(limit)])
+    elif limit is not None:  # a superadmin / admin narrowed to some branches (2026-11-24)
+        payload["only"] = facilities_of(list(limit))
     body = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
     return body + "." + hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
 

@@ -28,6 +28,17 @@ ROLES = ("superadmin", "admin", "cost_control", "user", "outlet", "driver", "cot
 # driver = Calf On The Road driver app only (migration 046)
 # roles that see every branch (no user_branch rows); "user" sees only its branches
 GLOBAL_ROLES = ("superadmin", "admin", "cost_control")
+# of those, the roles that may be narrowed to some branches (2026-11-24): no branch chosen = every branch
+LIMITABLE_ROLES = ("superadmin", "admin")
+
+
+def branch_limit(user: dict) -> Optional[tuple[str, ...]]:
+    """The branches an account reads: None = every branch. Superadmin / admin: the chosen ones, none chosen = every
+    branch; cost_control every branch; the other roles exactly theirs (none = nothing)."""
+    codes = tuple(user.get("branch_codes") or ())
+    if user.get("role") in GLOBAL_ROLES:
+        return codes if codes and user["role"] in LIMITABLE_ROLES else None
+    return codes
 # business lines of the accounts (migration 054) and the ESB company of their branches (cotr: pools, no ESB branch)
 LINES = ("kopicalf", "wasgee", "cotr")
 LINE_COMPANY = {"kopicalf": "CALF", "wasgee": "CALF7", "cotr": None}

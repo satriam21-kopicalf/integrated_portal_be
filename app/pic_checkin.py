@@ -101,7 +101,8 @@ def locations(codes: list[str]) -> dict[str, dict]:
 
 def branch_options(user: dict, every: bool = False) -> list[dict]:
     """Branches the user may check in at, with the outlet's location (every=True: all Kopi Calf branches)."""
-    if every or user.get("role") in GLOBAL_ROLES:
+    from app.accounts import branch_limit
+    if every or branch_limit(user) is None:
         rows = db.fetch(
             f"""SELECT branch_code AS code, branch_name AS name FROM {SCHEMA}.master_branches
                 WHERE COALESCE(branch_code, '') <> '' AND COALESCE(is_deleted, false) = false AND COALESCE(is_active, true)

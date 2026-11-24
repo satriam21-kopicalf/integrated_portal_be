@@ -178,14 +178,14 @@ def stock_estimate(branch: str = Query(..., min_length=1, max_length=40), day: d
 
 
 @router.get("/api/monitoring/stock/list")
-def stock_list(branch: Optional[str] = None, month: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}$"),
+def stock_list(branch: Optional[str] = None, month: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}$"), usage: str = Query("recipe", pattern="^(esb|recipe)$"),
                _: dict = Depends(require_page(LIST))) -> dict:
     """Stock List per month (2026-11-19, app/stock_list_month.py): Previous Balance = the count at the end of the month
     before, Ending Stock = the latest checkpoint of the month; without `month` the latest-SO list."""
     if not month:  # the page before the monthly Stock List (kept while both are live)
         return st.stock_list(_branches(branch))
     from app import stock_list_month
-    return stock_list_month.stock_list(month, _branches(branch))
+    return stock_list_month.stock_list(month, _branches(branch), usage)
 
 
 class TransitIn(BaseModel):

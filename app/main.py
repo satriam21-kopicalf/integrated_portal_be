@@ -111,8 +111,9 @@ async def scope_to_user_branches(request: Request, call_next):
     brand_token = brand_scope.set(request.url.path.startswith(COST_CONTROL_PATHS))
     if request.url.path.startswith("/api/") and not request.url.path.startswith("/api/auth/"):
         user = await run_in_threadpool(session_lookup, request)
-        if user and user["role"] not in accounts.GLOBAL_ROLES:
-            token = branch_scope.set(tuple(user.get("branch_codes") or ()))
+        limit = accounts.branch_limit(user) if user else None
+        if limit is not None:
+            token = branch_scope.set(limit)
     try:
         return await call_next(request)
     finally:

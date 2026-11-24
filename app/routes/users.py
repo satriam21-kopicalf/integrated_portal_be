@@ -161,7 +161,13 @@ def _clean(body: UserFields, creating: bool, user_id: Optional[str] = None,
         return None, _error(problem, field="hrmsEmployeeId")
     if role == access.COTR_ADMIN:
         data["businessLine"] = "cotr"  # a COTR admin is of the COTR line (migration 099)
-    if role in accounts.GLOBAL_ROLES or role == "driver":  # superadmin / cost_control see every branch; drivers none (COTR)
+    from app.scope import branch_scope
+    mine = branch_scope.get()  # an admin narrowed to some branches hands out only those
+    if mine is not None and role != "superadmin" and set(data.get("branches") or []) - set(mine):
+        return None, _error("Cabang di luar akses Anda", field="branches")
+    if role in accounts.LIMITABLE_ROLES:  # some branches, or none chosen = every branch (2026-11-24)
+        pass
+    elif role in accounts.GLOBAL_ROLES or role == "driver":  # cost_control sees every branch; drivers none (COTR)
         if creating or "branches" in data or (current or {}).get("branch_codes"):
             data["branches"] = []
     elif (data.get("businessLine") or (current or {}).get("business_line")) == "cotr":

@@ -192,6 +192,7 @@ def technicians(active_only: bool = False) -> list[dict]:
     return [{"id": r["id"], "name": r["name"], "kind": r["kind"], "company": r["company"], "skills": list(r["skills"] or []),
              "city": r["city"], "phone": r["phone"], "notes": r["notes"], "isActive": r["is_active"],
              "wageType": r["wage_type"], "wageAmount": _num(r["wage_amount"]),
+             "bank": r.get("bank"), "accountNo": r.get("account_no"), "accountName": r.get("account_name"),  # for a Cash in Advance (143)
              "activeJobs": r["active"], "doneJobs": r["done"], "jobs": by.get(r["id"], [])} for r in rows]
 
 
@@ -704,6 +705,9 @@ def team_full(request_id: str) -> dict:
     out["labor"] = labor(request_id)
     from app import de_funds
     out["fund"] = de_funds.view_of(request_id)  # the request's money in Fund Request (Finance)
+    out["advances"] = de_funds.advances_of(request_id)  # the technicians' Cash in Advance (migration 143)
+    out["accountTypes"] = [{"id": r["id"], "name": r["name"]} for r in db.fetch(
+        f"SELECT id, name FROM {P}.fund_option WHERE list = 'ACCOUNT' AND is_active ORDER BY sort, name")]
     return out
 
 

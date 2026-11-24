@@ -454,6 +454,27 @@ def team_funds(request_id: str, body: FundIn, request: Request, user: dict = Dep
     return out
 
 
+class AdvanceIn(BaseModel):
+    technicianId: int
+    amount: float = Field(gt=0)
+    transactionId: int
+    accountTypeId: int
+    bank: str = Field(min_length=1, max_length=120)
+    account: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=1, max_length=120)
+    note: Optional[str] = Field(None, max_length=2000)
+
+
+@router.post("/api/de/monitor/{request_id}/advances")
+def team_advance(request_id: str, body: AdvanceIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    """A Cash in Advance for a technician of the request (personal Fund Request, settled later with the receipts)."""
+    from app import de_funds
+    row = _team_row(request, user, request_id)
+    out = _with_work_urls(_run(de_funds.request_advance, user, request_id, body.model_dump()))
+    _record(request, user, f"{row['number']}: uang muka teknisi diajukan", request_id, note=body.note)
+    return out
+
+
 class SupplierIn(BaseModel):
     vendor: str = Field(min_length=1, max_length=200)
 

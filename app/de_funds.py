@@ -33,7 +33,7 @@ def _money(v: Any) -> Decimal:
 def fund_of(de_id: str) -> Optional[dict]:
     """The request's fund (not a settlement top-up): the open or paid one, else the latest rejected."""
     return db.fetchrow(f"""SELECT {pg.COLS}, p.refund_amount, p.refunded_at FROM {P}.pengajuan p
-                           WHERE p.de_request_id::text = %s AND p.settles_id IS NULL
+                           WHERE p.de_request_id::text = %s AND p.settles_id IS NULL AND p.kind IN ('MAINTENANCE', 'PROCUREMENT')
                            ORDER BY (p.status = 'REJECTED'), p.created_at DESC LIMIT 1""", (de_id,))
 
 
@@ -187,6 +187,83 @@ def settle(conn, row: dict, user: dict) -> Optional[dict]:
                       f"Biaya aktual {row['number']} lebih kecil Rp {amount:,.0f} dari yang disetujui: bayar sesuai aktual", details)
     de_event(conn, row["id"], user, "FUND", None, what, None, details)
     return {"kind": what, "amount": float(amount)}
+
+
+# ---------------------------------------------------------------- technicians' Cash in Advance (migration 143)
+
+def advance_purpose() -> Optional[int]:
+    """The Keperluan Dana of type ADVANCE (Deposit / Cash in Advance) management keeps active."""
+    r = db.fetchrow(f"""SELECT id FROM {P}.fund_option WHERE list = 'PURPOSE' AND is_active AND settings->>'type' = 'ADVANCE'
+                        ORDER BY sort, id LIMIT 1""")
+    return r["id"] if r else None
+
+
+def advances_of(de_id: str) -> list[dict]:
+    """The technicians' advances of a request, each with its settlement (Laporan Penyelesaian) when there is one."""
+    rows = db.fetch(f"""SELECT p.id::text, p.number, p.status, p.requester_name, p.requested_amount, p.approved_amount, p.paid_amount,
+                               p.created_at, s.number AS settle_number, s.status AS settle_status, s.requested_amount AS settle_amount
+                        FROM {P}.pengajuan p
+                        LEFT JOIN LATERAL (SELECT number, status, requested_amount FROM {P}.pengajuan x
+                                           WHERE x.settles_id = p.id AND x.status <> 'REJECTED' ORDER BY x.created_at DESC LIMIT 1) s ON true
+                        WHERE p.de_request_id::text = %s AND p.kind = 'PERSONAL' ORDER BY p.created_at""", (de_id,))
+    return [{"id": r["id"], "number": r["number"], "status": r["status"], "statusLabel": pg.STATUS_LABEL[r["status"]],
+             "technician": r["requester_name"], "amount": pg._num(r["requested_amount"]), "approvedAmount": pg._num(r["approved_amount"]),
+             "paidAmount": pg._num(r["paid_amount"]), "settlement": {"number": r["settle_number"], "status": r["settle_status"],
+             "statusLabel": pg.STATUS_LABEL[r["settle_status"]], "amount": pg._num(r["settle_amount"])} if r["settle_number"] else None}
+            for r in rows]
+
+
+def request_advance(user: dict, de_id: str, body: dict) -> dict:
+    """The team asks a Cash in Advance for a technician of the request: a personal Fund Request of the ADVANCE Keperluan
+    Dana (its own approval flow), owned by the asking team member (who settles it later with the receipts), on behalf of
+    the technician, paid to the technician's account (kept for the next time)."""
+    from app import damaged_equipment as de
+    row = get_row(de_id)
+    if row is None or row["status"] == "DRAFT":
+        raise LookupError("Pengajuan tidak ditemukan")
+    if row["status"] not in ASK_FROM:
+        raise DeError("Uang muka teknisi diajukan setelah request disetujui tim dan sebelum serah terima")
+    tech = db.fetchrow(f"""SELECT t.id, t.name FROM {P}.de_technician t JOIN {P}.de_assignment a ON a.technician_id = t.id
+                           WHERE t.id = %s AND a.request_id::text = %s AND a.status IN ('ACTIVE', 'DONE') LIMIT 1""",
+                       (int(body.get("technicianId") or 0), de_id))
+    if tech is None:
+        raise DeError("Pilih teknisi yang ditugaskan di request ini")
+    amount = _money(body.get("amount"))
+    if amount <= 0 or amount > Decimal("1000000000"):
+        raise DeError("Isi nominal uang muka")
+    purpose_id = advance_purpose()
+    if purpose_id is None:
+        raise DeError("Keperluan Dana 'Deposit / Cash in Advance' tidak aktif di Pengaturan Fund Request")
+    trx = db.fetchrow(f"SELECT id FROM {P}.fund_option WHERE id = %s AND list = 'TRANSACTION' AND is_active", (int(body.get("transactionId") or 0),))
+    if trx is None:
+        raise DeError("Pilih Jenis Transaksi")
+    acct = db.fetchrow(f"SELECT id FROM {P}.fund_option WHERE id = %s AND list = 'ACCOUNT' AND is_active", (int(body.get("accountTypeId") or 0),))
+    if acct is None:
+        raise DeError("Pilih jenis rekening tujuan")
+    bank, account, name = (str(body.get(k) or "").strip()[:120] for k in ("bank", "account", "name"))
+    if not (bank and account and name):
+        raise DeError("Isi rekening teknisi: bank, nomor rekening dan nama pemilik")
+    note = (str(body.get("note") or "")).strip()[:2000]
+    me = pg._profile(user)
+    text = f"Uang muka teknisi {tech['name']} · {row['number']} {de.KINDS[row['kind']]} {row['branch_name']}" + (f"\n{note}" if note else "")
+    with db.transaction() as conn:
+        number = pg._next_number(conn)
+        pid = conn.execute(
+            f"""INSERT INTO {P}.pengajuan (user_id, username, full_name, kind, baristas, email, department, job_title, requester_name,
+                    branch_code, branch_name, purpose_id, transaction_type_id, account_type_id, needed_on, purpose, requested_amount,
+                    payee_bank, payee_account, payee_name, de_request_id, number, status, approval_step, submitted_at, first_submitted_at)
+                VALUES (%s, %s, %s, 'PERSONAL', '[]'::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s, current_date, %s, %s, %s, %s, %s, %s, %s,
+                        'SUBMITTED', 1, now(), now()) RETURNING id::text""",
+            (user["id"], user["username"], user.get("full_name"), me["email"], me["department"], me["jobTitle"], tech["name"],
+             row["branch_code"], row["branch_name"], purpose_id, trx["id"], acct["id"], text, amount, bank, account, name, de_id, number)
+        ).fetchone()["id"]
+        pg._event(conn, pid, user, "SUBMIT", "DRAFT", "SUBMITTED", None,
+                  {"requested": amount, "deRequest": row["number"], "technician": tech["name"], "advance": True})
+        conn.execute(f"UPDATE {P}.de_technician SET bank = %s, account_no = %s, account_name = %s, updated_at = now() WHERE id = %s",
+                     (bank, account, name, tech["id"]))
+        de_event(conn, de_id, user, "FUND", None, "ADVANCE", note or None,
+                 {"fund": number, "amount": float(amount), "technician": tech["name"]})
+    return de.team_full(de_id)
 
 
 def view_of(de_id: str) -> Optional[dict]:

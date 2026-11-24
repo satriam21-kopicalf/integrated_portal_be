@@ -43,3 +43,31 @@ def test_open_overnight_counts_on_time():
 def test_no_hours_and_no_data():
     assert row([ev(8, 0, True)], ot=None)["status"] == "no_hours"
     assert row([], have=False)["status"] == "no_data"
+
+
+# ---- BotFood's daily report (migration 141)
+from app.aggregator_reports import from_daily, stretches  # noqa: E402
+
+
+def rep(open_state, timeline, inactive, ot=time(7), ct=time(22)):
+    return {"open_time": ot, "close_time": ct, "open_state": open_state, "timeline": timeline, "inactive_timeline": inactive}
+
+
+def test_stretches_parse():
+    assert stretches("07:00 - 08:11; 12:00 - 12:30;") == [(time(7), time(8, 11)), (time(12), time(12, 30))]
+    assert stretches(None) == []
+
+
+def test_daily_late_open():
+    r = from_daily(rep("late", "08:11 - 22:00; ", "07:00 - 08:11;"), 15)
+    assert r["status"] == "late" and r["lateMin"] == 71 and r["openedAt"] == "08:11" and r["earlyMin"] is None and r["pauseMin"] == 0
+
+
+def test_daily_pause_and_early_close():
+    r = from_daily(rep("on_time", "07:00 - 12:00; 12:30 - 20:00;", "12:00 - 12:30; 20:00 - 22:00;"), 15)
+    assert r["status"] == "on_time" and r["pauseMin"] == 30 and r["earlyMin"] == 120
+
+
+def test_daily_not_open_and_no_hours():
+    assert from_daily(rep("not_open", None, "07:00 - 22:00;"), 15)["status"] == "not_opened"
+    assert from_daily(rep("late", None, None, ot=None), 15)["status"] == "no_hours"

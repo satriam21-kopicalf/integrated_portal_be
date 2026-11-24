@@ -13,8 +13,9 @@ Every row carries the member of the Aggregator team handling the outlet that day
 Out of Stock: what is out now (agg_item) per outlet, platform and category, and in a period how often each item went
 out and for how long (agg_stock_event). Packaging categories are left out unless asked.
 """
+import time
 from collections import defaultdict
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from typing import Optional
 
 from app import aggregator as agg
@@ -24,7 +25,7 @@ P = agg.P
 WIB = agg.WIB
 
 
-def _time(v) -> Optional[time]:
+def _time(v) -> Optional[dtime]:
     try:
         return datetime.strptime(str(v)[:8], "%H:%M:%S").time() if v else None
     except ValueError:
@@ -55,6 +56,115 @@ def pull_histories() -> int:
                               (eid, agg._int(e.get("item_id")), cid, e.get("item_name") or "", bool(agg._bool(e.get("in_stock"))),
                                e.get("remarks"), at)).rowcount
     return n
+
+
+def _hm(s: str) -> Optional[dtime]:
+    try:
+        return datetime.strptime(s.strip()[:5], "%H:%M").time()
+    except ValueError:
+        return None
+
+
+def stretches(text: Optional[str]) -> list[tuple[dtime, dtime]]:
+    """'07:00 - 08:11; 12:00 - 12:30;' to [(07:00, 08:11), (12:00, 12:30)]."""
+    out = []
+    for part in (text or "").split(";"):
+        if "-" in part:
+            a, b = part.split("-", 1)
+            ta, tb = _hm(a), _hm(b)
+            if ta and tb:
+                out.append((ta, tb))
+    return out
+
+
+def pull_daily(day: date) -> int:
+    """BotFood's daily availability report of one day (every outlet and platform), 100 per page."""
+    n, page = 0, 1
+    while True:
+        d = agg._get("me/report/atp", {"date": day.isoformat(), "data": 100, "page": page}, timeout=120)
+        rows = d.get("branch_channel_availability_reports") or []
+        with db.transaction() as conn:
+            for r in rows:
+                cid = agg._int(r.get("branch_channel_id"))
+                if cid is None:
+                    continue
+                conn.execute(f"""INSERT INTO {P}.agg_daily (channel_id, day, bf_branch_id, name, channel, open_time, close_time, open_state,
+                                   close_state, has_break, active_s, inactive_s, hours_s, timeline, inactive_timeline, items_pct)
+                                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                 ON CONFLICT (channel_id, day) DO UPDATE SET open_state = EXCLUDED.open_state, close_state = EXCLUDED.close_state,
+                                   has_break = EXCLUDED.has_break, active_s = EXCLUDED.active_s, inactive_s = EXCLUDED.inactive_s,
+                                   hours_s = EXCLUDED.hours_s, timeline = EXCLUDED.timeline, inactive_timeline = EXCLUDED.inactive_timeline,
+                                   items_pct = EXCLUDED.items_pct, open_time = EXCLUDED.open_time, close_time = EXCLUDED.close_time, fetched_at = now()""",
+                             (cid, day, agg._int(r.get("branch_id")), r.get("branch_channel_name"), r.get("branch_channel_channel"),
+                              _time(r.get("open_time")), _time(r.get("close_time")), r.get("open_state"), r.get("close_state"),
+                              agg._bool(r.get("has_break")), agg._int(r.get("active_time")), agg._int(r.get("inactive_time")),
+                              agg._int(r.get("operational_hours_duration")), r.get("timeline"), r.get("inactive_timeline"),
+                              agg._num(r.get("items_availability_percentage"))))
+                n += 1
+        if page >= int(d.get("total_page") or 0) or not rows:
+            break
+        page += 1
+        time.sleep(agg.PAUSE)
+    return n
+
+
+def pull_daily_due() -> Optional[int]:
+    """Yesterday's report, once BotFood has made it (after 05:00 WIB) and while it is not kept yet."""
+    now = datetime.now(WIB)
+    y = (now - timedelta(days=1)).date()
+    if now.hour < 5 or db.fetchrow(f"SELECT 1 FROM {P}.agg_daily WHERE day = %s LIMIT 1", (y,)):
+        return None
+    return pull_daily(y)
+
+
+DAILY_FROM = date(2026, 1, 1)
+
+
+def backfill_daily() -> Optional[int]:
+    """One more day of the daily report back in time (agg_state daily_backfill_day), to DAILY_FROM; None when done."""
+    st = db.fetchrow(f"SELECT value FROM {P}.agg_state WHERE key = 'daily_backfill_day'")
+    day = date.fromisoformat(st["value"]) if st and st["value"] else None
+    if not day or day < DAILY_FROM:
+        return None
+    n = pull_daily(day)
+    with db.transaction() as conn:
+        conn.execute(f"UPDATE {P}.agg_state SET value = %s WHERE key = 'daily_backfill_day'", ((day - timedelta(days=1)).isoformat(),))
+    return n
+
+
+def from_daily(r: dict, g: int) -> dict:
+    """A day of BotFood's report as a row of Opening & Closing (pure, tested): its open / close state, the minutes late
+    (the closed stretch from the opening hour), early (closed until the closing hour) and the pauses in between."""
+    out = {"status": None, "openedAt": None, "lateMin": None, "earlyMin": None, "pauseMin": 0}
+    ot, ct = r.get("open_time"), r.get("close_time")
+    if not ot:
+        out["status"] = "no_hours"
+        return out
+    st = (r.get("open_state") or "").lower()
+    if st == "not_open":
+        out["status"] = "not_opened"
+        return out
+    mins = lambda a, b: (b.hour * 60 + b.minute) - (a.hour * 60 + a.minute)  # noqa: E731
+    on = stretches(r.get("timeline"))
+    off = stretches(r.get("inactive_timeline"))
+    if on:
+        out["openedAt"] = on[0][0].strftime("%H:%M")
+    late = 0
+    for a, b in off:
+        if a <= ot < b or (a == ot):
+            late = mins(ot, b)
+    out["lateMin"] = late if late > g else 0
+    out["status"] = "late" if st == "late" or late > g else "on_time"
+    early = 0
+    if ct:
+        for a, b in off:
+            if b >= ct and a > ot:
+                early = mins(a, ct)
+    out["earlyMin"] = early if early > g else None
+    for a, b in off:
+        if a > ot and (not ct or b < ct):
+            out["pauseMin"] += max(0, mins(a, b))
+    return out
 
 
 def grace() -> int:
@@ -90,15 +200,15 @@ def _handlers(d_from: date, d_to: date) -> dict[tuple[date, str], str]:
     return out
 
 
-def _at(day: date, t: time) -> datetime:
+def _at(day: date, t: dtime) -> datetime:
     return datetime.combine(day, t, tzinfo=WIB)
 
 
-def day_row(events_today: list[dict], was_open: Optional[bool], d: date, ot: Optional[time], ct: Optional[time],
+def day_row(events_today: list[dict], was_open: Optional[bool], d: date, ot: Optional[dtime], ct: Optional[dtime],
             g: int, now: datetime, have_data: bool) -> dict:
     """One outlet, platform and day: status, opened at, late / early / pause minutes. Pure (tested)."""
     row = {"status": None, "openedAt": None, "lateMin": None, "earlyMin": None, "pauseMin": 0}
-    day0 = _at(d, time(0))
+    day0 = _at(d, dtime(0))
     day1 = day0 + timedelta(days=1)
     if not have_data:
         row["status"] = "no_data"
@@ -148,19 +258,21 @@ def opening(d_from: date, d_to: date, channel: Optional[str] = None) -> dict:
     g = grace()
     now = datetime.now(WIB)
     chans = [c for c in _channels() if not channel or c["channel"] == channel]
-    start, end = _at(d_from, time(0)), _at(d_to, time(0)) + timedelta(days=1)
+    start, end = _at(d_from, dtime(0)), _at(d_to, dtime(0)) + timedelta(days=1)
     ev: dict[int, list[dict]] = defaultdict(list)
     for e in db.fetch(f"""SELECT channel_id, at, is_open, open_time, close_time FROM {P}.agg_status_event
                           WHERE at >= %s - interval '3 days' AND at < %s ORDER BY at""", (start, end)):
         ev[e["channel_id"]].append(e)
     handlers = _handlers(d_from, d_to)
     first_event = db.fetchrow(f"SELECT min(at) AS a FROM {P}.agg_status_event")["a"]
+    daily = {(r["channel_id"], r["day"]): r for r in db.fetch(
+        f"SELECT * FROM {P}.agg_daily WHERE day BETWEEN %s AND %s", (d_from, d_to))}
     rows = []
     for c in chans:
         es = ev.get(c["id"], [])
         d = d_from
         while d <= d_to:
-            day0 = _at(d, time(0))
+            day0 = _at(d, dtime(0))
             day1 = day0 + timedelta(days=1)
             if day0 > now:
                 break
@@ -168,8 +280,13 @@ def opening(d_from: date, d_to: date, channel: Optional[str] = None) -> dict:
             before = [e for e in es if e["at"] < day0]
             ot = next((e["open_time"] for e in reversed(todays) if e["open_time"]), None) or c["open_time"]
             ct = next((e["close_time"] for e in reversed(todays) if e["close_time"]), None) or c["close_time"]
-            have = first_event is not None and day1 > first_event.astimezone(WIB)
-            r = day_row(todays, before[-1]["is_open"] if before else None, d, ot, ct, g, now, have)
+            rep = daily.get((c["id"], d))
+            if rep:  # a past day: BotFood's own report
+                ot, ct = rep["open_time"] or ot, rep["close_time"] or ct
+                r = {**from_daily(rep, g), "source": "report", "itemsPct": float(rep["items_pct"]) if rep["items_pct"] is not None else None}
+            else:
+                have = first_event is not None and day1 > first_event.astimezone(WIB)
+                r = {**day_row(todays, before[-1]["is_open"] if before else None, d, ot, ct, g, now, have), "source": "live", "itemsPct": None}
             rows.append({"day": d.isoformat(), "channelId": c["id"], "outlet": c["branch_name"] or c["name"], "branchCode": c["branch_code"],
                          "platform": c["channel"], "openTime": ot.strftime("%H:%M") if ot else None, "closeTime": ct.strftime("%H:%M") if ct else None,
                          "events": len(todays), "member": handlers.get((d, c["branch_code"])) if c["branch_code"] else None, **r})
@@ -182,6 +299,7 @@ def opening(d_from: date, d_to: date, channel: Optional[str] = None) -> dict:
         "pauseMin": sum(r["pauseMin"] for r in rows), "noHours": sum(r["status"] == "no_hours" for r in rows),
         "noData": sum(r["status"] == "no_data" for r in rows),
         "dataFrom": first_event.isoformat() if first_event else None,
+        "reportFrom": (db.fetchrow(f"SELECT min(day) AS d FROM {P}.agg_daily")["d"] or now.date()).isoformat(),
     }
     return {"summary": summary, "rows": rows}
 
@@ -198,8 +316,8 @@ def oos(d_from: date, d_to: date, channel: Optional[str] = None, packaging: bool
     """Out now per outlet / platform / category, and per item in the period: how often it went out, for how long."""
     chans = {c["id"]: c for c in _channels() if not channel or c["channel"] == channel}
     now = datetime.now(WIB)
-    start = _at(d_from, time(0))
-    end = min(_at(d_to, time(0)) + timedelta(days=1), now)
+    start = _at(d_from, dtime(0))
+    end = min(_at(d_to, dtime(0)) + timedelta(days=1), now)
 
     def keep(cat: str) -> bool:
         return packaging or "PACKAGING" not in cat

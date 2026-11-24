@@ -149,16 +149,16 @@ def _save_reviews(rows: list[dict]) -> int:
 
 
 def _reviews_page(page: int, d_from: Optional[date] = None, d_to: Optional[date] = None) -> tuple[list[dict], int]:
-    p = {"page": page, "sort_key": "reviews.created_at", "sort_value": "desc"}
-    if d_from:
-        p["from_created_at"] = d_from.isoformat()
+    p = {"page": page, "data": 100, "sort_key": "reviews.created_at", "sort_value": "desc"}
+    if d_from:  # whole days: a date alone means 00:00, so "until the 23rd" would leave the 23rd out
+        p["from_created_at"] = f"{d_from.isoformat()} 00:00:00"
     if d_to:
-        p["until_created_at"] = d_to.isoformat()
+        p["until_created_at"] = f"{d_to.isoformat()} 23:59:59"
     d = _get("me/reviews", p)
     return d.get("reviews") or [], int(d.get("total_page") or 0)
 
 
-def pull_new_reviews(max_pages: int = 60) -> int:
+def pull_new_reviews(max_pages: int = 20) -> int:
     """The newest reviews, page by page, until a page brings nothing new."""
     total = 0
     for page in range(1, max_pages + 1):
@@ -196,7 +196,8 @@ def run(kind: str) -> dict:
     try:
         from app import aggregator_reports
         rows = {"global": pull_global, "reviews": pull_new_reviews, "backfill": backfill_one_day,
-                "histories": aggregator_reports.pull_histories}[kind]()
+                "histories": aggregator_reports.pull_histories, "daily": aggregator_reports.pull_daily_due,
+                "daily_backfill": aggregator_reports.backfill_daily}[kind]()
     except Exception as e:  # noqa: BLE001
         err = str(e)[:500]
         logger.info("aggregator %s: %s", kind, err)
@@ -216,6 +217,12 @@ def _loop() -> None:
                 last = time.time()
                 run("global")
                 run("reviews")
+                run("daily")
+            if token():
+                run("daily_backfill")
+                run("daily")
+            if token():
+                run("daily_backfill")
             elif token():
                 if run("backfill")["rows"] is None and db.fetchrow(
                         f"SELECT 1 FROM {P}.agg_state WHERE key = 'review_backfill_day' AND value < %s", (REVIEW_BACKFILL_TO.isoformat(),)):

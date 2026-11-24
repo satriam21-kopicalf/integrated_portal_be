@@ -455,6 +455,19 @@ def team_funds(request_id: str, body: FundIn, request: Request, user: dict = Dep
     return out
 
 
+class FundCancelIn(BaseModel):
+    note: str = Field(min_length=1, max_length=2000)
+
+
+@router.post("/api/de/monitor/{request_id}/fund-cancel")
+def team_fund_cancel(request_id: str, body: FundCancelIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    from app import de_funds
+    row = _team_row(request, user, request_id)
+    out = _with_work_urls(_run(de_funds.cancel_fund, user, request_id, body.note))
+    _record(request, user, f"{row['number']}: dana dibatalkan", request_id, note=body.note)
+    return out
+
+
 @router.post("/api/de/monitor/{request_id}/fund-proof")
 def team_fund_proof(request_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
     """The proof of the paid fund (the invoices, the actual cost) goes to Finance for verification (migration 144)."""

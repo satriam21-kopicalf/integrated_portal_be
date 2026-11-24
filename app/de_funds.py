@@ -196,6 +196,25 @@ def settle(conn, row: dict, user: dict) -> Optional[dict]:
     return {"kind": "VERIFYING", "amount": num, "fundId": fund["id"]}
 
 
+def cancel_fund(user: dict, de_id: str, note: Optional[str]) -> dict:
+    """The team withdraws the fund of the request before Finance pays it (2026-11-25); it may ask a new one afterwards."""
+    from app import damaged_equipment as de
+    fund = fund_of(de_id)
+    if fund is None or fund["status"] not in pg.CANCELLABLE:
+        raise DeError("Dana dibatalkan sebelum dicairkan Finance")
+    note = (note or "").strip()[:2000]
+    if not note:
+        raise DeError("Tulis alasan pembatalan")
+    with db.transaction() as conn:
+        hit = conn.execute(f"""UPDATE {P}.pengajuan SET status = 'CANCELLED', closed_at = now(), updated_at = now()
+                               WHERE id::text = %s AND status = ANY(%s) RETURNING id""", (fund["id"], list(pg.CANCELLABLE))).fetchone()
+        if hit is None:
+            raise DeError("Dana baru saja diproses; muat ulang")
+        pg._event(conn, fund["id"], user, "STATUS", fund["status"], "CANCELLED", note, {"action": "CANCELLED", "byTeam": True})
+        de_event(conn, de_id, user, "FUND", fund["status"], "CANCELLED", note, {"fund": fund["number"]})
+    return de.team_full(de_id)
+
+
 def send_proof(user: dict, de_id: str) -> dict:
     """The team sends the proof of a paid fund by hand (the request handed over / done, its invoices attached)."""
     from app import damaged_equipment as de

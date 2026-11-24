@@ -43,9 +43,9 @@ MAX_AMOUNT = Decimal("1000000000000")
 MAX_BARISTAS = 20
 KINDS = {"PETTY_CASH": "Petty Cash Mingguan", "EMERGENCY": "Pembelian Darurat", "MARKETING": "Marketing & Promo",
          "EVENT": "Event & Bazar", "BILL": "Tagihan Outlet", "PERSONAL": "Pengajuan Personal",
-         "MAINTENANCE": "Maintenance", "PROCUREMENT": "Procurement", "VENDOR": "Pembayaran Vendor"}
+         "MAINTENANCE": "Maintenance", "PROCUREMENT": "Procurement", "VENDOR": "Pembayaran Vendor", "INTERCOMPANY": "Antar-PT"}
 TERMS = ("COD", "TOP", "CBD")
-ONE_AMOUNT = ("PERSONAL", "VENDOR")  # no expense lines: one amount
+ONE_AMOUNT = ("PERSONAL", "VENDOR", "INTERCOMPANY")  # no expense lines: one amount
 # asked by the Maintenance & Procurement team from a Damaged Equipment request, never from the outlet form (app/de_funds.py)
 DE_KINDS = ("MAINTENANCE", "PROCUREMENT")
 OUTLET_KINDS = ("PETTY_CASH", "EMERGENCY", "MARKETING", "EVENT", "BILL")
@@ -62,7 +62,7 @@ CATEGORIES_OF = {
     "BILL": {"ELECTRIC": "Listrik", "WATER": "Air (PDAM)", "INTERNET": "Internet & telepon", "WASTE": "Sampah",
              "SECURITY": "Keamanan & lingkungan", "RENT": "Sewa tempat", "OTHER": "Lainnya"},
 }
-CATEGORIES_OF["VENDOR"] = {}
+CATEGORIES_OF["VENDOR"] = CATEGORIES_OF["INTERCOMPANY"] = {}
 CATEGORIES_OF["PERSONAL"] = {}  # a personal request has one amount, no expense lines (2026-11-20)
 DE_CATEGORIES = {"MATERIAL": "Material / barang", "SERVICE": "Jasa vendor", "TRANSPORT": "Transport", "OTHER": "Lainnya"}
 CATEGORIES_OF.update({k: DE_CATEGORIES for k in DE_KINDS})
@@ -151,7 +151,8 @@ def _file_type(data: bytes) -> tuple[str, str]:
 def files_of(pengajuan_id: str) -> list[dict]:
     rows = db.fetch(f"""SELECT f.id::text, f.line_id, f.kind, f.doc_type, f.mime, f.bytes, f.file_name, f.uploaded_at, f.uploaded_by_name,
                                (SELECT array_agg(DISTINCT p.number) FROM {P}.pengajuan_file o JOIN {P}.pengajuan p ON p.id = o.pengajuan_id
-                                 WHERE o.sha256 = f.sha256 AND o.pengajuan_id <> f.pengajuan_id AND p.status <> 'DRAFT') AS used_in
+                                 WHERE o.sha256 = f.sha256 AND o.pengajuan_id <> f.pengajuan_id AND p.status <> 'DRAFT'
+                                   AND f.kind <> 'PAYMENT') AS used_in  -- one bank batch proof on every request of it is meant
                         FROM {P}.pengajuan_file f WHERE f.pengajuan_id::text = %s ORDER BY f.uploaded_at""", (pengajuan_id,))
     return [{"id": r["id"], "lineId": r["line_id"], "kind": r["kind"], "docType": r["doc_type"], "mime": r["mime"], "bytes": r["bytes"],
              "fileName": r["file_name"], "uploadedAt": _iso(r["uploaded_at"]), "uploadedBy": r["uploaded_by_name"],
@@ -224,7 +225,8 @@ COLS = """p.id::text, p.number, p.status, p.user_id::text, p.username, p.full_na
     p.account_type_id, p.settles_id::text, p.de_request_id::text, p.refund_amount, p.refunded_at, p.refunded_by, p.refunded_note,
     p.proof_due_on, p.proof_submitted_at, p.actual_amount, p.actual_note, p.verified_amount, p.verified_note, p.verified_at, p.verified_by,
     p.done_at, p.topup_amount, p.topup_paid_at, p.payee_type, p.va_provider, p.invoice_no,
-    p.unit, p.payer, p.vendor_name, p.payment_term, p.invoice_date, p.outstanding_amount"""
+    p.unit, p.payer, p.vendor_name, p.payment_term, p.invoice_date, p.outstanding_amount,
+    p.payee_pt, p.received_at, p.received_by, p.received_note"""
 
 
 def get_row(pengajuan_id: str) -> Optional[dict]:
@@ -272,7 +274,8 @@ def view(row: dict, full: bool = False) -> dict:
         "requesterName": row["requester_name"], "requesterPhone": row["requester_phone"], "payeeBank": row["payee_bank"],
         "payeeAccount": row["payee_account"], "payeeName": row["payee_name"], "purpose": row["purpose"], "neededOn": _iso(row["needed_on"]),
         "plafon": _num(row["plafon"]), "requestedAmount": _num(row["requested_amount"]),
-        "scope": "PERSONAL" if row["kind"] == "PERSONAL" else "VENDOR" if row["kind"] == "VENDOR" else "OUTLET",
+        "scope": "PERSONAL" if row["kind"] == "PERSONAL" else row["kind"] if row["kind"] in ("VENDOR", "INTERCOMPANY") else "OUTLET",
+        "payeePt": row.get("payee_pt"), "receivedAt": _iso(row.get("received_at")), "receivedBy": row.get("received_by"), "receivedNote": row.get("received_note"),
         "unit": row.get("unit") or "CALF", "payer": row.get("payer"), "vendorName": row.get("vendor_name"), "paymentTerm": row.get("payment_term"),
         "invoiceDate": _iso(row.get("invoice_date")), "outstandingAmount": _num(row.get("outstanding_amount")), "email": row.get("email"), "department": row.get("department"),
         "jobTitle": row.get("job_title"), "purposeId": row.get("purpose_id"), "transactionTypeId": row.get("transaction_type_id"),
@@ -609,13 +612,14 @@ def form_state(user: dict) -> dict:
     branches = [{"code": b["code"], "name": b["name"]} for b in branch_options(user)]
     mine_units = fund_units.requests_for(user, branches)
     rows = db.fetch(f"""SELECT {COLS} FROM {P}.pengajuan p WHERE p.user_id::text = %s
+                          AND NOT (p.kind = 'VENDOR' AND p.status = 'DRAFT')  -- the vendor drafts have their own list (fund_vendor)
                         ORDER BY (p.status IN ('DRAFT', 'REVISION')) DESC, COALESCE(p.submitted_at, p.updated_at) DESC LIMIT 60""",
                     (str(user["id"]),))
     return {"user": {"id": str(user["id"]), "username": user["username"], "name": user.get("full_name") or user["username"]},
             "units": [u for u in fund_units.units() if u["code"] in set(mine_units)],
             "branches": [{**b, "unit": fund_units.unit_of_branch(b["code"])} for b in branches], "requests": [view(r) for r in rows], "categories": CATEGORIES, "categoriesOf": CATEGORIES_OF,
             "kinds": KINDS, "neededOn": NEEDED_ON, "receiptRequired": list(RECEIPT_REQUIRED), "docTypes": DOC_TYPES,
-            "statusLabel": STATUS_LABEL, "baristas": {b["code"]: barista_options(b["code"]) for b in branches},
+            "statusLabel": STATUS_LABEL, "payers": _payers(), "baristas": {b["code"]: barista_options(b["code"]) for b in branches},
             "kindLabels": kind_labels(), **personal_state(user)}
 
 
@@ -727,7 +731,7 @@ def save_draft(user: dict, pengajuan_id: str, body: dict) -> dict:
         sets["payee_type"] = body["payeeType"]
     for key, col, size in (("requesterName", "requester_name", 80), ("requesterPhone", "requester_phone", 30), ("payeeBank", "payee_bank", 60),
                            ("payeeAccount", "payee_account", 40), ("payeeName", "payee_name", 80), ("vaProvider", "va_provider", 60),
-                           ("invoiceNo", "invoice_no", 80), ("vendorName", "vendor_name", 120)):
+                           ("invoiceNo", "invoice_no", 80), ("vendorName", "vendor_name", 120), ("payeePt", "payee_pt", 80)):
         if key in body:
             sets[col] = " ".join(str(body[key] or "").split())[:size] or None
     lines = body.get("lines")
@@ -766,6 +770,8 @@ def missing(row: dict, lines: list[dict], files: list[dict]) -> list[str]:
         return missing_personal(row, files)
     if kind == "VENDOR":
         return missing_vendor(row, files)
+    if kind == "INTERCOMPANY":
+        return missing_intercompany(row, files, _payers())
     petty = kind == "PETTY_CASH"
     out = []
     if not (row.get("requester_name") or "").strip():
@@ -860,6 +866,10 @@ def submit(user: dict, pengajuan_id: str) -> dict:
     unit = (row.get("unit") or fund_units.MAIN) if row["kind"] in ONE_AMOUNT else fund_units.unit_of_branch(row["branch_code"])
     if row["kind"] in ONE_AMOUNT and row["status"] == "DRAFT" and unit not in fund_units.requests_for(user, branch_options(user)):
         raise PengajuanError("Pilih unit yang mengajukan (Roastery, Warehouse, Central Kitchen …)")
+    if row["kind"] == "INTERCOMPANY":
+        twice = same_period(row)
+        if twice:
+            raise PengajuanError(f"Periode ini sudah diajukan di {', '.join(twice)} (unit, lokasi dan PT tujuan sama)")
     if row["kind"] == "VENDOR":
         twice = same_invoice(row)
         if twice:
@@ -868,7 +878,7 @@ def submit(user: dict, pengajuan_id: str) -> dict:
     ask = requested(row["kind"], row["opening_balance"], row["income_amount"], row["total_out"], plafon)
     if row["kind"] == "PERSONAL":
         plafon, ask = check_personal(row), row["requested_amount"]
-    if row["kind"] == "VENDOR":
+    if row["kind"] in ("VENDOR", "INTERCOMPANY"):
         plafon, ask = None, row["requested_amount"]
     with db.transaction() as conn:
         number = row["number"] or _next_number(conn)
@@ -910,7 +920,7 @@ def can(user: dict, row: dict) -> dict:
     step = current_step(row, steps)
     mine = takes(user, step)
     refund = row["status"] in ("PAID", "VERIFYING") and row.get("refund_amount") is not None and not row.get("refunded_at")
-    return {"next": allowed_next(user, row, steps), "reviewLines": mine and row["status"] == "SUBMITTED",
+    return {"receive": can_receive(user, row), "next": allowed_next(user, row, steps), "reviewLines": mine and row["status"] == "SUBMITTED",
             "verify": row["status"] == "VERIFYING" and takes(user, _pay(steps)),
             "payment": mine and row["status"] == "APPROVED", "step": step["label"] if step else None,
             "refund": refund and takes(user, _pay(steps)),
@@ -979,7 +989,7 @@ def change_status(user: dict, pengajuan_id: str, to: str, note: Optional[str], p
             raise PengajuanError("Lampirkan bukti transfer dulu")
         details.update(amount=amount, on=on)
         from app import fund_lifecycle
-        status, due = fund_lifecycle.after_paid(fund_lifecycle.rule_for(row), on)
+        status, due = ("PAID", None) if row["kind"] == "INTERCOMPANY" else fund_lifecycle.after_paid(fund_lifecycle.rule_for(row), on)
         details["proofDueOn"] = due
         sets += ["paid_at = now()", "paid_by = %(actor)s", "paid_amount = %(paid)s", "paid_on = %(paid_on)s", "paid_note = %(note)s",
                  "proof_due_on = %(due)s"] + (["closed_at = now()", "done_at = now()"] if status == "DONE" else [])
@@ -988,8 +998,12 @@ def change_status(user: dict, pengajuan_id: str, to: str, note: Optional[str], p
     params = {"id": pengajuan_id, "to": status, "pos": position, "actor": _actor(user), "approved": details.get("approvedAmount"),
               "paid": details.get("amount"), "paid_on": details.get("on"), "note": note, "due": details.get("proofDueOn")}
     with db.transaction() as conn:
-        conn.execute(f"""UPDATE {P}.pengajuan SET status = %(to)s, approval_step = %(pos)s, updated_at = now(){''.join(', ' + s for s in sets)}
-                         WHERE id::text = %(id)s""", params)
+        # two people at once: only the first takes the step (a payment is never recorded twice)
+        hit = conn.execute(f"""UPDATE {P}.pengajuan SET status = %(to)s, approval_step = %(pos)s, updated_at = now(){''.join(', ' + s for s in sets)}
+                               WHERE id::text = %(id)s AND status = %(was)s AND approval_step = %(waspos)s RETURNING id""",
+                           {**params, "was": row["status"], "waspos": row["approval_step"]}).fetchone()
+        if hit is None:
+            raise PengajuanError("Pengajuan baru saja diproses orang lain; muat ulang")
         _event(conn, pengajuan_id, user, "STATUS", row["status"], status, note, details)
         from app import de_funds
         de_funds.on_fund_status(conn, row, user, status, note, details)
@@ -1074,7 +1088,7 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], units
                                                     "reviewNote": ln["review_note"]})
         for s in db.fetch(f"""SELECT f.pengajuan_id::text AS pid, count(*)::int AS files,
                                      count(*) FILTER (WHERE EXISTS (SELECT 1 FROM {P}.pengajuan_file o JOIN {P}.pengajuan q ON q.id = o.pengajuan_id
-                                         WHERE o.sha256 = f.sha256 AND o.pengajuan_id <> f.pengajuan_id AND q.status <> 'DRAFT'))::int AS reused
+                                         WHERE o.sha256 = f.sha256 AND o.pengajuan_id <> f.pengajuan_id AND q.status <> 'DRAFT' AND f.kind <> 'PAYMENT'))::int AS reused
                               FROM {P}.pengajuan_file f WHERE f.pengajuan_id::text = ANY(%s) GROUP BY 1""", (ids,)):
             stats[s["pid"]] = s
     flows = {(flow_key(r), r["unit"]): steps_of(r) for r in {(flow_key(x), x["unit"]): x for x in rows}.values()}
@@ -1154,10 +1168,10 @@ def create_personal(user: dict, branch_code: Optional[str], kind: str = "PERSONA
     """A personal request or a vendor payment: both have one amount, the identity of the account and a unit."""
     from app import fund_units
     allowed = fund_units.requests_for(user, branch_options(user))
-    if kind == "VENDOR":
+    if kind in ("VENDOR", "INTERCOMPANY"):
         allowed = [c for c in allowed if (fund_units.get(c) or {}).get("vendor")]
         if not allowed:
-            raise PengajuanError("Pembayaran vendor untuk unit Roastery, Warehouse dan Central Kitchen")
+            raise PengajuanError("Pembayaran vendor dan Antar-PT untuk unit Roastery, Warehouse dan Central Kitchen")
     if unit and unit not in allowed:
         raise PengajuanError("Unit di luar akses Anda")
     unit = unit or (allowed[0] if len(allowed) == 1 else None)
@@ -1168,7 +1182,7 @@ def create_personal(user: dict, branch_code: Optional[str], kind: str = "PERSONA
     if row is None:
         me, last = _profile(user), personal_state(user)["lastPayee"]
         mine = [b for b in branch_options(user) if fund_units.unit_of_branch(b["code"]) == unit]
-        if kind == "VENDOR":  # another vendor every time: no account is suggested
+        if kind != "PERSONAL":  # another vendor every time: no account is suggested
             last = {"bank": None, "account": None, "name": None, "accountTypeId": None}
         branch = next((b for b in mine if b["code"] == branch_code), None) or (mine[0] if len(mine) == 1 else None)
         row = db.fetchrow(f"""INSERT INTO {P}.pengajuan (user_id, username, full_name, kind, baristas, email, department, job_title,
@@ -1216,8 +1230,79 @@ def same_invoice(row: dict) -> list[str]:
         return []
     rows = db.fetch(f"""SELECT number, payee_account, invoice_no FROM {P}.pengajuan WHERE id::text <> %s AND requested_amount = %s
                           AND status NOT IN ('DRAFT', 'REJECTED', 'CANCELLED')""", (row["id"], row["requested_amount"]))
+    outside = db.fetch(f"SELECT label FROM {P}.fund_external WHERE account = %s AND invoice = %s AND amount = %s",
+                       (_digits(row.get("payee_account")), _digits(row["invoice_no"]), row["requested_amount"]))
     return [r["number"] for r in rows if _digits(r["payee_account"]) == _digits(row.get("payee_account"))
-            and _digits(r["invoice_no"]) == _digits(row["invoice_no"])]
+            and _digits(r["invoice_no"]) == _digits(row["invoice_no"])] + [r["label"] for r in outside]
+
+
+# ---------------------------------------------------------------- Antar-PT (migration 150): money between the PTs, no cost
+
+def _payers() -> list[str]:
+    from app import fund_units
+    return list(dict.fromkeys(u["payer"] for u in fund_units.units()))
+
+
+def missing_intercompany(row: dict, files: list[dict], payers: list[str]) -> list[str]:
+    """What blocks an Antar-PT request: the receiving PT (another one than the payer), its period, the report and the account."""
+    out = []
+    if row.get("payee_pt") not in payers:
+        out.append("Pilih PT penerima")
+    elif row["payee_pt"] == row.get("payer"):
+        out.append("PT penerima harus berbeda dari PT pembayar")
+    a, z = row.get("period_from"), row.get("period_to")
+    if not a or not z:
+        out.append("Isi periode laporan (dari – sampai)")
+    elif a > z:
+        out.append("Tanggal mulai periode harus sebelum tanggal akhir")
+    elif z > _now().date():
+        out.append("Periode tidak boleh melewati hari ini")
+    if not (row.get("purpose") or "").strip():
+        out.append("Tulis deskripsi (mis. Purchase Return periode …)")
+    if row.get("requested_amount") is None or row["requested_amount"] <= 0:
+        out.append("Isi total dana diajukan")
+    if not all((row.get(k) or "").strip() for k in ("payee_bank", "payee_account", "payee_name")):
+        out.append("Isi rekening tujuan: bank, nomor rekening dan nama pemilik")
+    if not any(f["kind"] == "OTHER" for f in files):
+        out.append("Lampirkan laporan retur ESB")
+    return out
+
+
+def same_period(row: dict) -> list[str]:
+    """Other live Antar-PT requests of the unit to the same PT whose period overlaps, at the same place (none = the whole unit)."""
+    return [r["number"] for r in db.fetch(
+        f"""SELECT number FROM {P}.pengajuan WHERE kind = 'INTERCOMPANY' AND id::text <> %s AND status NOT IN ('DRAFT', 'REJECTED', 'CANCELLED')
+              AND unit = %s AND payee_pt = %s AND period_from <= %s AND period_to >= %s
+              AND (branch_code IS NULL OR %s::text IS NULL OR branch_code = %s)""",
+        (row["id"], row.get("unit"), row.get("payee_pt"), row["period_to"], row["period_from"], row.get("branch_code"), row.get("branch_code")))]
+
+
+def receivers(payer: Optional[str]) -> list[str]:
+    return [str(r["user_id"]) for r in db.fetch(f"SELECT user_id FROM {P}.fund_receiver WHERE payer = %s", (payer,))]
+
+
+def can_receive(user: dict, row: dict) -> bool:
+    """The receiving PT confirms the money: its accounts (none set: superadmins), never who recorded the payment."""
+    if row["kind"] != "INTERCOMPANY" or row["status"] != "PAID" or row.get("paid_by") == _actor(user):
+        return False
+    return user.get("role") == "superadmin" or str(user["id"]) in receivers(row.get("payee_pt"))
+
+
+def confirm_received(user: dict, pengajuan_id: str, note: Optional[str]) -> dict:
+    row = get_row(pengajuan_id)
+    if row is None or row["kind"] != "INTERCOMPANY" or row["status"] != "PAID":
+        raise LookupError("Pengajuan tidak ditemukan")
+    if not can_receive(user, row):
+        raise PermissionError("Uang masuk dikonfirmasi Finance PT penerima, bukan yang mencatat pembayaran")
+    note = (note or "").strip()[:2000] or None
+    with db.transaction() as conn:
+        hit = conn.execute(f"""UPDATE {P}.pengajuan SET status = 'DONE', done_at = now(), closed_at = now(), received_at = now(), received_by = %s,
+                                   received_note = %s, updated_at = now() WHERE id::text = %s AND status = 'PAID' RETURNING id""",
+                           (_actor(user), note, pengajuan_id)).fetchone()
+        if hit is None:
+            raise PengajuanError("Pengajuan baru saja diproses; muat ulang")
+        _event(conn, pengajuan_id, user, "STATUS", "PAID", "DONE", note, {"received": row["paid_amount"], "by": row["payee_pt"]})
+    return full(pengajuan_id)
 
 
 TWIN = f"""FROM {P}.pengajuan a JOIN {P}.pengajuan b ON b.id <> a.id AND b.requested_amount = a.requested_amount
@@ -1257,7 +1342,7 @@ def personal_sets(user: dict, row: dict, body: dict) -> dict:
     if sets_unit:
         from app import fund_units
         allowed = fund_units.requests_for(user, branch_options(user))
-        if sets_unit not in allowed or (row["kind"] == "VENDOR" and not (fund_units.get(sets_unit) or {}).get("vendor")):
+        if sets_unit not in allowed or (row["kind"] != "PERSONAL" and not (fund_units.get(sets_unit) or {}).get("vendor")):
             raise PengajuanError("Unit di luar akses Anda")
     sets: dict[str, Any] = {**({"unit": sets_unit} if sets_unit else {}), "email": me["email"], "department": me["department"], "job_title": me["jobTitle"], "requester_name": me["name"]}
     for key, list_, label, col in (("purposeId", "PURPOSE", "Keperluan Dana", "purpose_id"),

@@ -72,6 +72,47 @@ def set_chosen(user_id: str, codes: list[str]) -> list[str]:
     return chosen(user_id)
 
 
+def receivers() -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for r in db.fetch(f"SELECT payer, user_id::text AS u FROM {P}.fund_receiver"):
+        out.setdefault(r["payer"], []).append(r["u"])
+    return out
+
+
+def set_receivers(payer: str, ids: list[str]) -> dict[str, list[str]]:
+    if payer not in {u["payer"] for u in units()}:
+        raise UnitError("PT tidak dikenal")
+    with db.transaction() as conn:
+        conn.execute(f"DELETE FROM {P}.fund_receiver WHERE payer = %s", (payer,))
+        for i in dict.fromkeys(ids):
+            conn.execute(f"INSERT INTO {P}.fund_receiver (payer, user_id) SELECT %s, id FROM {P}.user_account WHERE id::text = %s AND is_active", (payer, i))
+            conn.execute(f"""INSERT INTO {P}.user_page (user_id, page, allowed) SELECT id, 'mon.pengajuan', true FROM {P}.user_account WHERE id::text = %s
+                             ON CONFLICT (user_id, page) DO UPDATE SET allowed = true""", (i,))
+    return receivers()
+
+
+def _flow_kinds(user: dict) -> list[str]:
+    return [r["kind"] for r in db.fetch(f"""SELECT DISTINCT s.kind FROM {P}.approval_step s JOIN {P}.approval_step_user su ON su.step_id = s.id
+                                             WHERE s.form = 'pengajuan' AND su.user_id::text = %s""", (str(user["id"]),))]
+
+
+def _by_flow(user: dict) -> set[str]:
+    kinds = _flow_kinds(user)
+    out = {MAIN, WASGEE, COTR} | {k.split("@", 1)[1] for k in kinds if "@" in k}
+    if "VENDOR" in kinds or "INTERCOMPANY" in kinds:
+        out |= {u["code"] for u in units() if u["vendor"]}
+    return out
+
+
+def receives_only(user: dict) -> set[str]:
+    """The units an account reads only as the receiving PT: of these it sees the Antar-PT requests, not the vendor bills."""
+    if chosen(user["id"]) or user.get("role") in ("superadmin", "admin"):
+        return set()
+    return {r["unit"] for r in db.fetch(f"""SELECT DISTINCT p.unit FROM {P}.pengajuan p JOIN {P}.fund_receiver f ON f.payer = p.payee_pt
+                                             WHERE f.user_id::text = %s AND p.kind = 'INTERCOMPANY' AND p.unit IS NOT NULL""",
+                                         (str(user["id"]),))} - _by_flow(user)
+
+
 def monitors(user: dict) -> Optional[set[str]]:
     """The units an account reads in the monitoring; None = every unit. Chosen in User Accounts, else: superadmin / admin
     every unit; the others Kopi Calf, Wasgee and COTR as before, and the units whose flow they are a step of (a step of the
@@ -81,12 +122,7 @@ def monitors(user: dict) -> Optional[set[str]]:
         return set(mine)
     if user.get("role") in ("superadmin", "admin"):
         return None
-    kinds = [r["kind"] for r in db.fetch(f"""SELECT DISTINCT s.kind FROM {P}.approval_step s JOIN {P}.approval_step_user su ON su.step_id = s.id
-                                             WHERE s.form = 'pengajuan' AND su.user_id::text = %s""", (str(user["id"]),))]
-    out = {MAIN, WASGEE, COTR} | {k.split("@", 1)[1] for k in kinds if "@" in k}
-    if "VENDOR" in kinds:
-        out |= {u["code"] for u in units() if u["vendor"]}
-    return out
+    return _by_flow(user) | receives_only(user)
 
 
 def requests_for(user: dict, branches: list[dict]) -> list[str]:
@@ -104,7 +140,11 @@ def requests_for(user: dict, branches: list[dict]) -> list[str]:
 
 def in_monitor(user: dict, row: dict) -> bool:
     mine = monitors(user)
-    return mine is None or (row.get("unit") or MAIN) in mine
+    unit = row.get("unit") or MAIN
+    if mine is None or unit in mine:
+        return row.get("kind") == "INTERCOMPANY" or unit not in receives_only(user)
+    # the receiving PT opens what it confirms, whatever units the account was given
+    return row.get("kind") == "INTERCOMPANY" and str(user["id"]) in receivers().get(row.get("payee_pt") or "", [])
 
 
 def stamp(conn, pengajuan_id: str, unit: str) -> None:

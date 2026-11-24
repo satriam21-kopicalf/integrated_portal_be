@@ -30,7 +30,7 @@ from datetime import date, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -146,6 +146,7 @@ class DraftIn(BaseModel):
     vendorName: Optional[str] = Field(None, max_length=120)
     paymentTerm: Optional[str] = Field(None, max_length=3)
     invoiceDate: Optional[str] = Field(None, max_length=10)
+    payeePt: Optional[str] = Field(None, max_length=80)
     outstandingAmount: Optional[float] = None
 
 
@@ -271,8 +272,12 @@ def monitor(request: Request, dateFrom: Optional[date] = Query(None), dateTo: Op
     mine = fund_units.monitors(user)
     units = [u for u in fund_units.units() if mine is None or u["code"] in mine]
     shown = [u["code"] for u in units] if not unit or unit == "ALL" else [unit] if unit in {u["code"] for u in units} else []
+    res = pg.monitor(start, end, branches, shown)
+    part = fund_units.receives_only(user)
+    if part:
+        res["data"] = [x for x in res["data"] if x["unit"] not in part or x["kind"] == "INTERCOMPANY"]
     return {"period": {"from": start.isoformat(), "to": end.isoformat()}, "me": str(user["id"]), "superadmin": user.get("role") == "superadmin",
-            "units": units, "openByUnit": fund_units.open_counts(), **pg.monitor(start, end, branches, shown)}
+            "units": units, "openByUnit": fund_units.open_counts(), **res}
 
 
 @router.get("/api/pengajuan/monitor/{pengajuan_id}")
@@ -481,7 +486,7 @@ def settings(request: Request, user: dict = Depends(current_user)) -> dict:
             "departments": fund_options.departments(), "canOptions": _options_editor(user), "kindLabels": pg.kind_labels(),
             # the life after the money went out (migration 144): the rules of every kind and the global settings, Finance's
             "rules": fund_lifecycle.rules(), "lifecycle": fund_lifecycle.settings(), "canRules": _finance_editor(user),
-            "units": fund_units.units(), "proofDocs": {d: pg.DOC_TYPES[d] for d in fund_lifecycle.DOCS}}
+            "units": fund_units.units(), "receivers": fund_units.receivers(), "proofDocs": {d: pg.DOC_TYPES[d] for d in fund_lifecycle.DOCS}}
 
 
 def _finance_editor(user: dict) -> bool:
@@ -652,6 +657,168 @@ def set_unit_payer(code: str, body: PayerIn, request: Request, user: dict = Depe
     activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan", summary=f"PT pembayar {code}: {body.payer}",
                     details={"unit": code, "payer": body.payer})
     return {"units": out}
+
+
+class ReceiversIn(BaseModel):
+    payer: str = Field(min_length=1, max_length=80)
+    userIds: List[str] = Field(default_factory=list, max_length=50)
+
+
+@router.put("/api/pengajuan/settings/receivers")
+def set_receivers(body: ReceiversIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    """Who confirms the money a PT receives (Antar-PT)."""
+    _superadmin(request, user)
+    out = _run(fund_units.set_receivers, body.payer, body.userIds)
+    activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan", summary=f"Penerima Antar-PT {body.payer}", details=body.model_dump())
+    return {"receivers": out}
+
+
+# ---------------------------------------------------------------- vendor payments in bulk (app/fund_vendor.py, migration 150)
+
+class IdsIn(BaseModel):
+    ids: List[str] = Field(min_length=1, max_length=200)
+    note: Optional[str] = Field(None, max_length=2000)
+
+
+@router.get("/api/pengajuan/vendor/template")
+def vendor_template(request: Request, user: dict = Depends(current_user)) -> Response:
+    from app import fund_vendor
+    _need(request, user, FORM)
+    return Response(fund_vendor.template(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": 'attachment; filename="Template Pembayaran Vendor.xlsx"'})
+
+
+@router.get("/api/pengajuan/vendor/drafts")
+def vendor_drafts(request: Request, user: dict = Depends(current_user)) -> dict:
+    from app import fund_vendor
+    _need(request, user, FORM)
+    return {"data": fund_vendor.drafts(user)}
+
+
+@router.post("/api/pengajuan/vendor/import")
+async def vendor_import(request: Request, unit: Optional[str] = Query(None, max_length=20), apply: bool = False, user: dict = Depends(current_user)) -> dict:
+    from app import fund_vendor
+    await run_in_threadpool(_need, request, user, FORM)
+    data = await _body(request)
+    out = await run_in_threadpool(_run, fund_vendor.import_rows, user, data, unit, apply)
+    if apply:
+        await run_in_threadpool(lambda: activity.record("pengajuan", user=user, request=request, page="/forms/pengajuan",
+                                                        summary=f"Import pembayaran vendor: {out['created']} draf", details={"created": out["created"]}))
+    return out
+
+
+@router.post("/api/pengajuan/vendor/attach")
+async def vendor_attach(request: Request, name: str = Query(max_length=160), ids: Optional[str] = Query(None, max_length=8000),
+                        user: dict = Depends(current_user)) -> dict:
+    from app import fund_vendor
+    await run_in_threadpool(_need, request, user, FORM)
+    data = await _body(request)
+    return await run_in_threadpool(_run, fund_vendor.attach, user, data, name, [i for i in (ids or "").split(",") if i] or None)
+
+
+@router.post("/api/pengajuan/vendor/send")
+def vendor_send(body: IdsIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    from app import fund_vendor
+    _need(request, user, FORM)
+
+    def send(i: str) -> str:
+        if _run(pg.own, user, i, True)["kind"] != "VENDOR":
+            raise HTTPException(422, detail="Hanya pembayaran vendor")
+        return _run(pg.submit, user, i)["number"]
+    out = fund_vendor.each(body.ids, send)
+    activity.record("pengajuan", user=user, request=request, page="/forms/pengajuan", summary=f"Mengirim {len(out['done'])} pembayaran vendor", details=out)
+    return out
+
+
+@router.post("/api/pengajuan/vendor/discard")
+def vendor_discard(body: IdsIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    from app import fund_vendor
+    _need(request, user, FORM)
+    return fund_vendor.each(body.ids, lambda i: _run(pg.discard, user, i) or i)
+
+
+@router.post("/api/pengajuan/vendor/history")
+async def vendor_history(request: Request, user: dict = Depends(current_user)) -> dict:
+    """The recap of what the Google Form already paid (Finance): its invoices are refused from now on."""
+    from app import fund_vendor
+    await run_in_threadpool(_need, request, user, MON)
+    if not await run_in_threadpool(_finance_editor, user):
+        await run_in_threadpool(deny, request, user)
+    data = await _body(request)
+    out = await run_in_threadpool(_run, fund_vendor.history, user, data)
+    await run_in_threadpool(lambda: activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan",
+                                                    summary=f"Riwayat bayar Google Form: {out['added']} invoice", details=out))
+    return out
+
+
+@router.post("/api/pengajuan/monitor/bulk/approve")
+def bulk_approve(body: IdsIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    from app import fund_vendor
+    _need(request, user, MON)
+
+    def one(i: str) -> str:
+        row = _team_row(request, user, i)
+        if row["kind"] == "INTERCOMPANY":
+            raise HTTPException(422, detail="Antar-PT disetujui satu per satu")
+        if row["status"] != "SUBMITTED":
+            raise HTTPException(422, detail="Bukan menunggu approval")
+        twin = pg.similar(row)
+        if twin:
+            raise HTTPException(422, detail=f"Rekening dan nominal sama dengan {', '.join(twin)}: buka dan periksa dulu")
+        _run(pg.change_status, user, i, "APPROVE", body.note)
+        _record(request, user, f"{row['number']}: approve massal", i, to="APPROVE", note=body.note)
+        return row["number"]
+    return fund_vendor.each(body.ids, one)
+
+
+@router.post("/api/pengajuan/monitor/bulk/pay")
+async def bulk_pay(request: Request, ids: str = Query(max_length=8000), on: date = Query(...), name: str = Query("bukti-transfer", max_length=160),
+                   user: dict = Depends(current_user)) -> dict:
+    """One bank batch: the approved requests of one paying PT, paid in full on one day with the same proof."""
+    from app import fund_vendor
+    await run_in_threadpool(_need, request, user, MON)
+    data = await _body(request)
+
+    def run() -> dict:
+        todo = [i for i in ids.split(",") if i]
+        rows = {i: _team_row(request, user, i) for i in todo}
+        if len({r["payer"] for r in rows.values()}) != 1:
+            raise HTTPException(422, detail="Satu kali bayar massal hanya untuk satu PT pembayar")
+        if on > today():
+            raise HTTPException(422, detail="Tanggal transfer tidak boleh di masa depan")
+
+        def one(i: str) -> str:
+            row = rows[i]
+            if row["kind"] == "INTERCOMPANY":
+                raise HTTPException(422, detail="Antar-PT dibayar satu per satu")
+            if row["status"] != "APPROVED" or not pg.can(user, row)["payment"]:
+                raise HTTPException(422, detail="Bukan menunggu pembayaran Anda")
+            before = {f["id"] for f in pg.files_of(i)}
+            files = _run(pg.add_file, user, i, "PAYMENT", data, name, "TRANSFER", None)["files"]
+            try:
+                _run(pg.change_status, user, i, "PAID", None, {"amount": float(row["approved_amount"]), "on": on.isoformat()})
+            except Exception:
+                for f in files:
+                    if f["id"] not in before:
+                        pg.delete_file(i, f["id"], ("PAYMENT",))
+                raise
+            _record(request, user, f"{row['number']}: dibayar massal", i, to="PAID", on=on.isoformat())
+            return row["number"]
+        return fund_vendor.each(todo, one)
+    return await run_in_threadpool(run)
+
+
+class ReceivedIn(BaseModel):
+    note: Optional[str] = Field(None, max_length=2000)
+
+
+@router.post("/api/pengajuan/monitor/{pengajuan_id}/received")
+def received(pengajuan_id: str, body: ReceivedIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    """Antar-PT: the receiving PT confirms the money."""
+    row = _team_row(request, user, pengajuan_id)
+    _run(pg.confirm_received, user, pengajuan_id, body.note)
+    _record(request, user, f"{row['number']}: uang masuk dikonfirmasi {row['payee_pt']}", pengajuan_id, note=body.note)
+    return _team_view(user, pengajuan_id)
 
 
 class UserUnitsIn(BaseModel):

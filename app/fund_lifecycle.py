@@ -186,6 +186,8 @@ def submit_proof(user: dict, pengajuan_id: str, actual: Any, note: Optional[str]
     row = pg.get_row(pengajuan_id)
     if row is None or (not by_team and row["user_id"] != str(user["id"])):
         raise LookupError("Pengajuan tidak ditemukan")
+    if row["kind"] == "INTERCOMPANY":
+        raise LifecycleError("Antar-PT selesai setelah PT penerima mengonfirmasi uang masuk")
     if row["status"] != "PAID":
         raise LifecycleError("Bukti dikirim saat dana sudah cair dan belum diverifikasi")
     if row["kind"] in pg.DE_KINDS and not by_team:

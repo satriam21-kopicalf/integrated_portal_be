@@ -293,7 +293,7 @@ def operations_only(user: dict) -> bool:
     """A form account (PIC, technician …) with nothing the portal alone has: it uses Operations, not the portal.
     Superadmins and accounts with other menus (Monitoring, Cost Control, Aggregator …) keep the portal; an account
     without any form (the outlet / hub accounts: Stock Opname and Waste) too."""
-    if user.get("role") in ("superadmin", "outlet"):  # outlet / hub: a form never takes the portal away (Stock Opname)
+    if user.get("role") == "superadmin":
         return False
     pages = set(pages_for(user))
     return any(p.startswith("form.") for p in pages) and pages <= OPERATIONS_PAGES

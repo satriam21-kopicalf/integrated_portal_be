@@ -22,3 +22,9 @@ def test_vendor_payment_needs():
            "payee_account": "146", "payee_name": "PT SUKANDA"}
     assert missing_vendor(row, [{"kind": "OTHER"}]) == []  # past due dates are allowed
     assert len(missing_vendor({**row, "requested_amount": 200, "vendor_name": ""}, [])) == 3
+
+
+def test_an_outlet_account_with_forms_stays_in_operations(monkeypatch):
+    from app import access
+    monkeypatch.setattr(access, "pages_for", lambda u: ["form.pengajuan", "stock-opname", "waste", "guide"])
+    assert access.operations_only({"role": "outlet", "id": "x"}) and not access.operations_only({"role": "superadmin", "id": "x"})

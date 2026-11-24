@@ -221,10 +221,19 @@ def get_row(pengajuan_id: str) -> Optional[dict]:
     return db.fetchrow(f"SELECT {COLS} FROM {P}.pengajuan p WHERE p.id::text = %s", (pengajuan_id,))
 
 
+def category_label(code: Optional[str], names: Optional[dict[int, str]] = None) -> Optional[str]:
+    """The label of a line category: a fixed one, or "TRX:<id>" = a Jenis Transaksi (Maintenance & Procurement, 142)."""
+    if code and code.startswith("TRX:") and code[4:].isdigit():
+        names = names if names is not None else _option_names()
+        return names.get(int(code[4:]), code)
+    return CATEGORIES.get(code, code) if code else code
+
+
 def lines_of(pengajuan_id: str) -> list[dict]:
     rows = db.fetch(f"""SELECT id, sort, spent_on, category, description, amount, review, review_note, reviewed_by
                         FROM {P}.pengajuan_line WHERE pengajuan_id::text = %s ORDER BY sort, id""", (pengajuan_id,))
-    return [{"id": r["id"], "spentOn": _iso(r["spent_on"]), "category": r["category"], "categoryLabel": CATEGORIES.get(r["category"], r["category"]),
+    names = _option_names() if any((r["category"] or "").startswith("TRX:") for r in rows) else {}
+    return [{"id": r["id"], "spentOn": _iso(r["spent_on"]), "category": r["category"], "categoryLabel": category_label(r["category"], names),
              "description": r["description"], "amount": _num(r["amount"]), "review": r["review"], "reviewNote": r["review_note"],
              "reviewedBy": r["reviewed_by"]} for r in rows]
 

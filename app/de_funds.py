@@ -60,7 +60,7 @@ def lines_from(costs: list[dict]) -> list[dict]:
         if amount <= 0:
             continue
         qty = c.get("qty") or 1
-        out.append({"category": CATEGORY.get(c.get("kind"), "OTHER"), "amount": amount,
+        out.append({"category": f"TRX:{c['transactionId']}" if c.get("transactionId") else CATEGORY.get(c.get("kind"), "OTHER"), "amount": amount,
                     "description": f"{c['description']} (×{qty:g})" if qty != 1 else c["description"]})
     return out
 

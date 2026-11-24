@@ -700,6 +700,7 @@ def team_full(request_id: str) -> dict:
     out["approval"] = approval_state(row) if row["status"] == "PENDING" else None
     out["workLinks"] = work_links(request_id)
     out["costItems"] = cost_items(request_id)
+    out["transactionOptions"] = transaction_options()  # the categories of a cost line (Fund Request, migration 142)
     out["labor"] = labor(request_id)
     from app import de_funds
     out["fund"] = de_funds.view_of(request_id)  # the request's money in Fund Request (Finance)
@@ -1275,8 +1276,10 @@ def overview(date_from: date, date_to: date, branches: Optional[list[str]]) -> d
 # ---------------------------------------------------------------- cost lines & labour
 
 def cost_items(request_id: str) -> list[dict]:
-    rows = db.fetch(f"SELECT * FROM {P}.de_cost_item WHERE request_id::text = %s ORDER BY id", (request_id,))
-    return [{"id": r["id"], "kind": r["kind"], "description": r["description"], "qty": _num(r["qty"]), "estAmount": _num(r["est_amount"]),
+    rows = db.fetch(f"""SELECT c.*, o.name AS transaction_name FROM {P}.de_cost_item c
+                        LEFT JOIN {P}.fund_option o ON o.id = c.transaction_id WHERE c.request_id::text = %s ORDER BY c.id""", (request_id,))
+    return [{"id": r["id"], "kind": r["kind"], "transactionId": r["transaction_id"], "transactionName": r["transaction_name"],
+             "description": r["description"], "qty": _num(r["qty"]), "estAmount": _num(r["est_amount"]),
              "actualAmount": _num(r["actual_amount"]), "by": r["created_by"], "at": _iso(r["updated_at"])} for r in rows]
 
 
@@ -1366,11 +1369,23 @@ def _amount(v: Any) -> Optional[float]:
     return round(v, 2)
 
 
+def transaction_options() -> list[dict]:
+    """The Jenis Transaksi of Fund Request (management's list): the categories of a cost line (migration 142)."""
+    return [{"id": r["id"], "name": r["name"]} for r in db.fetch(
+        f"SELECT id, name FROM {P}.fund_option WHERE list = 'TRANSACTION' AND is_active ORDER BY sort, name")]
+
+
 def save_cost_item(user: dict, request_id: str, item_id: Optional[int], body: dict) -> dict:
     _cost_open(request_id)
-    kind = body.get("kind") or "MATERIAL"
+    kind = body.get("kind") or "OTHER"
     if kind not in COST_KINDS:
         raise DeError("Jenis biaya tidak dikenal")
+    try:
+        trx = int(body.get("transactionId") or 0)
+    except (TypeError, ValueError):
+        trx = 0
+    if not db.fetchrow(f"SELECT 1 FROM {P}.fund_option WHERE id = %s AND list = 'TRANSACTION' AND is_active", (trx,)):
+        raise DeError("Pilih Jenis Transaksi (daftar Fund Request)")
     desc = " ".join((body.get("description") or "").split())[:200]
     if not desc:
         raise DeError("Deskripsi biaya wajib diisi")
@@ -1381,12 +1396,12 @@ def save_cost_item(user: dict, request_id: str, item_id: Optional[int], body: di
     by = user.get("full_name") or user["username"]
     with db.transaction() as conn:
         if item_id is None:
-            conn.execute(f"""INSERT INTO {P}.de_cost_item (request_id, kind, description, qty, est_amount, actual_amount, created_by)
-                             VALUES (%s, %s, %s, %s, %s, %s, %s)""", (request_id, kind, desc, qty, est, act, by))
+            conn.execute(f"""INSERT INTO {P}.de_cost_item (request_id, kind, transaction_id, description, qty, est_amount, actual_amount, created_by)
+                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""", (request_id, kind, trx, desc, qty, est, act, by))
         else:
-            n = conn.execute(f"""UPDATE {P}.de_cost_item SET kind = %s, description = %s, qty = %s, est_amount = %s, actual_amount = %s,
-                                 created_by = %s, updated_at = now() WHERE id = %s AND request_id::text = %s""",
-                             (kind, desc, qty, est, act, by, item_id, request_id)).rowcount
+            n = conn.execute(f"""UPDATE {P}.de_cost_item SET kind = %s, transaction_id = %s, description = %s, qty = %s, est_amount = %s,
+                                 actual_amount = %s, created_by = %s, updated_at = now() WHERE id = %s AND request_id::text = %s""",
+                             (kind, trx, desc, qty, est, act, by, item_id, request_id)).rowcount
             if not n:
                 raise LookupError("Baris biaya tidak ditemukan")
         _event(conn, request_id, user, "COST", None, None, None,

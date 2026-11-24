@@ -45,3 +45,20 @@ def test_settlement_of_the_actual_cost():
     assert df.settlement(Decimal(870000), Decimal(800000), paid=True) == ("REFUND", Decimal(70000))
     assert df.settlement(Decimal(870000), Decimal(800000), paid=False) == ("UNPAID_LESS", Decimal(70000))
     assert df.settlement(Decimal(870000), Decimal(870000), paid=True) == ("EVEN", Decimal(0))
+
+
+def test_fund_lines_carry_the_jenis_transaksi():
+    """Migration 142: a cost line's Jenis Transaksi becomes the fund line's category TRX:<id>; old lines keep their kind."""
+    from app.de_funds import lines_from
+    out = lines_from([{"kind": "MATERIAL", "transactionId": 7, "description": "Gasket", "qty": 2, "estAmount": 50000},
+                      {"kind": "TRANSPORT", "transactionId": None, "description": "Ojek", "qty": 1, "estAmount": 20000},
+                      {"kind": "OTHER", "transactionId": 3, "description": "No estimate", "qty": 1, "estAmount": None}])
+    assert [ln["category"] for ln in out] == ["TRX:7", "TRANSPORT"]
+    assert out[0]["description"] == "Gasket (×2)"
+
+
+def test_category_label_of_a_jenis_transaksi():
+    from app.pengajuan import category_label
+    assert category_label("TRX:7", {7: "Purchase of Tools/Assets/Machinery"}) == "Purchase of Tools/Assets/Machinery"
+    assert category_label("TRX:9", {}) == "TRX:9"
+    assert category_label("RAW") == "Bahan baku"

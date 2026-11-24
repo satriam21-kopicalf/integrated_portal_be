@@ -354,14 +354,14 @@ def events_of(request_id: str) -> list[dict]:
 
 
 def assignments_of(request_id: str) -> list[dict]:
-    rows = db.fetch(f"""SELECT a.id, a.technician_id, t.name, t.kind, t.company, t.phone, a.scheduled_for, a.status, a.note, a.assigned_at,
+    rows = db.fetch(f"""SELECT a.id, a.technician_id, t.name, t.kind, t.company, t.phone, t.bank, t.account_no, t.account_name, a.scheduled_for, a.status, a.note, a.assigned_at,
                                a.assigned_by, a.released_at, a.released_note
                         FROM {P}.de_assignment a JOIN {P}.de_technician t ON t.id = a.technician_id
                         WHERE a.request_id::text = %s ORDER BY a.status = 'ACTIVE' DESC, a.assigned_at""", (request_id,))
     return [{"id": r["id"], "technicianId": r["technician_id"], "name": r["name"], "kind": r["kind"], "company": r["company"],
              "phone": r["phone"], "scheduledFor": _iso(r["scheduled_for"]), "status": r["status"], "note": r["note"],
              "assignedAt": _iso(r["assigned_at"]), "assignedBy": r["assigned_by"], "releasedAt": _iso(r["released_at"]),
-             "releasedNote": r["released_note"]} for r in rows]
+             "releasedNote": r["released_note"], "bank": r["bank"], "accountNo": r["account_no"], "accountName": r["account_name"]} for r in rows]
 
 
 def tracker(row: dict, events: list[dict]) -> dict:

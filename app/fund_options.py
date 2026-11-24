@@ -85,6 +85,21 @@ def update(user: dict, option_id: int, body: dict) -> dict:
     return _view(r)
 
 
+def reorder(user: dict, list_: str, ids: list[int]) -> list[dict]:
+    """The options of a list in the order dragged (2026-11-24); those not named keep their order after them."""
+    if list_ not in LISTS:
+        raise OptionError("Daftar tidak dikenal")
+    have = [r["id"] for r in db.fetch(f"SELECT id FROM {P}.fund_option WHERE list = %s ORDER BY sort, lower(name)", (list_,))]
+    if len(set(ids)) != len(ids) or set(ids) - set(have):
+        raise OptionError("Urutan tidak sesuai daftar; muat ulang")
+    order = [*ids, *(i for i in have if i not in set(ids))]
+    with db.transaction() as conn:
+        for n, i in enumerate(order, 1):
+            conn.execute(f"UPDATE {P}.fund_option SET sort = %s, updated_at = now(), updated_by = %s WHERE id = %s AND sort <> %s",
+                         (n * 10, _who(user), i, n * 10))
+    return all_options()[list_]
+
+
 def usage(option_id: int) -> int:
     """How many requests and cost lines use an option (2026-11-24): a used one is deactivated, never deleted."""
     r = db.fetchrow(f"""SELECT (SELECT count(*) FROM {P}.pengajuan WHERE %(id)s IN (purpose_id, transaction_type_id, project_id, account_type_id))

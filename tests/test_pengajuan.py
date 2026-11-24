@@ -64,7 +64,7 @@ def test_steps_are_taken_by_their_users(monkeypatch):
     step2 = {**step1, "approval_step": 2}  # a step without users: superadmins only
     assert pg.allowed_next(AM, step2) == [] and pg.allowed_next(SA, step2)
     paying = {"status": "APPROVED", "approval_step": 2, "kind": "BILL"}
-    assert pg.allowed_next(FIN, paying) == ["PAID", "REVISION"] and pg.allowed_next(AM, paying) == []
+    assert pg.allowed_next(FIN, paying) == ["PAID", "REVISION", "CANCELLED"] and pg.allowed_next(AM, paying) == []
     assert pg.allowed_next(FIN, {"status": "PAID", "approval_step": 2, "kind": "BILL"}) == []
     monkeypatch.setattr(pg, "get_row", lambda i: {"status": "SUBMITTED", "approval_step": 1, "kind": "BILL", "id": i})
     with pytest.raises(PermissionError):

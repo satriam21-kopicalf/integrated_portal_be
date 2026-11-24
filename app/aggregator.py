@@ -363,9 +363,10 @@ def who_handles(day: date) -> list[dict]:
     for k, o in ovr.items():
         by[k] = {"userId": str(o["user_id"]) if o["user_id"] else None, "source": "exception", "note": o["note"]}
     out = []
+    all_slots = slots()  # once: asked per outlet it made Opening & Closing take 18 s
     for o in outlets():
         row = {"branchCode": o["branch_code"], "branchName": o["branch_name"], "slots": {}}
-        for s in slots():
+        for s in all_slots:
             a = by.get((o["branch_code"], s["code"]))
             if a:
                 row["slots"][s["code"]] = {**a, "name": names.get(a["userId"]) if a.get("userId") else None}

@@ -166,7 +166,8 @@ def _clean(body: UserFields, creating: bool, user_id: Optional[str] = None,
     if mine is not None and role != "superadmin" and set(data.get("branches") or []) - set(mine):
         return None, _error("Cabang di luar akses Anda", field="branches")
     if role in accounts.LIMITABLE_ROLES:  # some branches, or none chosen = every branch (2026-11-24)
-        pass
+        if "branches" not in data and (current or {}).get("role") not in accounts.LIMITABLE_ROLES:
+            data["branches"] = []  # promoted: the branches of the old role do not narrow the new one by themselves
     elif role in accounts.GLOBAL_ROLES or role == "driver":  # cost_control sees every branch; drivers none (COTR)
         if creating or "branches" in data or (current or {}).get("branch_codes"):
             data["branches"] = []

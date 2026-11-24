@@ -27,7 +27,7 @@ the plafon):
 Both: GET /api/pengajuan/files/{file}
 """
 from datetime import date, timedelta
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
@@ -192,6 +192,19 @@ def submit(pengajuan_id: str, request: Request, user: dict = Depends(current_use
     out = _run(pg.submit, user, pengajuan_id)
     activity.record("pengajuan", user=user, request=request, page="/forms/pengajuan", summary=f"Mengirim pengajuan {out['number']}",
                     details={"id": pengajuan_id, "totalOut": out["totalOut"]})
+    return out
+
+
+class CancelIn(BaseModel):
+    note: str = Field(min_length=1, max_length=2000)
+
+
+@router.post("/api/pengajuan/requests/{pengajuan_id}/cancel")
+def cancel(pengajuan_id: str, body: CancelIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    _need(request, user, *PROOF_PAGES)
+    out = _run(pg.cancel, user, pengajuan_id, body.note)
+    activity.record("pengajuan", user=user, request=request, page="/forms/pengajuan", summary=f"Membatalkan pengajuan {out['number']}",
+                    details={"id": pengajuan_id, "note": body.note})
     return out
 
 
@@ -575,6 +588,21 @@ def add_option(body: OptionIn, request: Request, user: dict = Depends(current_us
     activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan",
                     summary=f"Menambah {fund_options.LISTS[body.list]}: {out['name']}", details=out)
     return out
+
+
+class OrderIn(BaseModel):
+    list: str = Field(pattern="^(PURPOSE|TRANSACTION|PROJECT|ACCOUNT)$")
+    ids: List[int] = Field(min_length=1, max_length=500)
+
+
+@router.put("/api/pengajuan/settings/options/order")
+def order_options(body: OrderIn, request: Request, user: dict = Depends(current_user)) -> dict:
+    from app import fund_options
+    _need_options(request, user)
+    out = _run(fund_options.reorder, user, body.list, body.ids)
+    activity.record("pengajuan", user=user, request=request, page="/monitoring/pengajuan",
+                    summary=f"Mengurutkan {fund_options.LISTS[body.list]}", details={"ids": body.ids})
+    return {"data": out}
 
 
 @router.patch("/api/pengajuan/settings/options/{option_id}")

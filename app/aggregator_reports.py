@@ -8,6 +8,9 @@ change, so a grace period applies, agg_state grace_minutes):
     late     minutes after the opening hour, beyond the grace
     early    closed for good before the closing hour (beyond the grace): minutes early
     pause    the minutes closed between the opening and the closing hour, apart from that early close
+BotFood sees an opening late (often an hour or more), so its "late" is an upper bound. The first POS order of the platform
+at the outlet proves it was open by then (2026-11-24): the earlier of the two counts (evidence "order"); without such an
+order the late row stays as BotFood says, not proven.
 Every row carries the member of the Aggregator team handling the outlet that day (handle schedule).
 
 Out of Stock: what is out now (agg_item) per outlet, platform and category, and in a period how often each item went
@@ -15,7 +18,7 @@ out and for how long (agg_stock_event). Packaging categories are left out unless
 """
 import time
 from collections import defaultdict
-from datetime import date, datetime, time as dtime, timedelta
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Optional
 
 from app import aggregator as agg
@@ -255,6 +258,48 @@ def day_row(events_today: list[dict], was_open: Optional[bool], d: date, ot: Opt
     return row
 
 
+_orders: dict[date, dict[tuple[str, str], int]] = {}  # past days, kept in memory
+ORDER_FROM = 4  # before 04:00 an order belongs to the night before
+
+
+def first_orders(days: set[date]) -> dict[tuple[date, str, str], int]:
+    """(day, branch, platform) to the minute of the day of its first POS order (sales_date_in is WIB wall time)."""
+    today_ = datetime.now(WIB).date()
+    need = sorted(d for d in days if d not in _orders)
+    if need:
+        got: dict[date, dict[tuple[str, str], int]] = {d: {} for d in need}
+        for r in db.fetch("""SELECT branch_code AS b, sales_date::date AS d, visit_purpose AS v, min(sales_date_in) AS f
+                             FROM integration_esb.transactions_pos_sales
+                             WHERE sales_date >= %s AND sales_date < %s::date + 1
+                               AND visit_purpose IN ('GrabFood', 'GoFood', 'ShopeeFood')
+                               AND extract(hour FROM sales_date_in AT TIME ZONE 'UTC') >= %s
+                             GROUP BY 1, 2, 3""", (need[0], need[-1], ORDER_FROM)):
+            if r["d"] in got and r["f"]:
+                f = r["f"].astimezone(timezone.utc) if r["f"].tzinfo else r["f"]
+                got[r["d"]][(r["b"], r["v"])] = f.hour * 60 + f.minute
+        out = {**_orders, **got}
+        for d in need:
+            if d < today_ - timedelta(days=1):  # the last days still get late bills
+                _orders[d] = got[d]
+    else:
+        out = _orders
+    return {(d, b, v): m for d in days for (b, v), m in out.get(d, {}).items()}
+
+
+def proven(row: dict, ot: Optional[dtime], order: Optional[int], g: int) -> dict:
+    """A late / not opened row with the first order of the platform: the earlier one counts. Pure (tested)."""
+    if ot is None or order is None or row["status"] not in ("late", "not_opened"):
+        return row
+    at = int(row["openedAt"][:2]) * 60 + int(row["openedAt"][3:]) if row.get("openedAt") else None
+    if at is not None and order >= at:
+        return row
+    late = order - (ot.hour * 60 + ot.minute)
+    if row["lateMin"] and late >= row["lateMin"]:
+        return row
+    return {**row, "openedAt": f"{order // 60:02d}:{order % 60:02d}", "evidence": "order",
+            "lateMin": late if late > g else 0, "status": "late" if late > g else "on_time"}
+
+
 def opening(d_from: date, d_to: date, channel: Optional[str] = None) -> dict:
     g = grace()
     now = datetime.now(WIB)
@@ -292,8 +337,13 @@ def opening(d_from: date, d_to: date, channel: Optional[str] = None) -> dict:
                          "platform": c["channel"], "openTime": ot.strftime("%H:%M") if ot else None, "closeTime": ct.strftime("%H:%M") if ct else None,
                          "events": len(todays), "member": handlers.get((d, c["branch_code"])) if c["branch_code"] else None, **r})
             d += timedelta(days=1)
+    late_days = {date.fromisoformat(r["day"]) for r in rows if r["status"] in ("late", "not_opened") and r["branchCode"]}
+    orders = first_orders(late_days) if late_days else {}
+    rows = [{"evidence": "botfood", **proven(r, _time(r["openTime"] + ":00") if r["openTime"] else None,
+                                             orders.get((date.fromisoformat(r["day"]), r["branchCode"], r["platform"])), g)} for r in rows]
     counted = [r for r in rows if r["status"] in ("on_time", "late", "not_opened")]
     summary = {
+        "byOrder": sum(r["evidence"] == "order" and r["status"] == "on_time" for r in rows),
         "grace": g, "rows": len(rows), "counted": len(counted),
         "onTime": sum(r["status"] == "on_time" for r in rows), "late": sum(r["status"] == "late" for r in rows),
         "notOpened": sum(r["status"] == "not_opened" for r in rows), "earlyClose": sum(1 for r in rows if r["earlyMin"]),

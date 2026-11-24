@@ -34,7 +34,7 @@ def fund_of(de_id: str) -> Optional[dict]:
     """The request's fund (not a settlement top-up): the open or paid one, else the latest rejected."""
     return db.fetchrow(f"""SELECT {pg.COLS}, p.refund_amount, p.refunded_at FROM {P}.pengajuan p
                            WHERE p.de_request_id::text = %s AND p.settles_id IS NULL AND p.kind IN ('MAINTENANCE', 'PROCUREMENT')
-                           ORDER BY (p.status = 'REJECTED'), p.created_at DESC LIMIT 1""", (de_id,))
+                           ORDER BY (p.status IN ('REJECTED', 'CANCELLED')), p.created_at DESC LIMIT 1""", (de_id,))
 
 
 def needs_fund(row: dict) -> bool:
@@ -46,7 +46,7 @@ def gate(row: dict, to: str) -> None:
     if to not in GATED or not needs_fund(row):
         return
     fund = fund_of(row["id"])
-    if fund is None or fund["status"] == "REJECTED":
+    if fund is None or fund["status"] in ("REJECTED", "CANCELLED"):
         raise DeError("Ajukan dana ke Finance dulu (Biaya & invoice → Ajukan dana); pekerjaan dimulai setelah disetujui")
     if fund["status"] not in CLEARED:
         raise DeError(f"Dana {fund['number']} masih {pg.STATUS_LABEL[fund['status']].lower()}: tunggu disetujui Finance")
@@ -92,7 +92,7 @@ def request_funds(user: dict, de_id: str, payee: dict, note: Optional[str]) -> d
         raise DeError("Isi estimasi biaya dulu (Biaya & invoice): dana diajukan dari baris biaya")
     bank, account, name, ptype = payee_of(payee)
     fund = fund_of(de_id)
-    if fund is not None and fund["status"] not in ("REVISION", "REJECTED"):
+    if fund is not None and fund["status"] not in ("REVISION", "REJECTED", "CANCELLED"):
         raise DeError(f"Dana sudah diajukan ({fund['number']}, {pg.STATUS_LABEL[fund['status']].lower()})")
     revise = fund is not None and fund["status"] == "REVISION"
     total = sum((ln["amount"] for ln in lines), Decimal(0))
@@ -228,7 +228,7 @@ def advances_of(de_id: str) -> list[dict]:
                                p.created_at, s.number AS settle_number, s.status AS settle_status, s.requested_amount AS settle_amount
                         FROM {P}.pengajuan p
                         LEFT JOIN LATERAL (SELECT number, status, requested_amount FROM {P}.pengajuan x
-                                           WHERE x.settles_id = p.id AND x.status <> 'REJECTED' ORDER BY x.created_at DESC LIMIT 1) s ON true
+                                           WHERE x.settles_id = p.id AND x.status NOT IN ('REJECTED', 'CANCELLED') ORDER BY x.created_at DESC LIMIT 1) s ON true
                         WHERE p.de_request_id::text = %s AND p.kind = 'PERSONAL' ORDER BY p.created_at""", (de_id,))
     return [{"id": r["id"], "userId": r["user_id"], "number": r["number"], "status": r["status"], "statusLabel": pg.STATUS_LABEL[r["status"]],
              "technician": r["requester_name"], "amount": pg._num(r["requested_amount"]), "approvedAmount": pg._num(r["approved_amount"]),

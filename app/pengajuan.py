@@ -76,7 +76,8 @@ STATUS_LABEL = {"DRAFT": "Draf", "SUBMITTED": "Pending", "REVISION": "Revisi", "
 EDITABLE = ("DRAFT", "REVISION")
 OPEN = ("SUBMITTED", "REVISION", "APPROVED", "PAID", "VERIFYING")
 ACTIONS = ("APPROVE", "REVISION", "REJECTED", "PAID")
-NOTE_REQUIRED = ("REVISION", "REJECTED")
+NOTE_REQUIRED = ("REVISION", "REJECTED", "CANCELLED")
+CANCELLABLE = ("SUBMITTED", "REVISION", "APPROVED")  # before the money goes out
 MAX_STEPS = 8
 
 
@@ -588,7 +589,7 @@ def previous_closing(branch_code: str, exclude: Optional[str] = None) -> Optiona
     """The branch's latest sent petty cash (not rejected): its closing balance is the next opening balance, the next
     period starts the day after its end."""
     return db.fetchrow(f"""SELECT closing_balance, period_to FROM {P}.pengajuan WHERE branch_code = %s AND kind = 'PETTY_CASH'
-                             AND status NOT IN ('DRAFT', 'REJECTED') AND (%s::text IS NULL OR id::text <> %s) AND closing_balance IS NOT NULL
+                             AND status NOT IN ('DRAFT', 'REJECTED', 'CANCELLED') AND (%s::text IS NULL OR id::text <> %s) AND closing_balance IS NOT NULL
                            ORDER BY period_to DESC NULLS LAST, first_submitted_at DESC LIMIT 1""", (branch_code, exclude, exclude))
 
 
@@ -778,7 +779,7 @@ def overlapping(row: dict) -> Optional[str]:
     if row.get("kind") != "PETTY_CASH" or not row["period_from"] or not row["period_to"]:
         return None
     r = db.fetchrow(f"""SELECT number FROM {P}.pengajuan WHERE branch_code = %s AND kind = 'PETTY_CASH' AND id::text <> %s
-                          AND status NOT IN ('DRAFT', 'REJECTED') AND period_from <= %s AND period_to >= %s LIMIT 1""",
+                          AND status NOT IN ('DRAFT', 'REJECTED', 'CANCELLED') AND period_from <= %s AND period_to >= %s LIMIT 1""",
                     (row["branch_code"], row["id"], row["period_to"], row["period_from"]))
     return r["number"] if r else None
 
@@ -842,7 +843,7 @@ def discard(user: dict, pengajuan_id: str) -> None:
 def allowed_next(user: dict, row: dict, steps: Optional[list[dict]] = None) -> list[str]:
     if row["status"] not in ("SUBMITTED", "APPROVED") or not takes(user, current_step(row, steps)):
         return []
-    return ["APPROVE", "REVISION", "REJECTED"] if row["status"] == "SUBMITTED" else ["PAID", "REVISION"]
+    return ["APPROVE", "REVISION", "REJECTED"] if row["status"] == "SUBMITTED" else ["PAID", "REVISION", "CANCELLED"]
 
 
 def can(user: dict, row: dict) -> dict:
@@ -893,7 +894,7 @@ def change_status(user: dict, pengajuan_id: str, to: str, note: Optional[str], p
         raise PermissionError(f"Tahap {step['label'] if step else '—'} bukan bagian Anda (approver: {who})")
     note = (note or "").strip()[:2000] or None
     if to in NOTE_REQUIRED and not note:
-        raise PengajuanError("Tulis alasannya agar outlet tahu apa yang harus diperbaiki" if to == "REVISION" else "Tulis alasan penolakan")
+        raise PengajuanError("Tulis alasannya agar outlet tahu apa yang harus diperbaiki" if to == "REVISION" else "Tulis alasan pembatalan" if to == "CANCELLED" else "Tulis alasan penolakan")
     details: dict[str, Any] = {"step": step["label"], "action": to}
     sets: list[str] = []
     status, position = to, row["approval_step"]
@@ -924,7 +925,7 @@ def change_status(user: dict, pengajuan_id: str, to: str, note: Optional[str], p
         details["proofDueOn"] = due
         sets += ["paid_at = now()", "paid_by = %(actor)s", "paid_amount = %(paid)s", "paid_on = %(paid_on)s", "paid_note = %(note)s",
                  "proof_due_on = %(due)s"] + (["closed_at = now()", "done_at = now()"] if status == "DONE" else [])
-    if to == "REJECTED":
+    if to in ("REJECTED", "CANCELLED"):
         sets.append("closed_at = now()")
     params = {"id": pengajuan_id, "to": status, "pos": position, "actor": _actor(user), "approved": details.get("approvedAmount"),
               "paid": details.get("amount"), "paid_on": details.get("on"), "note": note, "due": details.get("proofDueOn")}
@@ -937,8 +938,27 @@ def change_status(user: dict, pengajuan_id: str, to: str, note: Optional[str], p
     return full(pengajuan_id)
 
 
+def cancel(user: dict, pengajuan_id: str, note: Optional[str]) -> dict:
+    """The requester withdraws the request before the money goes out (2026-11-24); a reason is required."""
+    row = own(user, pengajuan_id)
+    if row["status"] not in CANCELLABLE:
+        raise PengajuanError("Pengajuan dibatalkan sebelum dana dicairkan")
+    note = (note or "").strip()[:2000] or None
+    if not note:
+        raise PengajuanError("Tulis alasan pembatalan")
+    from app import de_funds
+    with db.transaction() as conn:
+        hit = conn.execute(f"""UPDATE {P}.pengajuan SET status = 'CANCELLED', closed_at = now(), updated_at = now()
+                               WHERE id::text = %s AND status = ANY(%s) RETURNING id""", (pengajuan_id, list(CANCELLABLE))).fetchone()
+        if hit is None:
+            raise PengajuanError("Pengajuan baru saja diproses; muat ulang")
+        _event(conn, pengajuan_id, user, "STATUS", row["status"], "CANCELLED", note, {"action": "CANCELLED", "byRequester": True})
+        de_funds.on_fund_status(conn, row, user, "CANCELLED", note, {})
+    return full(pengajuan_id)
+
+
 def allowed_actions(status: str) -> tuple[str, ...]:
-    return {"SUBMITTED": ("APPROVE", "REVISION", "REJECTED"), "APPROVED": ("PAID", "REVISION")}.get(status, ())
+    return {"SUBMITTED": ("APPROVE", "REVISION", "REJECTED"), "APPROVED": ("PAID", "REVISION", "CANCELLED")}.get(status, ())
 
 
 def review_line(user: dict, pengajuan_id: str, line_id: int, review: str, note: Optional[str]) -> dict:
@@ -1034,7 +1054,7 @@ def open_advances(user_id: str, exclude: Optional[str] = None) -> list[dict]:
     rows = db.fetch(f"""SELECT p.id::text, p.number, p.paid_amount, p.paid_on, p.purpose FROM {P}.pengajuan p
                          JOIN {P}.fund_option o ON o.id = p.purpose_id AND o.settings->>'type' = 'ADVANCE'
                         WHERE p.kind = 'PERSONAL' AND p.user_id::text = %s AND p.status = 'PAID'
-                          AND NOT EXISTS (SELECT 1 FROM {P}.pengajuan s WHERE s.settles_id = p.id AND s.status NOT IN ('DRAFT', 'REJECTED')
+                          AND NOT EXISTS (SELECT 1 FROM {P}.pengajuan s WHERE s.settles_id = p.id AND s.status NOT IN ('DRAFT', 'REJECTED', 'CANCELLED')
                                             AND (%s::text IS NULL OR s.id::text <> %s))
                         ORDER BY p.paid_on DESC NULLS LAST""", (user_id, exclude, exclude))
     return [{"id": r["id"], "number": r["number"], "paidAmount": _num(r["paid_amount"]), "paidOn": _iso(r["paid_on"]), "purpose": r["purpose"]} for r in rows]

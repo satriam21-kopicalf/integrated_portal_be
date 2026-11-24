@@ -11,6 +11,9 @@ needs a look, scanned in the background every SCAN_S seconds:
                do not count until then)
     gr_daily   daily from 06:00 WIB: the GRs of yesterday and how many of them needed a look
 
+    fund_proof personal (2026-11-24, migration 147): the proof of a Fund Request past its due day, to its requester (again
+               every 3 days) and one summary a day to whoever verifies it; gone once the proof is sent
+
 `dedup` makes a scan harmless to repeat (several workers, a restart). Who opens Good Receipt or COGS & Usage sees the
 bell; each user marks alerts read for themselves. Alerts older than KEEP_DAYS are deleted.
 """
@@ -54,10 +57,10 @@ def _gr_link(doc: str, day: Optional[str]) -> str:
 
 def _add(conn, a: dict) -> int:
     row = conn.execute(
-        f"""INSERT INTO {T} (dedup, kind, severity, title, body, link, branch_code, doc_num)
-            VALUES (%(dedup)s, %(kind)s, %(severity)s, %(title)s, %(body)s, %(link)s, %(branch)s, %(doc)s)
+        f"""INSERT INTO {T} (dedup, kind, severity, title, body, link, branch_code, doc_num, user_id)
+            VALUES (%(dedup)s, %(kind)s, %(severity)s, %(title)s, %(body)s, %(link)s, %(branch)s, %(doc)s, %(user)s)
             ON CONFLICT (dedup) DO NOTHING RETURNING id""",
-        {"body": None, "link": None, "branch": None, "doc": None, **a}).fetchone()
+        {"body": None, "link": None, "branch": None, "doc": None, "user": None, **a}).fetchone()
     return 1 if row else 0
 
 
@@ -151,6 +154,42 @@ def daily(today: date, hour: int) -> list[dict]:
     return out
 
 
+def fund_proofs(rows: list[dict], payers: dict[str, list[str]], today: date) -> list[dict]:
+    """The overdue proofs as personal alerts. Pure (tested): rows = requests In Progress past their proof day, payers =
+    request id to the accounts of its payment step."""
+    out: list[dict] = []
+    per: dict[str, list[dict]] = {}
+    for r in rows:
+        late = (today - r["proof_due_on"]).days
+        what = f"{r['number']} · Rp {_num(float(r['paid_amount'] or 0))}"
+        team = r["kind"] in ("MAINTENANCE", "PROCUREMENT")
+        out.append({"dedup": f"fund_proof:{r['id']}:{r['proof_due_on']}:{(late - 1) // 3}:{r['user_id']}", "kind": "fund_proof",
+                    "severity": "high" if late > 7 else "warn", "title": f"Bukti dana terlambat {late} hari: {r['number']}",
+                    "body": f"{what} · batas {r['proof_due_on'].strftime('%d/%m/%Y')}. "
+                            + ("Kirim bukti dari request-nya setelah serah terima" if team else "Lampirkan bukti dan nominal yang benar-benar terpakai"),
+                    "link": "/monitoring/damaged-equipment" if team else f"/forms/pengajuan?view={r['id']}",
+                    "branch": r["branch_code"], "doc": r["number"], "user": r["user_id"]})
+        for u in payers.get(r["id"], []):
+            per.setdefault(u, []).append(r)
+    for u, rs in per.items():
+        top = ", ".join(r["number"] for r in sorted(rs, key=lambda x: x["proof_due_on"])[:5])
+        out.append({"dedup": f"fund_proof_sum:{today}:{u}", "kind": "fund_proof_sum", "severity": "warn",
+                    "title": f"{len(rs)} bukti dana terlambat",
+                    "body": f"Total Rp {_num(sum(float(r['paid_amount'] or 0) for r in rs))} belum dipertanggungjawabkan: {top}" + (" …" if len(rs) > 5 else ""),
+                    "link": "/monitoring/pengajuan", "user": u})
+    return out
+
+
+def overdue_proofs(today: date) -> list[dict]:
+    from app import pengajuan as pg
+    rows = db.fetch(f"""SELECT {pg.COLS} FROM {P}.pengajuan p WHERE p.status = 'PAID' AND p.proof_due_on < %s""", (today,))
+    payers: dict[str, list[str]] = {}
+    for r in rows:
+        step = pg._pay(pg.steps_of(r))
+        payers[r["id"]] = [str(u["id"]) for u in (step or {}).get("users", [])]
+    return fund_proofs(rows, payers, today)
+
+
 def _health(today: date, hour: int) -> list[dict]:
     """The daily alerts of the Pusat Informasi (app/data_health.py): ESB not synced, outlets without SO or waste report,
     materials without a price, menus without a card, Transfer Stock not finished (2026-11-13)."""
@@ -164,10 +203,14 @@ def scan(now: Optional[datetime] = None) -> dict:
     now = now or datetime.now(ZoneInfo(get_settings().timezone))
     today = now.date()
     found: list[dict] = []
+    proofs: Optional[set] = None  # the requests whose proof is overdue; None = the rule failed, nothing is cleared
     for name, step in (("doc", lambda: unusual_docs(today)), ("short", lambda: short_receipts(today)),
-                       ("daily", lambda: daily(today, now.hour)), ("health", lambda: _health(today, now.hour))):
+                       ("daily", lambda: daily(today, now.hour)), ("health", lambda: _health(today, now.hour)), ("proof", lambda: overdue_proofs(today))):
         try:
-            found += step()
+            got = step()
+            found += got
+            if name == "proof":
+                proofs = {a["doc"] for a in got if a["kind"] == "fund_proof"}
         except Exception:  # noqa: BLE001 - one rule failing leaves the others
             logger.exception("alerts: %s failed", name)
     added = 0
@@ -177,6 +220,9 @@ def scan(now: Optional[datetime] = None) -> dict:
             return {"added": 0, "checked": len(found), "skipped": True}
         for a in found:
             added += _add(conn, a)
+        if proofs is not None:  # proof sent (or the request cancelled): its notices go
+            conn.execute(f"DELETE FROM {T} WHERE kind = 'fund_proof' AND NOT (doc_num = ANY(%s))", (sorted(proofs),))
+            conn.execute(f"DELETE FROM {T} WHERE kind = 'fund_proof_sum' AND created_at < now() - interval '2 days'")
         conn.execute(f"DELETE FROM {T} WHERE created_at < now() - make_interval(days => %s)", (KEEP_DAYS,))
     return {"added": added, "checked": len(found)}
 
@@ -213,15 +259,21 @@ def _view(r: dict, brand_codes: frozenset[str] = frozenset()) -> dict:
             "read": r["read_at"] is not None}
 
 
+def _mine(user: dict) -> str:
+    """The alerts of an account: its own, and the Cost Control ones when it opens a page of theirs."""
+    from app.access import has_page
+    return f"(a.user_id = %s{' OR a.user_id IS NULL' if any(has_page(user, p) for p in PAGES) else ''})"
+
+
 def for_user(user: dict, limit: int = 50) -> dict:
-    uid = str(user["id"])
+    uid, mine = str(user["id"]), _mine(user)
     rows = db.fetch(
         f"""SELECT a.*, r.read_at FROM {T} a LEFT JOIN {T_READ} r ON r.alert_id = a.id AND r.user_id = %s
-             WHERE a.created_at > now() - make_interval(days => %s) ORDER BY a.created_at DESC, a.id DESC LIMIT %s""",
-        (uid, SHOW_DAYS, limit))
+             WHERE {mine} AND a.created_at > now() - make_interval(days => %s) ORDER BY a.created_at DESC, a.id DESC LIMIT %s""",
+        (uid, uid, SHOW_DAYS, limit))
     unread = db.fetchrow(
-        f"""SELECT count(*) AS n FROM {T} a WHERE a.created_at > now() - make_interval(days => %s)
-              AND NOT EXISTS (SELECT 1 FROM {T_READ} r WHERE r.alert_id = a.id AND r.user_id = %s)""", (SHOW_DAYS, uid))
+        f"""SELECT count(*) AS n FROM {T} a WHERE {mine} AND a.created_at > now() - make_interval(days => %s)
+              AND NOT EXISTS (SELECT 1 FROM {T_READ} r WHERE r.alert_id = a.id AND r.user_id = %s)""", (uid, SHOW_DAYS, uid))
     try:
         codes = frozenset(c for b in scope.BRANDS for c in scope.brand_branches(b))
     except Exception:  # noqa: BLE001 - no branch master: no brand label
@@ -232,9 +284,10 @@ def for_user(user: dict, limit: int = 50) -> dict:
 def mark_read(user: dict, ids: Optional[list[int]], everything: bool) -> int:
     if not everything and not ids:
         return 0
+    uid = str(user["id"])
     with db.transaction() as conn:
         cur = conn.execute(
             f"""INSERT INTO {T_READ} (alert_id, user_id)
-                SELECT id, %s FROM {T} WHERE created_at > now() - make_interval(days => %s) AND (%s OR id = ANY(%s))
-                ON CONFLICT DO NOTHING""", (str(user["id"]), SHOW_DAYS, everything, ids or []))
+                SELECT a.id, %s FROM {T} a WHERE {_mine(user)} AND a.created_at > now() - make_interval(days => %s) AND (%s OR a.id = ANY(%s))
+                ON CONFLICT DO NOTHING""", (uid, uid, SHOW_DAYS, everything, ids or []))
         return cur.rowcount or 0

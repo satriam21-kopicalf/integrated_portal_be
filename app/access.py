@@ -32,6 +32,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("form.surveyor-check-in", "Cost Control Check In (form)", "Form"),
     ("form.product", "Product (form)", "Form"),
     ("form.outlet", "Outlet (form)", "Form"),
+    ("form.travel", "Travel Path (form)", "Form"),
     ("form.damaged-equipment", "Maintenance Request (form)", "Form"),
     ("form.pengajuan", "Pengajuan (form)", "Form"),
     ("form.wwwr", "WW-WR (form, SWAT)", "Form"),
@@ -64,6 +65,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("cc.schedule", "Cost Control Schedule", "Cost Control · Check In"),
     ("mon.product", "Product", "Operations"),
     ("mon.outlet", "Outlet", "Operations"),
+    ("mon.travel", "Travel Path", "Operations"),
     ("mon.wwwr", "WW-WR", "Operations"),
     ("mon.damaged-equipment", "Maintenance Request", "Operations"),
     ("mon.branch-groups", "Branch groups", "Operations"),
@@ -111,7 +113,7 @@ PAGE_KEYS = tuple(p[0] for p in PAGES)
 PLATFORMS = ("portal", "operations", "cotr")
 DRIVER_MENU = (("driver.transaksi", "Transaksi"), ("driver.reload", "Reload"), ("driver.pengajuan", "Pengajuan"))
 OPERATIONS_PAGES = ("overview", "sales", "rating.grabfood", "rating.google-maps", "rating.shopeefood", "rating.gofood",
-                    "form.pic-check-in", "form.surveyor-check-in", "form.product", "form.outlet",
+                    "form.pic-check-in", "form.surveyor-check-in", "form.product", "form.outlet", "form.travel",
                     "form.damaged-equipment", "stock-opname", "waste", "form.pengajuan", "form.wwwr", "form.stock-transfer")
 MENU_KEYS = PAGE_KEYS + tuple(k for k, _ in DRIVER_MENU)
 
@@ -199,7 +201,7 @@ USER_PAGES = ("overview", "sales", "stock-opname", "waste", "form.pengajuan", "f
 DEFAULT_ROLE_PAGES = {
     "user": list(USER_PAGES),
     # migration 091 (2026-11-11): exactly these in Operations, Kopi Calf and Wasgee alike
-    "outlet": ["stock-opname", "waste", "form.stock-transfer", "form.damaged-equipment", "form.pengajuan",
+    "outlet": ["stock-opname", "waste", "form.travel", "form.stock-transfer", "form.damaged-equipment", "form.pengajuan",
                "rating.grabfood", "rating.google-maps", "rating.shopeefood", "rating.gofood", "guide"],
     "cost_control": ["overview", "sales", "stock-opname", "waste", "guide", *CC_PAGES],
 }

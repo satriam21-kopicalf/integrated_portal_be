@@ -265,6 +265,11 @@ def _outlet_rows() -> tuple[list[dict], list[dict], list[dict], dict[str, list[s
 def scan_outlets() -> int:
     rows = _outlet_rows()
     found, added = outlet_notices(*rows), 0
+    try:
+        from app import travel_path
+        found = [*found, *travel_path.scan()]
+    except Exception:  # noqa: BLE001 - the Travel Path is extra
+        logger.exception("travel path notices")
     with db.transaction() as conn:
         for a in found:
             added += _add(conn, a)

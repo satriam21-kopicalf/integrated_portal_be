@@ -46,7 +46,7 @@ from app.utils import parse_branches, today
 from app.thumbs import image_response
 
 router = APIRouter(tags=["visit forms"])
-FORMS = tuple(vf.DEFINITIONS)
+FORMS = tuple(f for f in vf.DEFINITIONS if f != "travel")  # Travel Path: app/routes/travel_path.py
 
 
 class OpenIn(BaseModel):

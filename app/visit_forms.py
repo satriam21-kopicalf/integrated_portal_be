@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 from app import database as db
 from app.pic_checkin import CheckInError, branch_options, judge, locations, parse_photo
+from app.travel_def import DEFINITION as TRAVEL
 
 T = "integration_portal.visit_form"
 TP = "integration_portal.visit_form_photo"
@@ -375,6 +376,8 @@ def _combined(defs: Optional[dict] = None) -> dict:
 
 
 DEFINITIONS["wwwr"] = _combined()
+# Travel Path (2026-11-25): its own reports (app/travel_path.py), its areas here so the Form Items editors know them
+DEFINITIONS["travel"] = TRAVEL
 AUDIT = "integration_portal.wwwr_audit"
 AUDIT_MEMBER = "integration_portal.wwwr_audit_member"
 

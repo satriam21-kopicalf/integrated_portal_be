@@ -11,7 +11,7 @@ from app import database as db
 
 T = "integration_portal.form_item_scope"
 T_BRANCH = "integration_portal.form_item_branch_scope"  # migration 085: one outlet before its group
-FORMS = ("product", "outlet")
+FORMS = ("product", "outlet", "travel")
 NONE = "—"  # onlyFor of an item no group is asked
 _TTL = 20
 _cache: dict = {"at": 0.0, "rows": {}, "groups": [], "branches": {}}

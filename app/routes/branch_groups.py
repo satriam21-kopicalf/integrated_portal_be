@@ -123,7 +123,7 @@ class OutletSettingIn(BaseModel):
 
 
 class ScopeChange(BaseModel):
-    form: str = Field(pattern="^(product|outlet)$")
+    form: str = Field(pattern="^(product|outlet|travel)$")
     itemKey: str = Field(max_length=40)
     group: str = Field(max_length=20)
     shown: bool
@@ -164,7 +164,7 @@ def save_form_items(body: ScopeIn, request: Request, user: dict = Depends(curren
 
 
 class BranchScopeChange(BaseModel):
-    form: Literal["product", "outlet"]
+    form: Literal["product", "outlet", "travel"]
     itemKey: str = Field(min_length=1, max_length=120)
     branch: str = Field(min_length=1, max_length=40)
     shown: Optional[bool] = None  # None: the outlet follows its group again
@@ -230,7 +230,7 @@ def form_items_editor(request: Request, user: dict = Depends(current_user)) -> d
 
 
 @router.put("/api/monitoring/form-items/{form}/items/{key}")
-def save_form_item(form: Literal["product", "outlet"], key: str, body: FormItemIn, request: Request, user: dict = Depends(current_user)) -> dict:
+def save_form_item(form: Literal["product", "outlet", "travel"], key: str, body: FormItemIn, request: Request, user: dict = Depends(current_user)) -> dict:
     from app import form_items
     _need(request, user, "mon.branch-groups")
     out = _items_run(form_items.save_item, vf.DEFINITIONS, form, key, body.model_dump(exclude_unset=True), str(user["id"]))
@@ -241,7 +241,7 @@ def save_form_item(form: Literal["product", "outlet"], key: str, body: FormItemI
 
 
 @router.post("/api/monitoring/form-items/{form}/items", status_code=201)
-def add_form_item(form: Literal["product", "outlet"], body: NewFormItemIn, request: Request, user: dict = Depends(current_user)) -> dict:
+def add_form_item(form: Literal["product", "outlet", "travel"], body: NewFormItemIn, request: Request, user: dict = Depends(current_user)) -> dict:
     from app import form_items
     _need(request, user, "mon.branch-groups")
     data = body.model_dump(exclude_unset=True)
@@ -258,7 +258,7 @@ class OrderIn(BaseModel):
 
 
 @router.put("/api/monitoring/form-items/{form}/order")
-def save_form_order(form: Literal["product", "outlet"], body: OrderIn, request: Request, user: dict = Depends(current_user)) -> dict:
+def save_form_order(form: Literal["product", "outlet", "travel"], body: OrderIn, request: Request, user: dict = Depends(current_user)) -> dict:
     from app import form_items
     _need(request, user, "mon.branch-groups")
     out = _items_run(form_items.save_order, vf.DEFINITIONS, form, body.section, body.keys, str(user["id"]))

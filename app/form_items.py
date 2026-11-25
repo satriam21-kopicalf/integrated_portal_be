@@ -24,7 +24,7 @@ from app import database as db
 P = "integration_portal"
 T_OVER, T_CUSTOM, T_WEIGHT = f"{P}.form_item_override", f"{P}.form_item_custom", f"{P}.form_category_weight"
 T_ORDER = f"{P}.form_item_order"  # migration 109: the order of the items of a section
-FORMS = ("product", "outlet")
+FORMS = ("product", "outlet", "travel")
 LEVELS = ("required", "optional", "none")
 DEFAULT_WEIGHTS = {"Kritikal": 3.0, "Mayor": 2.0, "Minor": 1.0}
 CATEGORY_EN = {"Kritikal": "Critical", "Mayor": "Major", "Minor": "Minor"}

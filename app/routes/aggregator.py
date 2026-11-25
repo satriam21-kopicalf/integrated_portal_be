@@ -43,6 +43,21 @@ def _range(d_from: Optional[date], d_to: Optional[date], days: int = 6) -> tuple
     return a, b
 
 
+@router.get("/context")
+def context(_: dict = Depends(VIEW)):
+    """What the filters of every page need (2026-11-25): the outlets with their branch group and zone, and how fresh the data is."""
+    from app.pic_checkin import groups_of
+    names = quality._branch_names()
+    groups, ahead = groups_of(list(names)), aggregator_reports.wib_shift()
+    st = aggregator.status()
+    read = aggregator.last_read()
+    done = lambda k: read.get(k)  # noqa: E731
+    return {"outlets": [{"code": k, "name": v, "group": groups.get(k), "zone": {0: "WIB", 60: "WITA", 120: "WIT"}[ahead.get(k, 0)]} for k, v in names.items()],
+            "groups": sorted(set(groups.values())), "unmapped": st["unmapped"], "reviewsFrom": st["reviewsFrom"],
+            "freshness": {"synced": st["syncedMedian"], "oldest": st["syncedOldest"], "global": done("global"), "histories": done("histories"),
+                          "reviews": done("reviews"), "daily": done("daily"), "errors": [k for k, v in st["pulls"].items() if v["error"]]}}
+
+
 @router.get("/opening")
 def opening(date_from: Optional[date] = Query(None, alias="dateFrom"), date_to: Optional[date] = Query(None, alias="dateTo"),
             platform: PLATFORM = None, _: dict = Depends(OPENING)):

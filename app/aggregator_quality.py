@@ -70,19 +70,19 @@ def _handlers(a: date, z: date) -> dict[tuple[date, str], str]:
 
 # ---------------------------------------------------------------- reviews
 
-def reviews(a: date, z: date, platform: Optional[str] = None, limit: int = 800) -> dict:
+def reviews(a: date, z: date, platform: Optional[str] = None, limit: int = 3000) -> dict:
     t0, t1 = _span(a, z)
     names = _names()
-    rows = db.fetch(f"""SELECT id, bf_branch_id, outlet_name, channel, rating, comment, item_name, order_id, tags, customer_name,
+    rows = db.fetch(f"""SELECT id, bf_branch_id, outlet_name, channel, rating, comment, item_name, order_id, tags, customer_name, ordered_at IS NOT NULL AS by_order,
                                coalesce(ordered_at, created_at) AS at FROM {P}.agg_review
                          WHERE coalesce(ordered_at, created_at) >= %s AND coalesce(ordered_at, created_at) < %s
                            AND (%s::text IS NULL OR channel = %s)""", (t0, t1, platform, platform))
     rated = [r for r in rows if r["rating"] is not None]
     low = [r for r in rated if r["rating"] <= LOW]
-    by: dict[str, list] = defaultdict(list)
+    by: dict[tuple, list] = defaultdict(list)
     day: dict[str, list] = defaultdict(list)
     for r in rated:
-        by[names.get(r["bf_branch_id"], (None, r["outlet_name"]))[1] or "—"].append(r["rating"])
+        by[names.get(r["bf_branch_id"], (None, r["outlet_name"] or "—"))].append(r["rating"])
         day[r["at"].astimezone(WIB).date().isoformat()].append(r["rating"])
     who = _handlers(a, z)
     tickets = {str(r["review_id"]): r["id"] for r in db.fetch(f"SELECT id, review_id FROM {P}.agg_complaint WHERE review_id IS NOT NULL")}
@@ -92,15 +92,15 @@ def reviews(a: date, z: date, platform: Optional[str] = None, limit: int = 800) 
     for r in shown:
         code, name = names.get(r["bf_branch_id"], (None, r["outlet_name"] or "—"))
         d = r["at"].astimezone(WIB)
-        out.append({"id": str(r["id"]), "at": d.isoformat(), "outlet": name, "branchCode": code, "platform": r["channel"], "rating": r["rating"],
+        out.append({"id": str(r["id"]), "at": d.isoformat(), "timeKind": "order" if r["by_order"] else "received", "outlet": name, "branchCode": code, "platform": r["channel"], "rating": r["rating"],
                     "comment": r["comment"], "item": r["item_name"], "orderId": r["order_id"], "tags": r["tags"], "topic": topic(r["comment"]) if r["rating"] <= LOW else None,
                     "member": who.get((d.date(), code)) if code else None, "complaintId": tickets.get(str(r["id"]))})
     return {"summary": {"n": len(rated), "avg": avg([float(r["rating"]) for r in rated]), "low": len(low), "withComment": sum(bool((r["comment"] or "").strip()) for r in rated),
-                        "noTicket": sum(str(r["id"]) not in tickets for r in low), "limit": limit},
+                        "noTicket": sum(str(r["id"]) not in tickets for r in low), "limit": limit, "byOrderTime": sum(bool(r["by_order"]) for r in rated)},
             "byRating": [{"rating": k, "n": v} for k, v in sorted(Counter(int(r["rating"]) for r in rated).items(), reverse=True)],
             "byPlatform": [{"platform": p, "n": len(v), "avg": avg(v), "low": sum(x <= LOW for x in v)} for p in PLATFORMS
                            if (v := [float(r["rating"]) for r in rated if r["channel"] == p])],
-            "byOutlet": sorted(({"outlet": k, "n": len(v), "avg": avg([float(x) for x in v]), "low": sum(x <= LOW for x in v)} for k, v in by.items()),
+            "byOutlet": sorted(({"outlet": k[1], "branchCode": k[0], "n": len(v), "avg": avg([float(x) for x in v]), "low": sum(x <= LOW for x in v)} for k, v in by.items()),
                                key=lambda x: (-x["low"], x["avg"] or 5)),
             "topics": [{"topic": k, "n": v} for k, v in Counter(topic(r["comment"]) for r in low).most_common()],
             "days": [{"day": k, "n": len(v), "avg": avg([float(x) for x in v])} for k, v in sorted(day.items())], "rows": out}
@@ -222,9 +222,10 @@ def voids(a: date, z: date, platform: Optional[str] = None) -> dict:
              AND (%s::text IS NULL OR lower(h.visit_purpose) = lower(%s))""", (a, z, platform, platform))["n"]
     by: dict[str, dict] = {}
     for x in data:
-        o = by.setdefault(x["outlet"], {"outlet": x["outlet"], "n": 0, "amount": 0.0})
+        o = by.setdefault(x["outlet"], {"outlet": x["outlet"], "branchCode": x["branchCode"], "n": 0, "amount": 0.0, "noReason": 0})
         o["n"] += 1
         o["amount"] += x["amount"]
+        o["noReason"] += not x["reason"]
     n = len(data)
     return {"summary": {"n": n, "amount": sum(x["amount"] for x in data), "noReason": sum(not x["reason"] for x in data), "manual": sum(x["manual"] for x in data),
                         "bills": int(sales), "pct": round(n / (n + sales) * 100, 2) if n + sales else None},
@@ -321,10 +322,11 @@ def menu(platform: Optional[str] = None) -> dict:
                           JOIN {P}.agg_channel c ON c.id = i.channel_id WHERE (%s::text IS NULL OR c.channel = %s)""", (platform, platform))
     packaging = lambda r: any(w in (r["category"] or "").upper() for w in ("PACKAG", "KEMASAN"))  # noqa: E731
     items = [{"name": r["name"], "price": float(r["price"]) if r["price"] is not None else None, "platform": r["channel"],
-              "outlet": names.get(r["bf_branch_id"], (None, r["cname"]))[1]} for r in rows if not packaging(r)]
-    spread, missing = price_spread(items), missing_menus(items)
+              "outlet": names.get(r["bf_branch_id"], (None, r["cname"]))[1], "code": names.get(r["bf_branch_id"], (None, None))[0]} for r in rows if not packaging(r)]
+    code_of = {i["outlet"]: i["code"] for i in items}
+    spread, missing = price_spread(items), [{**m, "branchCode": code_of.get(m["outlet"])} for m in missing_menus(items)]
     changes = [{"at": r["at"].astimezone(WIB).isoformat(), "menu": r["name"], "platform": r["channel"], "outlet": names.get(r["bf_branch_id"], (None, "—"))[1],
-                "old": float(r["old_price"]), "new": float(r["new_price"])} for r in db.fetch(
+                "branchCode": names.get(r["bf_branch_id"], (None, "—"))[0], "old": float(r["old_price"]), "new": float(r["new_price"])} for r in db.fetch(
         f"""SELECT l.at, i.name, c.channel, c.bf_branch_id, l.old_price, l.new_price FROM {P}.agg_price_log l JOIN {P}.agg_item i ON i.id = l.item_id
              JOIN {P}.agg_channel c ON c.id = i.channel_id WHERE (%s::text IS NULL OR c.channel = %s) ORDER BY l.at DESC LIMIT 500""", (platform, platform))]
     return {"summary": {"items": len(items), "spread": len(spread), "differ": sum(x["different"] for x in spread), "missing": len(missing), "changes": len(changes)},

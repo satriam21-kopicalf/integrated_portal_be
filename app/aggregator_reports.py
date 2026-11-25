@@ -139,7 +139,7 @@ def backfill_daily() -> Optional[int]:
 def from_daily(r: dict, g: int) -> dict:
     """A day of BotFood's report as a row of Opening & Closing (pure, tested): its open / close state, the minutes late
     (the closed stretch from the opening hour), early (closed until the closing hour) and the pauses in between."""
-    out = {"status": None, "openedAt": None, "lateMin": None, "earlyMin": None, "pauseMin": 0}
+    out = {"status": None, "openedAt": None, "closedAt": None, "lateMin": None, "earlyMin": None, "pauseMin": 0}
     ot, ct = r.get("open_time"), r.get("close_time")
     if not ot:
         out["status"] = "no_hours"
@@ -160,11 +160,17 @@ def from_daily(r: dict, g: int) -> dict:
     out["lateMin"] = late if late > g else 0
     out["status"] = "late" if st == "late" or late > g else "on_time"
     early = 0
-    if ct:
+    if ct and ct > ot:
         for a, b in off:
             if b >= ct and a > ot:
                 early = mins(a, ct)
+        # the report lists no closed stretch after the last reading: closed from the end of the last open one (2026-11-25)
+        if not early and on and ot < on[-1][1] < ct:
+            early = mins(on[-1][1], ct)
+            out["closedAt"] = on[-1][1].strftime("%H:%M")
     out["earlyMin"] = early if early > g else None
+    if not out["earlyMin"]:
+        out["closedAt"] = None
     for a, b in off:
         if a > ot and (not ct or b < ct):
             out["pauseMin"] += max(0, mins(a, b))
@@ -211,7 +217,7 @@ def _at(day: date, t: dtime) -> datetime:
 def day_row(events_today: list[dict], was_open: Optional[bool], d: date, ot: Optional[dtime], ct: Optional[dtime],
             g: int, now: datetime, have_data: bool) -> dict:
     """One outlet, platform and day: status, opened at, late / early / pause minutes. Pure (tested)."""
-    row = {"status": None, "openedAt": None, "lateMin": None, "earlyMin": None, "pauseMin": 0}
+    row = {"status": None, "openedAt": None, "closedAt": None, "lateMin": None, "earlyMin": None, "pauseMin": 0}
     day0 = _at(d, dtime(0))
     day1 = day0 + timedelta(days=1)
     if not have_data:
@@ -252,31 +258,49 @@ def day_row(events_today: list[dict], was_open: Optional[bool], d: date, ot: Opt
         if b is None and now >= close_at:
             if close_at - a > timedelta(minutes=g):
                 row["earlyMin"] = int((close_at - a).total_seconds() // 60)
+                row["closedAt"] = a.strftime("%H:%M")
             continue
         stop = min(b or upto, upto)
         row["pauseMin"] += int((stop - a).total_seconds() // 60)
     return row
 
 
-_orders: dict[date, dict[tuple[str, str], int]] = {}  # past days, kept in memory
+_orders: dict[date, dict[tuple[str, str], tuple[int, int]]] = {}  # past days, kept in memory
 ORDER_FROM = 4  # before 04:00 an order belongs to the night before
 
 
-def first_orders(days: set[date]) -> dict[tuple[date, str, str], int]:
-    """(day, branch, platform) to the minute of the day of its first POS order (sales_date_in is WIB wall time)."""
+_zones: dict = {"at": 0.0, "value": {}}
+
+
+def wib_shift() -> dict[str, int]:
+    """{branch code: minutes its clock is ahead of WIB}: the outlets in WITA / WIT (Branch Groups → Check-In Deadlines)."""
+    if time.monotonic() - _zones["at"] > 300:
+        try:
+            value = {r["branch_code"]: {"Asia/Makassar": 60, "Asia/Jayapura": 120}[r["timezone"]] for r in db.fetch(
+                f"SELECT branch_code, timezone FROM {P}.outlet_setting WHERE timezone IN ('Asia/Makassar', 'Asia/Jayapura')")}
+        except Exception:  # noqa: BLE001 - no settings: every outlet in WIB
+            value = {}
+        _zones.update(at=time.monotonic(), value=value)
+    return _zones["value"]
+
+
+def first_orders(days: set[date]) -> dict[tuple[date, str, str], tuple[int, int]]:
+    """(day, branch, platform) to the minutes of the day (WIB) of its first and last POS order. The POS writes the clock of
+    the outlet: an outlet in WITA is moved to WIB (2026-11-25)."""
     today_ = datetime.now(WIB).date()
     need = sorted(d for d in days if d not in _orders)
     if need:
         got: dict[date, dict[tuple[str, str], int]] = {d: {} for d in need}
-        for r in db.fetch("""SELECT branch_code AS b, sales_date::date AS d, visit_purpose AS v, min(sales_date_in) AS f
+        for r in db.fetch("""SELECT branch_code AS b, sales_date::date AS d, visit_purpose AS v, min(sales_date_in) AS f, max(sales_date_in) AS l
                              FROM integration_esb.transactions_pos_sales
                              WHERE sales_date >= %s AND sales_date < %s::date + 1
                                AND visit_purpose IN ('GrabFood', 'GoFood', 'ShopeeFood')
                                AND extract(hour FROM sales_date_in AT TIME ZONE 'UTC') >= %s
                              GROUP BY 1, 2, 3""", (need[0], need[-1], ORDER_FROM)):
             if r["d"] in got and r["f"]:
-                f = r["f"].astimezone(timezone.utc) if r["f"].tzinfo else r["f"]
-                got[r["d"]][(r["b"], r["v"])] = f.hour * 60 + f.minute
+                f, last = (x.astimezone(timezone.utc) if x.tzinfo else x for x in (r["f"], r["l"]))
+                ahead = wib_shift().get(r["b"], 0)
+                got[r["d"]][(r["b"], r["v"])] = (f.hour * 60 + f.minute - ahead, last.hour * 60 + last.minute - ahead)
         out = {**_orders, **got}
         for d in need:
             if d < today_ - timedelta(days=1):  # the last days still get late bills
@@ -298,6 +322,21 @@ def proven(row: dict, ot: Optional[dtime], order: Optional[int], g: int) -> dict
         return row
     return {**row, "openedAt": f"{order // 60:02d}:{order % 60:02d}", "evidence": "order",
             "lateMin": late if late > g else 0, "status": "late" if late > g else "on_time"}
+
+
+def still_open(row: dict, ct: Optional[dtime], last: Optional[int], g: int) -> dict:
+    """A row closed early with a later POS order of the platform: it was open until that order. Pure (tested)."""
+    if not row["earlyMin"] or ct is None or last is None:
+        return row
+    early = ct.hour * 60 + ct.minute - last
+    if early >= row["earlyMin"]:
+        return row
+    return {**row, "earlyMin": early if early > g else None, "closedAt": f"{last // 60:02d}:{last % 60:02d}" if early > g else None}
+
+
+def _to_wib(t: Optional[dtime], ahead: int) -> Optional[dtime]:
+    """An hour of the outlet's clock as WIB (the same day)."""
+    return (datetime.combine(date(2000, 1, 2), t) - timedelta(minutes=ahead)).time() if t and ahead else t
 
 
 def opening(d_from: date, d_to: date, channel: Optional[str] = None) -> dict:
@@ -333,6 +372,9 @@ def opening(d_from: date, d_to: date, channel: Optional[str] = None) -> dict:
             ct = next((e["close_time"] for e in reversed(todays) if e["close_time"]), None) or c["close_time"]
             rep = daily.get((c["id"], d))
             mine = own.get(c["branch_code"]) if c["branch_code"] else None
+            if mine:  # entered on the outlet's clock; everything here is WIB
+                ahead = wib_shift().get(c["branch_code"], 0)
+                mine = {**mine, "open_time": _to_wib(mine["open_time"], ahead), "close_time": _to_wib(mine["close_time"], ahead)}
             if mine:
                 ot, ct = ot or mine["open_time"], ct or mine["close_time"]
             if rep:  # a past day: BotFood's own report
@@ -347,10 +389,20 @@ def opening(d_from: date, d_to: date, channel: Optional[str] = None) -> dict:
                          "platform": c["channel"], "openTime": ot.strftime("%H:%M") if ot else None, "closeTime": ct.strftime("%H:%M") if ct else None,
                          "events": len(todays), "member": handlers.get((d, c["branch_code"])) if c["branch_code"] else None, **r})
             d += timedelta(days=1)
-    late_days = {date.fromisoformat(r["day"]) for r in rows if r["status"] in ("late", "not_opened") and r["branchCode"]}
-    orders = first_orders(late_days) if late_days else {}
-    rows = [{"evidence": "botfood", **proven(r, _time(r["openTime"] + ":00") if r["openTime"] else None,
-                                             orders.get((date.fromisoformat(r["day"]), r["branchCode"], r["platform"])), g)} for r in rows]
+    ask = {date.fromisoformat(r["day"]) for r in rows if (r["status"] in ("late", "not_opened") or r["earlyMin"]) and r["branchCode"]}
+    orders = first_orders(ask) if ask else {}
+    out = []
+    for r in rows:
+        o = orders.get((date.fromisoformat(r["day"]), r["branchCode"], r["platform"]))
+        r = {"evidence": "botfood", **proven(r, _time(r["openTime"] + ":00") if r["openTime"] else None, o[0] if o else None, g)}
+        out.append(still_open(r, _time(r["closeTime"] + ":00") if r["closeTime"] else None, o[1] if o else None, g))
+    rows = out
+    # the outlets without hours apart: nothing can be said about them, they only filled the list (63% of the rows)
+    without: dict[str, dict] = {}
+    for r in rows:
+        if r["status"] == "no_hours":
+            x = without.setdefault(r["branchCode"] or r["outlet"], {"outlet": r["outlet"], "branchCode": r["branchCode"], "platforms": set()})
+            x["platforms"].add(r["platform"])
     counted = [r for r in rows if r["status"] in ("on_time", "late", "not_opened")]
     summary = {
         "byOrder": sum(r["evidence"] == "order" and r["status"] == "on_time" for r in rows),
@@ -362,7 +414,8 @@ def opening(d_from: date, d_to: date, channel: Optional[str] = None) -> dict:
         "dataFrom": first_event.isoformat() if first_event else None,
         "reportFrom": (db.fetchrow(f"SELECT min(day) AS d FROM {P}.agg_daily")["d"] or now.date()).isoformat(),
     }
-    return {"summary": summary, "rows": rows}
+    return {"summary": summary, "rows": [r for r in rows if r["status"] not in ("no_hours", "no_data")],
+            "noHours": sorted(({**x, "platforms": sorted(x["platforms"])} for x in without.values()), key=lambda x: x["outlet"])}
 
 
 def _cat(c: Optional[str]) -> str:
@@ -373,12 +426,38 @@ def _cat(c: Optional[str]) -> str:
     return c
 
 
+def open_minutes(a: datetime, b: datetime, ot: Optional[dtime], ct: Optional[dtime]) -> int:
+    """The minutes from a to b, only those inside the opening hours (every minute without hours). Pure (tested)."""
+    if b <= a:
+        return 0
+    if not ot or not ct or ct <= ot:
+        return int((b - a).total_seconds() // 60)
+    total, d = 0.0, a.date()
+    while d <= b.date():
+        s, e = max(a, _at(d, ot)), min(b, _at(d, ct))
+        total += max(0.0, (e - s).total_seconds())
+        d += timedelta(days=1)
+    return int(total // 60)
+
+
 def oos(d_from: date, d_to: date, channel: Optional[str] = None, packaging: bool = False, stale_days: int = 14) -> dict:
     """Out now per outlet / platform / category, and per item in the period: how often it went out, for how long."""
     chans = {c["id"]: c for c in _channels() if not channel or c["channel"] == channel}
     now = datetime.now(WIB)
     start = _at(d_from, dtime(0))
     end = min(_at(d_to, dtime(0)) + timedelta(days=1), now)
+    from app import aggregator_quality
+    try:
+        own = aggregator_quality.hours()
+    except Exception:  # noqa: BLE001 - before migration 151
+        own = {}
+
+    def span(c: dict) -> tuple[Optional[dtime], Optional[dtime]]:
+        if c["open_time"] and c["close_time"]:
+            return c["open_time"], c["close_time"]
+        m = own.get(c["branch_code"])
+        ahead = wib_shift().get(c["branch_code"], 0)
+        return (_to_wib(m["open_time"], ahead), _to_wib(m["close_time"], ahead)) if m else (None, None)
 
     def keep(cat: str) -> bool:
         return packaging or "PACKAGING" not in cat
@@ -403,7 +482,8 @@ def oos(d_from: date, d_to: date, channel: Optional[str] = None, packaging: bool
 
     def entry(k: tuple, c: dict, cat: str, name: str) -> dict:
         return per.setdefault(k, {"outlet": c["branch_name"] or c["name"], "branchCode": c["branch_code"], "platform": c["channel"],
-                                  "category": cat, "item": name, "times": 0, "minutes": 0, "remarks": set()})
+                                  "category": cat, "item": name, "times": 0, "minutes": 0, "remarks": set(), "last": None, "stillOut": False,
+                                  "hoursKnown": all(span(c))})
 
     for e in ev:
         c = chans.get(e["channel_id"])
@@ -420,16 +500,18 @@ def oos(d_from: date, d_to: date, channel: Optional[str] = None, packaging: bool
             if t >= start:
                 p = entry(k, c, cat, e["item_name"])
                 p["times"] += 1
+                p["last"] = t.isoformat()
                 if e["remarks"]:
                     p["remarks"].add(e["remarks"])
         elif out_since.get(k):
             a = max(out_since[k], start)
             if t > start:
-                entry(k, c, cat, e["item_name"])["minutes"] += int((t - a).total_seconds() // 60)
+                entry(k, c, cat, e["item_name"])["minutes"] += open_minutes(a, t, *span(c))
             out_since[k] = None
     for k, a in out_since.items():  # still out at the end of the period
         if a and k in per:
-            per[k]["minutes"] += int((end - max(a, start)).total_seconds() // 60)
+            per[k]["minutes"] += open_minutes(max(a, start), end, *span(chans[k[0]]))
+            per[k]["stillOut"] = True
     items = sorted(({**v, "remarks": ", ".join(sorted(v["remarks"]))} for v in per.values()), key=lambda r: (-r["minutes"], r["outlet"]))
     by_outlet: dict[str, int] = defaultdict(int)
     by_cat: dict[str, int] = defaultdict(int)
@@ -439,6 +521,7 @@ def oos(d_from: date, d_to: date, channel: Optional[str] = None, packaging: bool
     first = db.fetchrow(f"SELECT min(at) AS a FROM {P}.agg_stock_event")["a"]
     return {
         "summary": {"outNow": len(current), "inactiveLong": stale, "staleDays": stale_days, "outletsWithOos": len(by_outlet), "itemsInPeriod": len(items),
+                    "noHoursItems": sum(not r["hoursKnown"] for r in items),
                     "timesInPeriod": sum(r["times"] for r in items), "minutesInPeriod": sum(r["minutes"] for r in items),
                     "dataFrom": first.isoformat() if first else None},
         "byCategory": sorted(({"category": k, "n": v} for k, v in by_cat.items()), key=lambda r: -r["n"]),

@@ -305,6 +305,12 @@ def set_branch(user: dict, bf_branch_id: int, branch_code: Optional[str]) -> Non
                          WHERE bf_branch_id = %s""", (branch_code, user["id"], bf_branch_id))
 
 
+def last_read() -> dict[str, str]:
+    """When the last good pull of each kind finished; one still running or failed does not count."""
+    return {r["kind"]: r["at"].isoformat() for r in db.fetch(f"""SELECT kind, max(finished_at) AS at FROM {P}.agg_pull
+                                                                  WHERE finished_at IS NOT NULL AND error IS NULL GROUP BY kind""")}
+
+
 def status() -> dict:
     """How fresh the data is: the last pull of each kind, BotFood's own delay, the counts, the backfill position."""
     last = {r["kind"]: r for r in db.fetch(f"""SELECT DISTINCT ON (kind) kind, started_at, finished_at, rows, error FROM {P}.agg_pull

@@ -398,6 +398,12 @@ def save_usage(user: dict, body: dict) -> dict:
             raise WasteError(f"Pilih kategori untuk {name}")
         photo = parse_photo(line["photo"]) if line.get("photo") else None
         keep.append((code, q, category, (line.get("note") or "").strip()[:500] or None, photo, line))
+    bare = [(code, q) for code, q, _, note, _, _ in keep if len(note or "") < 3]
+    if bare:  # an unusual quantity needs its reason, so Cost Control knows it is meant (2026-11-25)
+        limits = usage_fix.limits([items[c] for c, _ in bare], usage_fix.usual())
+        odd = [c for c, q in bare if c in limits and float(q) >= limits[c]["limit"]]
+        if odd:
+            raise WasteError(f"Jumlah {items[odd[0]]['name']} jauh di atas biasanya: perbaiki jumlahnya atau tulis alasannya")
     sign = parse_photo(body["signature"]) if keep and body.get("signature") else None
     if keep and sign is None:
         raise WasteError("Tanda tangan wajib sebelum menyimpan Usage Management")

@@ -27,6 +27,21 @@ def test_the_form_gets_the_limit_of_the_items_that_tell():
     assert usage_fix.limits(items, med) == {"A": {"usual": 1.0, "limit": 10.0, "packSize": 1000}}
 
 
+def test_an_unusual_quantity_needs_a_reason(monkeypatch):
+    monkeypatch.setattr(waste, "_branch_day", lambda u, b: ({"code": "B1", "name": "B"}, date(2026, 11, 25)))
+    monkeypatch.setattr(waste, "catalog", lambda *a, **k: {"items": {"usage": [{"code": "A", "name": "SEALER", "unit": "ROLL@1000PCS"}]},
+                                                           "usageCategories": ["S"]})
+    monkeypatch.setattr(usage_fix, "locked", lambda *a: set())
+    monkeypatch.setattr(usage_fix, "usual", lambda: {("A", "ROLL@1000PCS"): (1.0, 50)})
+
+    def err(qty, note):
+        with pytest.raises(waste.WasteError) as e:
+            waste.save_usage(USER, {"lines": {"A": {"qty": qty, "category": "S", "note": note}}})
+        return str(e.value)
+    assert "jauh di atas" in err(10, None) and "jauh di atas" in err(2000, " ok ")
+    assert "Tanda tangan" in err(2000, "event besar") and "Tanda tangan" in err(9, None)  # on to the next check
+
+
 class Cur:
     def __init__(self, rows):
         self.rows, self.sql = rows, []

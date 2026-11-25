@@ -837,7 +837,7 @@ class UserUnitsIn(BaseModel):
 @router.get("/api/pengajuan/user-units/{user_id}")
 def user_units(user_id: str, request: Request, user: dict = Depends(current_user)) -> dict:
     _superadmin(request, user)
-    return {"units": fund_units.units(), "chosen": fund_units.chosen(user_id)}
+    return {"units": fund_units.units(), "chosen": fund_units.chosen(user_id), "default": _run(fund_units.default_of, user_id)}
 
 
 @router.put("/api/pengajuan/user-units/{user_id}")

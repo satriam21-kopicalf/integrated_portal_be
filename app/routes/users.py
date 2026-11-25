@@ -1,6 +1,6 @@
 """User account management (superadmin; a COTR admin for the accounts of the COTR line, 2026-11-13).
 
-    GET    /api/users?search=&role=&status=&line=&page=&pageSize=   line: kopicalf | wasgee | cotr (migration 054)
+    GET    /api/users?search=&role=&status=&line=&page=&pageSize=   line: a tab of accounts.TABS
     POST   /api/users
     GET    /api/users/{id}
     PATCH  /api/users/{id}          (any subset of fields; "password" resets it)
@@ -116,7 +116,7 @@ def _cotr_fields(actor: dict, body: "UserFields", data: dict) -> Optional[JSONRe
 
 
 def _clean(body: UserFields, creating: bool, user_id: Optional[str] = None,
-           current: Optional[dict] = None) -> tuple[Optional[dict], Optional[JSONResponse]]:
+           current: Optional[dict] = None, actor_role: str = "") -> tuple[Optional[dict], Optional[JSONResponse]]:
     """Normalised fields to store, or a validation error response."""
     data = body.model_dump(exclude_unset=True)
     data.pop("password", None)
@@ -163,7 +163,8 @@ def _clean(body: UserFields, creating: bool, user_id: Optional[str] = None,
         data["businessLine"] = "cotr"  # a COTR admin is of the COTR line (migration 099)
     from app.scope import branch_scope
     mine = branch_scope.get()  # an admin narrowed to some branches hands out only those
-    if mine is not None and role != "superadmin" and set(data.get("branches") or []) - set(mine):
+    kept = set((current or {}).get("branch_codes") or [])  # what the account already had is not "handed out"
+    if actor_role != "superadmin" and mine is not None and set(data.get("branches") or []) - set(mine) - kept:
         return None, _error("Cabang di luar akses Anda", field="branches")
     if role in accounts.LIMITABLE_ROLES:  # some branches, or none chosen = every branch (2026-11-24)
         if "branches" not in data and (current or {}).get("role") not in accounts.LIMITABLE_ROLES:
@@ -205,19 +206,49 @@ def _target(user: dict) -> dict:
 
 
 @router.get("/summary")
-def users_summary(actor: dict = Depends(require_account_admin)):
-    """Counts for the page header: totals, roles, status, users without branches, sign-in activity (a COTR admin: its line)."""
-    c = accounts.user_counts("cotr" if _cotr_admin(actor) else None)
+def users_summary(line: str = "", actor: dict = Depends(require_account_admin)):
+    """Counts for the page header (of the tab shown): totals, roles, status, users without branches, sign-in activity."""
+    if _cotr_admin(actor):
+        line = "cotr"
+    c = accounts.user_counts(line if line in accounts.TABS else None, "user" if _admin(actor) else None)
+    tabs, roles = accounts.tab_counts()
+    if _admin(actor):
+        roles = {t: {"user": r.get("user", 0)} for t, r in roles.items()}
+        tabs = {t: roles.get(t, {}).get("user", 0) for t in tabs}
+    if _cotr_admin(actor):
+        tabs, roles = {"cotr": tabs["cotr"]}, {"cotr": roles.get("cotr", {})}
     return {"total": c.get("total", 0), "active": c.get("active", 0), "inactive": c.get("inactive", 0),
             "locked": c.get("locked", 0), "superadmins": c.get("superadmins", 0), "users": c.get("users", 0), "outlets": c.get("outlets", 0),
             "withoutBranch": c.get("without_branch", 0), "neverSignedIn": c.get("never_signed_in", 0),
             "active7d": c.get("active_7d", 0), "branchesCovered": c.get("branches_covered", 0),
-            "lines": {k: c.get(f"line_{k}", 0) for k in accounts.LINES}}
+            "lines": tabs, "roles": roles}
+
+
+@router.get("/branches")
+def assignable_branches(actor: dict = Depends(require_account_admin)):
+    """Every place that can be given to an account, of every brand, with its unit (2026-11-25). A superadmin gets all of them
+    even when its own data is narrowed to some branches — a narrowed list is how a whole brand got lost; the others only theirs."""
+    from app import fund_units
+    from app.routes.branches import _all_branches
+    from app.routes.stock_opname import so_sites
+    from app.scope import branch_scope
+    rows = [dict(b) for b in _all_branches()]
+    have = {b["branch_code"] for b in rows}
+    kind = {"HUB_WH": "HUB WH", "HUB_CK": "HUB CK", "OUTLET": "Outlet"}
+    for s in so_sites(actor):
+        if s["branch_code"] not in have:
+            t = s["facility_type"]
+            rows.append({"branch_code": s["branch_code"], "branch_name": f"{kind.get(t, t.replace('_', ' '))} · {s['branch_name']}", "count": 0})
+    mine = branch_scope.get()
+    if actor["role"] != "superadmin" and mine is not None:
+        rows = [b for b in rows if b["branch_code"] in set(mine)]
+    return [{"branch_code": b["branch_code"], "branch_name": b["branch_name"], "company_code": b.get("company_code"), "count": b.get("count") or 0,
+             "unit": fund_units.unit_of_branch(b["branch_code"])} for b in rows]
 
 
 @router.post("", status_code=201)
 def create_user(body: UserFields, request: Request, actor: dict = Depends(require_account_admin)):
-    data, error = _clean(body, creating=True)
+    data, error = _clean(body, creating=True, actor_role=actor["role"])
     if error:
         return error
     error = _cotr_fields(actor, body, data) or _admin_fields(actor, body, data)
@@ -258,7 +289,7 @@ def update_user(user_id: UUID, body: UserFields, request: Request, actor: dict =
         (body.role or "superadmin") != "superadmin" or body.isActive is False)
     if leaves_superadmin and accounts.count_active_superadmins(exclude_id=uid) == 0:
         return _error("Minimal harus ada satu superadmin aktif", 409, "role")
-    data, error = _clean(body, creating=False, user_id=uid, current=current)
+    data, error = _clean(body, creating=False, user_id=uid, current=current, actor_role=actor["role"])
     if error:
         return error
     error = _cotr_fields(actor, body, data) or _admin_fields(actor, body, data)

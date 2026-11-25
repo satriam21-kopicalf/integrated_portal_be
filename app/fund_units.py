@@ -128,14 +128,29 @@ def monitors(user: dict) -> Optional[set[str]]:
 def requests_for(user: dict, branches: list[dict]) -> list[str]:
     """The units an account may ask for, in order: the chosen ones, else those of its places, else of its line."""
     mine = set(chosen(user["id"]))
-    if not mine:
-        if user.get("role") in ("superadmin", "admin"):
-            mine = {u["code"] for u in units()}
-        elif user.get("business_line") == "cotr":
-            mine = {COTR}
-        else:
-            mine = {unit_of_branch(b["code"]) for b in branches} or {WASGEE if user.get("business_line") == "wasgee" else MAIN}
+    return [u["code"] for u in units() if u["code"] in mine] if mine else _unchosen(user, branches)
+
+
+def _unchosen(user: dict, branches: list[dict]) -> list[str]:
+    if user.get("role") in ("superadmin", "admin"):
+        mine = {u["code"] for u in units()}
+    elif user.get("business_line") == "cotr":
+        mine = {COTR}
+    else:
+        mine = {unit_of_branch(b["code"]) for b in branches} or {WASGEE if user.get("business_line") == "wasgee" else MAIN}
     return [u["code"] for u in units() if u["code"] in mine]
+
+
+def default_of(user_id: str) -> list[str]:
+    """The units an account asks for while none is chosen (User Accounts, 2026-11-25): an outlet Kopi Calf, a HUB WH Warehouse,
+    a HUB CK Central Kitchen. It follows the places of the account, so a moved account needs no change."""
+    from app import pengajuan
+    row = db.fetchrow(f"SELECT * FROM {P}.user_account WHERE id::text = %s", (str(user_id),))
+    if row is None:
+        raise UnitError("Akun tidak dikenal")
+    codes = [b["branch_code"] for b in db.fetch(f"SELECT branch_code FROM {P}.user_branch WHERE user_id::text = %s", (str(user_id),))]
+    user = {**dict(row), "id": str(row["id"]), "branch_codes": codes}
+    return _unchosen(user, pengajuan.branch_options(user))
 
 
 def in_monitor(user: dict, row: dict) -> bool:

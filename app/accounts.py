@@ -41,6 +41,17 @@ def branch_limit(user: dict) -> Optional[tuple[str, ...]]:
     return codes
 # business lines of the accounts (migration 054) and the ESB company of their branches (cotr: pools, no ESB branch)
 LINES = ("kopicalf", "wasgee", "cotr")
+# the tabs of User Accounts (2026-11-25): the lines, and of the Kopi Calf line the PIC / outlet accounts that belong to one
+# unit only — every place of theirs is a Roastery / Warehouse / Central Kitchen, or the one Fund Request unit given to them
+TABS = LINES + ("roastery", "warehouse", "ck")
+TAB_SQL = """(CASE WHEN u.business_line <> 'kopicalf' OR u.role NOT IN ('user', 'outlet') THEN u.business_line ELSE coalesce(
+    (SELECT CASE WHEN count(*) = 1 AND min(f.unit) IN ('ROASTERY', 'WAREHOUSE', 'CK') THEN lower(min(f.unit)) END
+     FROM integration_portal.user_fund_unit f WHERE f.user_id = u.id),
+    (SELECT CASE WHEN count(DISTINCT t.tab) = 1 THEN min(t.tab) END FROM (
+        SELECT CASE WHEN k.facility_type = 'ROASTERY' THEN 'roastery' WHEN k.facility_type IN ('HUB_WH', 'WAREHOUSE', 'WH_CENTRAL') THEN 'warehouse'
+                    WHEN k.facility_type IN ('HUB_CK', 'CK_ESPRESSO') THEN 'ck' ELSE 'kopicalf' END AS tab
+        FROM integration_portal.user_branch x LEFT JOIN kc_master.facility k ON k.code = x.branch_code WHERE x.user_id = u.id) t),
+    'kopicalf') END)"""
 LINE_COMPANY = {"kopicalf": "CALF", "wasgee": "CALF7", "cotr": None}
 
 USER_COLUMNS = """u.id, u.username, u.email, u.full_name, u.role, u.is_active, u.phone_number, u.job_title,
@@ -168,8 +179,8 @@ def get_password_hash(user_id: str) -> Optional[str]:
 def list_users(search: str = "", role: str = "", status: str = "", limit: int = 20, offset: int = 0,
                branch: str = "", line: str = "") -> tuple[list[dict], int]:
     where, params = ["TRUE"], {}
-    if line in LINES:
-        where.append("u.business_line = %(line)s")
+    if line in TABS:
+        where.append(f"{TAB_SQL} = %(line)s")
         params["line"] = line
     if search:
         where.append("(u.username ILIKE %(q)s OR u.email ILIKE %(q)s OR u.full_name ILIKE %(q)s "
@@ -199,8 +210,8 @@ def list_users(search: str = "", role: str = "", status: str = "", limit: int = 
     return rows, total
 
 
-def user_counts(line: Optional[str] = None) -> dict:
-    """Headline counts for the User Accounts page (`line`: the accounts of one business line only, a COTR admin)."""
+def user_counts(line: Optional[str] = None, role: Optional[str] = None) -> dict:
+    """Headline counts of User Accounts (`line`: one tab, `role`: one role — an admin sees role User only)."""
     return db.fetchrow(f"""
         SELECT count(*)::int AS total,
                count(*) FILTER (WHERE u.is_active)::int AS active,
@@ -209,18 +220,25 @@ def user_counts(line: Optional[str] = None) -> dict:
                count(*) FILTER (WHERE u.role = 'superadmin')::int AS superadmins,
                count(*) FILTER (WHERE u.role = 'user')::int AS users,
                count(*) FILTER (WHERE u.role = 'outlet')::int AS outlets,
-               count(*) FILTER (WHERE u.role IN ('user', 'outlet') AND NOT EXISTS (
+               count(*) FILTER (WHERE u.role IN ('user', 'outlet') AND u.business_line <> 'cotr' AND NOT EXISTS (
                    SELECT 1 FROM {T_USER_BRANCH} x WHERE x.user_id = u.id))::int AS without_branch,
                count(*) FILTER (WHERE u.last_login_at IS NULL)::int AS never_signed_in,
-               count(*) FILTER (WHERE u.business_line = 'kopicalf')::int AS line_kopicalf,
-               count(*) FILTER (WHERE u.business_line = 'wasgee')::int AS line_wasgee,
-               count(*) FILTER (WHERE u.business_line = 'cotr')::int AS line_cotr,
                count(*) FILTER (WHERE u.last_login_at > now() - interval '7 days')::int AS active_7d,
                (SELECT count(DISTINCT x.branch_code)::int FROM {T_USER_BRANCH} x
                 JOIN {T_USER} xu ON xu.id = x.user_id AND xu.role IN ('user', 'outlet') AND xu.is_active
-                 AND (%(line)s::text IS NULL OR xu.business_line = %(line)s)) AS branches_covered
-        FROM {T_USER} u WHERE %(line)s::text IS NULL OR u.business_line = %(line)s
-    """, {"line": line}) or {}
+                 AND (%(line)s::text IS NULL OR {TAB_SQL.replace("u.", "xu.")} = %(line)s)) AS branches_covered
+        FROM {T_USER} u WHERE (%(line)s::text IS NULL OR {TAB_SQL} = %(line)s) AND (%(role)s::text IS NULL OR u.role = %(role)s)
+    """, {"line": line, "role": role}) or {}
+
+
+def tab_counts() -> tuple[dict, dict]:
+    """The accounts of every tab, and of every role per tab: {tab: n}, {tab: {role: n}}."""
+    tabs: dict[str, int] = dict.fromkeys(TABS, 0)
+    roles: dict[str, dict[str, int]] = {}
+    for r in db.fetch(f"SELECT {TAB_SQL} AS tab, u.role, count(*)::int AS n FROM {T_USER} u GROUP BY 1, 2"):
+        tabs[r["tab"]] = tabs.get(r["tab"], 0) + r["n"]
+        roles.setdefault(r["tab"], {})[r["role"]] = r["n"]
+    return tabs, roles
 
 
 def known_branch_codes(codes: list[str]) -> set[str]:

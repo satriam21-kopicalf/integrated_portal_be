@@ -246,7 +246,12 @@ def _outlet_rows() -> tuple[list[dict], list[dict], list[dict], dict[str, list[s
         f"""SELECT x.id::text, e.branch_code AS place, e.business_date AS day, e.item_name AS item, x.field, x.old_value AS old, x.new_value AS new,
                    x.reason, x.by_name AS by,
                    (x.created_at AT TIME ZONE 'Asia/Jakarta')::date AS "on"
-              FROM {P}.waste_correction x JOIN {P}.waste_entry e ON e.id = x.entry_id WHERE x.created_at > now() - interval '1 day'""")
+              FROM {P}.waste_correction x JOIN {P}.waste_entry e ON e.id = x.entry_id WHERE x.created_at > now() - interval '1 day'
+            UNION ALL
+            SELECT 'u' || x.id, x.branch_code, x.business_date, u.item_name, x.field, x.old_value, x.new_value, x.reason, x.by_name,
+                   (x.created_at AT TIME ZONE 'Asia/Jakarta')::date
+              FROM {P}.usage_correction x JOIN {P}.usage_count u USING (branch_code, business_date, item_code)
+             WHERE x.created_at > now() - interval '1 day'""")
     codes = sorted({r["place"] for r in (*recounts, *fixes.values(), *wastes) if r["place"]})
     people: dict[str, list[str]] = {}
     if codes:

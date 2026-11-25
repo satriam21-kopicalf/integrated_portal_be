@@ -374,6 +374,10 @@ def save_usage(user: dict, body: dict) -> dict:
     unknown = [c for c in lines if c not in items]
     if unknown:
         raise WasteError(f"Item tidak ada di daftar Usage Management: {unknown[0]}")
+    from app import usage_fix
+    fixed = usage_fix.locked(branch["code"], day) & set(lines)
+    if fixed:  # 2026-11-25 (migration 152)
+        raise WasteError(f"{items[min(fixed)]['name']} sudah dikoreksi Cost Control dan tidak bisa diubah lagi")
     keep, drop = [], []
     for code, line in lines.items():
         line = line if isinstance(line, dict) else {"qty": line}
@@ -738,20 +742,6 @@ def daily(date_from: date, date_to: date, branches: Optional[list[str]]) -> dict
             missing.append({"code": b["code"], "name": b["name"]})
     return {"dates": [d.isoformat() for d in span], "branches": rows, "missingLast": missing,
             "lastDate": span[-1].isoformat() if span else None}
-
-
-def usage_report(date_from: date, date_to: date, branches: Optional[list[str]]) -> list[dict]:
-    """The Usage Management quantities of the period (latest first)."""
-    where = "business_date BETWEEN %(a)s AND %(b)s" + ("" if branches is None else " AND branch_code = ANY(%(br)s)")
-    rows = db.fetch(f"""SELECT branch_code, branch_name, business_date, item_code, item_name, unit, qty::float AS qty,
-                               category, note, photo IS NOT NULL AS has_photo,
-                               coalesce(full_name, username) AS by, updated_at FROM {T_USAGE} WHERE {where}
-                        ORDER BY business_date DESC, branch_name, item_name LIMIT 5000""",
-                    {"a": date_from, "b": date_to, "br": branches or []})
-    return [{"branchCode": r["branch_code"], "branchName": r["branch_name"], "businessDate": r["business_date"].isoformat(),
-             "itemCode": r["item_code"], "itemName": r["item_name"], "unit": r["unit"], "qty": r["qty"], "by": r["by"],
-             "category": r.get("category"), "note": r.get("note"), "hasPhoto": bool(r.get("has_photo")),
-             "updatedAt": r["updated_at"].isoformat()} for r in rows]
 
 
 # ---------------------------------------------------------------- categories (migration 055)

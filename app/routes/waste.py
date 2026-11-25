@@ -39,7 +39,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from app import activity, branch_groups, waste
+from app import activity, branch_groups, usage_fix, waste
 from app.access import deny, has_page, require_page
 from app.activity import client_ip
 from app.routes.auth import current_user
@@ -438,4 +438,50 @@ def esb_compare(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] =
 def usage(dateFrom: Optional[date] = Query(None), dateTo: Optional[date] = Query(None), branch: Optional[str] = None,
           group: Optional[str] = Query(None, max_length=60), _user: dict = Depends(require_page(MON, REV))) -> dict:
     start, end, branches = _period(dateFrom, dateTo, branch, group)
-    return {"period": {"from": start.isoformat(), "to": end.isoformat()}, "data": waste.usage_report(start, end, branches)}
+    return {"period": {"from": start.isoformat(), "to": end.isoformat()}, "data": usage_fix.report(start, end, branches)}
+
+
+class UsageFixLine(BaseModel):
+    branchCode: str = Field(min_length=1, max_length=40)
+    businessDate: date
+    itemCode: str = Field(min_length=1, max_length=80)
+    seen: Optional[float] = None  # the quantity on the screen
+    qty: Optional[float] = Field(None, ge=0, le=1_000_000)
+    newItemCode: Optional[str] = Field(None, min_length=1, max_length=80)
+    category: Optional[str] = Field(None, min_length=1, max_length=120)
+    note: Optional[str] = Field(None, max_length=500)
+
+
+class UsageFixIn(BaseModel):
+    lines: list[UsageFixLine] = Field(min_length=1, max_length=500)
+    reason: str = Field(min_length=3, max_length=500)
+
+
+@router.post("/usage/corrections")
+def correct_usage(body: UsageFixIn, request: Request, user: dict = Depends(require_page(REV))) -> dict:
+    """Cost Control corrects Usage Management lines (2026-11-25): one with every field, or many quantities at once."""
+    try:
+        out = usage_fix.correct([ln.model_dump(exclude_unset=True) for ln in body.lines], body.reason, user, allowed_branches())
+    except waste.CheckInError as exc:
+        _refuse(exc)
+    if out["updated"]:
+        activity.record("waste.usage-correct", user=user, request=request, page="/cost-control/waste/reviews",
+                        summary=f"Usage Management dikoreksi: {len(out['updated'])} baris", details={**out, "reason": body.reason})
+    return out
+
+
+@router.get("/usage/options")
+def usage_options(branch: str = Query(..., min_length=1, max_length=40), _user: dict = Depends(require_page(REV))) -> dict:
+    scope = allowed_branches()
+    if scope is not None and branch not in scope:
+        raise HTTPException(404, detail="Cabang tidak ditemukan")
+    cat = waste.catalog(branch=branch)
+    return {"items": cat["items"]["usage"], "categories": cat["usageCategories"]}
+
+
+@router.get("/usage/{branch_code}/{day}/{item_code}/corrections")
+def usage_corrections(branch_code: str, day: date, item_code: str, _user: dict = Depends(require_page(MON, REV))) -> dict:
+    scope = allowed_branches()
+    if scope is not None and branch_code not in scope:
+        raise HTTPException(404, detail="Usage Management tidak ditemukan")
+    return {"data": usage_fix.history(branch_code, day, item_code)}

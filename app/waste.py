@@ -344,6 +344,8 @@ def form(user: dict, branch: Optional[str], day: Optional[date]) -> dict:
         out["usage"] = {r["item_code"]: float(r["qty"]) for r in saved}
         out["usageDetail"] = {r["item_code"]: {"qty": float(r["qty"]), "category": r.get("category"), "note": r.get("note"),
                                                "hasPhoto": bool(r.get("has_photo"))} for r in saved}
+        from app import usage_fix
+        out["usageUsual"] = usage_fix.limits(out["items"]["usage"], usage_fix.usual())
         flag = db.fetchrow(f"SELECT no_waste, full_name, username, updated_at FROM {T_DAY} "
                            "WHERE branch_code = %s AND business_date = %s", (branch, d))
         out["noWaste"] = None if not flag or not flag["no_waste"] else {

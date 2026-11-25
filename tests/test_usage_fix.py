@@ -21,6 +21,12 @@ def test_a_quantity_in_pieces_is_unusual_and_suggested_in_packs():
     assert usage_fix.judge(500, "PACK@1KG", None, 0)["unusual"] is False
 
 
+def test_the_form_gets_the_limit_of_the_items_that_tell():
+    items = [{"code": "A", "unit": "PACK@1KG"}, {"code": "B", "unit": "PCS"}, {"code": "C", "unit": "PCS"}]
+    med = {("A", "PACK@1KG"): (1.0, 50), ("B", "PCS"): (2.0, 3), ("C", "PACK@100PCS"): (1.0, 90)}  # C has another unit here
+    assert usage_fix.limits(items, med) == {"A": {"usual": 1.0, "limit": 10.0, "packSize": 1000}}
+
+
 class Cur:
     def __init__(self, rows):
         self.rows, self.sql = rows, []

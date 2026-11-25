@@ -37,11 +37,22 @@ def judge(qty: float, unit: Optional[str], median: Optional[float], lines: int) 
     return {"unusual": unusual, "packSize": size, "suggested": packs if packs and packs < TIMES * median else None}
 
 
-def usual() -> dict[str, tuple[float, int]]:
-    """{item code: (median quantity, lines)} of the last days, every outlet."""
-    return {r["item_code"]: (float(r["med"]), r["n"]) for r in db.fetch(
-        f"""SELECT item_code, percentile_cont(0.5) WITHIN GROUP (ORDER BY qty)::float AS med, count(*)::int AS n
-              FROM {T} WHERE qty > 0 AND business_date >= current_date - %s::int GROUP BY 1""", (DAYS,))}
+def usual() -> dict[tuple[str, str], tuple[float, int]]:
+    """{(item code, unit): (median quantity, lines)} of the last days, every outlet."""
+    return {(r["item_code"], r["unit"]): (float(r["med"]), r["n"]) for r in db.fetch(
+        f"""SELECT item_code, unit, percentile_cont(0.5) WITHIN GROUP (ORDER BY qty)::float AS med, count(*)::int AS n
+              FROM {T} WHERE qty > 0 AND business_date >= current_date - %s::int GROUP BY 1, 2""", (DAYS,))}
+
+
+def limits(items: list[dict], med: dict[tuple[str, str], tuple[float, int]]) -> dict[str, dict]:
+    """{item code: {usual, limit, packSize}} for the form of the outlet: a quantity of `limit` or more is asked about before
+    it is saved (2026-11-25). Pure (tested)."""
+    out = {}
+    for i in items:
+        m, n = med.get((i["code"], i["unit"]), (None, 0))
+        if m and n >= MIN_LINES:
+            out[i["code"]] = {"usual": m, "limit": TIMES * m, "packSize": pack_size(i["unit"])}
+    return out
 
 
 def report(date_from: date, date_to: date, branches: Optional[list[str]]) -> list[dict]:
@@ -56,7 +67,7 @@ def report(date_from: date, date_to: date, branches: Optional[list[str]]) -> lis
     med = usual() if rows else {}
     out = []
     for r in rows:
-        m, n = med.get(r["item_code"], (None, 0))
+        m, n = med.get((r["item_code"], r["unit"]), (None, 0))
         j = judge(r["qty"], r["unit"], m, n)
         if r["fixes"]:  # checked by Cost Control
             j = {**j, "unusual": False, "suggested": None}

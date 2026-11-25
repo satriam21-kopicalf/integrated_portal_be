@@ -368,31 +368,68 @@ def fit(channel: Optional[str], branch: Optional[str], days: int = 30) -> dict:
 # ---------------------------------------------------------------- hours per outlet (those BotFood has none for)
 
 def hours() -> dict[str, dict]:
-    return {r["branch_code"]: r for r in db.fetch(f"SELECT branch_code, open_time, close_time, by_name FROM {P}.agg_hours")}
+    """The hours entered per outlet before the merchant app became the reference: used only where nothing else is known."""
+    try:
+        return {r["branch_code"]: r for r in db.fetch(f"SELECT branch_code, open_time, close_time, by_name FROM {P}.agg_hours")}
+    except Exception:  # noqa: BLE001 - before migration 151
+        return {}
+
+
+def hours_checks() -> dict[tuple[str, str], list[dict]]:
+    """(branch, platform) to the checks of the team against the merchant app, newest first."""
+    out: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    try:
+        for r in db.fetch(f"SELECT * FROM {P}.agg_hours_check ORDER BY valid_from DESC"):
+            out[(r["branch_code"], r["channel"])].append(r)
+    except Exception:  # noqa: BLE001 - before migration 154
+        return {}
+    return out
 
 
 def hours_list() -> list[dict]:
-    have = hours()
-    bf = {r["branch_code"]: r for r in db.fetch(
-        f"""SELECT m.branch_code, min(c.open_time) AS o, max(c.close_time) AS z FROM {P}.agg_channel c JOIN {P}.agg_branch_map m ON m.bf_branch_id = c.bf_branch_id
-             WHERE m.branch_code IS NOT NULL AND c.open_time IS NOT NULL GROUP BY 1""")}
+    """Per outlet and platform: the hours BotFood has, where they come from, and the last check of the team. `state`:
+    unchecked / ok / diff / recheck (the usual hours are not those of the check any more)."""
+    from app import aggregator_reports as rep
+    z = datetime.now(WIB).date()
+    known, checks, names = rep.app_hours(z), hours_checks(), _branch_names()
     f = lambda t: t.strftime("%H:%M") if t else None  # noqa: E731
-    return [{"code": k, "name": n, "botfood": f"{f(bf[k]['o'])}–{f(bf[k]['z']) or ''}" if k in bf else None, "open": f(have[k]["open_time"]) if k in have else None,
-             "close": f(have[k]["close_time"]) if k in have else None, "by": have[k]["by_name"] if k in have else None} for k, n in _branch_names().items()]
+    out = []
+    for c in db.fetch(f"""SELECT c.id, c.channel, m.branch_code FROM {P}.agg_channel c JOIN {P}.agg_branch_map m ON m.bf_branch_id = c.bf_branch_id
+                          WHERE m.branch_code IS NOT NULL"""):
+        if c["branch_code"] not in names:
+            continue
+        a, k = known.get(c["id"]), rep.checked(checks.get((c["branch_code"], c["channel"]), []), z)
+        usual = a["usual"] if a else None
+        state = "unchecked" if not k else "recheck" if k["app_hours"] != usual else k["status"]
+        out.append({"code": c["branch_code"], "name": names[c["branch_code"]], "platform": c["channel"], "app": usual, "kinds": a["kinds"] if a else 0,
+                    "from": ("botfood" if a["setting"] else "app") if a else None, "state": state, "status": k["status"] if k else None,
+                    "open": f(k["open_time"]) if k else None, "close": f(k["close_time"]) if k else None, "by": k["by_name"] if k else None,
+                    "at": k["checked_at"].isoformat() if k else None, "validFrom": k["valid_from"].isoformat() if k else None})
+    return sorted(out, key=lambda r: (r["name"], r["platform"]))
 
 
-def set_hours(user: dict, rows: list[dict]) -> None:
-    known = _branch_names()
+def check_hours(user: dict, rows: list[dict]) -> None:
+    """The team looked in the merchant app: the same as BotFood (ok) or the hours it really shows (diff), from a date on."""
+    have = {(r["code"], r["platform"]): r for r in hours_list()}
+    now = datetime.now(WIB).date()
     with db.transaction() as conn:
         for r in rows:
-            if r["code"] not in known:
-                raise QualityError("Outlet tidak dikenal")
-            if not r.get("open"):
-                conn.execute(f"DELETE FROM {P}.agg_hours WHERE branch_code = %s", (r["code"],))
-                continue
-            conn.execute(f"""INSERT INTO {P}.agg_hours (branch_code, open_time, close_time, by_name) VALUES (%s, %s, %s, %s)
-                             ON CONFLICT (branch_code) DO UPDATE SET open_time = EXCLUDED.open_time, close_time = EXCLUDED.close_time, by_name = EXCLUDED.by_name, updated_at = now()""",
-                         (r["code"], r["open"], r.get("close") or None, _who(user)))
+            x = have.get((r["code"], r["platform"]))
+            if not x:
+                raise QualityError("Outlet atau platform tidak dikenal")
+            if r["status"] == "ok" and not x["app"]:
+                raise QualityError("Jam di BotFood belum ada: isi jam yang tampil di aplikasi merchant")
+            if r["status"] == "diff" and not (r.get("open") and r.get("close") and r["open"] < r["close"]):
+                raise QualityError("Isi jam buka dan jam tutup; jam tutup harus setelah jam buka")
+            diff = r["status"] == "diff"
+            day = r.get("validFrom") or now
+            if day > now:
+                raise QualityError("Tanggal berlaku tidak boleh setelah hari ini")
+            conn.execute(f"""INSERT INTO {P}.agg_hours_check (branch_code, channel, valid_from, status, open_time, close_time, app_hours, by_name)
+                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                             ON CONFLICT (branch_code, channel, valid_from) DO UPDATE SET status = EXCLUDED.status, open_time = EXCLUDED.open_time,
+                               close_time = EXCLUDED.close_time, app_hours = EXCLUDED.app_hours, by_name = EXCLUDED.by_name, checked_at = now()""",
+                         (r["code"], r["platform"], day, r["status"], r["open"] if diff else None, r["close"] if diff else None, x["app"], _who(user)))
 
 
 # ---------------------------------------------------------------- overview & reports

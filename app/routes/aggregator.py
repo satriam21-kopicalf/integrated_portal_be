@@ -10,7 +10,7 @@
     GET  /api/aggregator/branch-map, PUT /api/aggregator/branch-map/{bfBranchId} {branchCode}   BotFood outlet → ours
 """
 from datetime import date, timedelta
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -204,8 +204,11 @@ def hours(_: dict = Depends(OPENING)):
 
 class HourRow(BaseModel):
     code: str = Field(max_length=40)
+    platform: Literal["GrabFood", "GoFood", "ShopeeFood"]
+    status: Literal["ok", "diff"]
     open: Optional[str] = Field(None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     close: Optional[str] = Field(None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    validFrom: Optional[date] = None
 
 
 class HoursIn(BaseModel):
@@ -213,9 +216,10 @@ class HoursIn(BaseModel):
 
 
 @router.put("/hours")
-def set_hours(body: HoursIn, request: Request, user: dict = Depends(OPENING)):
-    _ask(quality.set_hours, user, [r.model_dump() for r in body.rows])
-    activity.record("aggregator", user=user, request=request, page="/aggregator-insight/opening", summary=f"Jam buka {len(body.rows)} outlet", details={"n": len(body.rows)})
+def check_hours(body: HoursIn, request: Request, user: dict = Depends(OPENING)):
+    _ask(quality.check_hours, user, [r.model_dump() for r in body.rows])
+    activity.record("aggregator", user=user, request=request, page="/aggregator-insight/opening", summary=f"Cek jam aplikasi merchant: {len(body.rows)}",
+                    details={"rows": [r.model_dump(mode="json") for r in body.rows][:50]})
     return {"data": quality.hours_list()}
 
 

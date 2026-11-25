@@ -92,17 +92,17 @@ def pull_daily(day: date) -> int:
                 if cid is None:
                     continue
                 conn.execute(f"""INSERT INTO {P}.agg_daily (channel_id, day, bf_branch_id, name, channel, open_time, close_time, open_state,
-                                   close_state, has_break, active_s, inactive_s, hours_s, timeline, inactive_timeline, items_pct)
-                                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                   close_state, has_break, active_s, inactive_s, hours_s, timeline, inactive_timeline, items_pct, hours)
+                                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                  ON CONFLICT (channel_id, day) DO UPDATE SET open_state = EXCLUDED.open_state, close_state = EXCLUDED.close_state,
                                    has_break = EXCLUDED.has_break, active_s = EXCLUDED.active_s, inactive_s = EXCLUDED.inactive_s,
                                    hours_s = EXCLUDED.hours_s, timeline = EXCLUDED.timeline, inactive_timeline = EXCLUDED.inactive_timeline,
-                                   items_pct = EXCLUDED.items_pct, open_time = EXCLUDED.open_time, close_time = EXCLUDED.close_time, fetched_at = now()""",
+                                   items_pct = EXCLUDED.items_pct, hours = EXCLUDED.hours, open_time = EXCLUDED.open_time, close_time = EXCLUDED.close_time, fetched_at = now()""",
                              (cid, day, agg._int(r.get("branch_id")), r.get("branch_channel_name"), r.get("branch_channel_channel"),
                               _time(r.get("open_time")), _time(r.get("close_time")), r.get("open_state"), r.get("close_state"),
                               agg._bool(r.get("has_break")), agg._int(r.get("active_time")), agg._int(r.get("inactive_time")),
                               agg._int(r.get("operational_hours_duration")), r.get("timeline"), r.get("inactive_timeline"),
-                              agg._num(r.get("items_availability_percentage"))))
+                              agg._num(r.get("items_availability_percentage")), (r.get("operational_hours") or "").strip() or None))
                 n += 1
         if page >= int(d.get("total_page") or 0) or not rows:
             break
@@ -136,11 +136,24 @@ def backfill_daily() -> Optional[int]:
     return n
 
 
+def shifts(text: Optional[str]) -> list[tuple[dtime, dtime]]:
+    """The opening hours of a day in order: '12:45 - 21:00; 08:00 - 11:45;' to [(08:00, 11:45), (12:45, 21:00)]."""
+    return sorted((x for x in stretches(text) if x[0] < x[1]), key=lambda x: x[0])
+
+
+def breaks_of(text: Optional[str]) -> list[tuple[dtime, dtime]]:
+    """The planned breaks between the shifts (the Friday prayer …): closed then is no pause."""
+    sh = shifts(text)
+    return [(a[1], b[0]) for a, b in zip(sh, sh[1:]) if a[1] < b[0]]
+
+
 def from_daily(r: dict, g: int) -> dict:
     """A day of BotFood's report as a row of Opening & Closing (pure, tested): its open / close state, the minutes late
-    (the closed stretch from the opening hour), early (closed until the closing hour) and the pauses in between."""
+    (the closed stretch from the opening hour), early (closed until the closing hour) and the pauses in between, the planned
+    breaks of the hours left out. Everything in WIB."""
     out = {"status": None, "openedAt": None, "closedAt": None, "lateMin": None, "earlyMin": None, "pauseMin": 0}
-    ot, ct = r.get("open_time"), r.get("close_time")
+    sh = shifts(r.get("hours"))
+    ot, ct = (sh[0][0], sh[-1][1]) if sh else (r.get("open_time"), r.get("close_time"))
     if not ot:
         out["status"] = "no_hours"
         return out
@@ -149,14 +162,16 @@ def from_daily(r: dict, g: int) -> dict:
         out["status"] = "not_opened"
         return out
     mins = lambda a, b: (b.hour * 60 + b.minute) - (a.hour * 60 + a.minute)  # noqa: E731
-    on = stretches(r.get("timeline"))
+    on = [x for x in stretches(r.get("timeline")) if x[1] > ot]  # what ended before the opening hour is the night before
     off = stretches(r.get("inactive_timeline"))
-    if on:
+    if on and on[0][0] > dtime(0):  # from midnight on: open before anybody looked
         out["openedAt"] = on[0][0].strftime("%H:%M")
     late = 0
     for a, b in off:
         if a <= ot < b or (a == ot):
             late = mins(ot, b)
+    if not late and on:
+        late = max(0, mins(ot, on[0][0]))
     out["lateMin"] = late if late > g else 0
     out["status"] = "late" if st == "late" or late > g else "on_time"
     early = 0
@@ -171,9 +186,10 @@ def from_daily(r: dict, g: int) -> dict:
     out["earlyMin"] = early if early > g else None
     if not out["earlyMin"]:
         out["closedAt"] = None
+    planned = breaks_of(r.get("hours"))
     for a, b in off:
         if a > ot and (not ct or b < ct):
-            out["pauseMin"] += max(0, mins(a, b))
+            out["pauseMin"] += max(0, mins(a, b) - sum(max(0, mins(max(a, x), min(b, y))) for x, y in planned))
     return out
 
 
@@ -215,7 +231,7 @@ def _at(day: date, t: dtime) -> datetime:
 
 
 def day_row(events_today: list[dict], was_open: Optional[bool], d: date, ot: Optional[dtime], ct: Optional[dtime],
-            g: int, now: datetime, have_data: bool) -> dict:
+            g: int, now: datetime, have_data: bool, planned: Optional[list] = None) -> dict:
     """One outlet, platform and day: status, opened at, late / early / pause minutes. Pure (tested)."""
     row = {"status": None, "openedAt": None, "closedAt": None, "lateMin": None, "earlyMin": None, "pauseMin": 0}
     day0 = _at(d, dtime(0))
@@ -261,7 +277,8 @@ def day_row(events_today: list[dict], was_open: Optional[bool], d: date, ot: Opt
                 row["closedAt"] = a.strftime("%H:%M")
             continue
         stop = min(b or upto, upto)
-        row["pauseMin"] += int((stop - a).total_seconds() // 60)
+        away = sum(max(0.0, (min(stop, _at(d, y)) - max(a, _at(d, x))).total_seconds()) for x, y in planned or [])
+        row["pauseMin"] += max(0, int(((stop - a).total_seconds() - away) // 60))
     return row
 
 
@@ -339,7 +356,35 @@ def _to_wib(t: Optional[dtime], ahead: int) -> Optional[dtime]:
     return (datetime.combine(date(2000, 1, 2), t) - timedelta(minutes=ahead)).time() if t and ahead else t
 
 
+def app_hours(upto: date) -> dict[int, dict]:
+    """Channel to the hours of its merchant app as BotFood's last daily reports have them: by weekday, the last one, the usual
+    one (the most frequent of 14 days) and how many different ones. {} before migration 154."""
+    out: dict[int, dict] = {}
+    try:
+        rows = db.fetch(f"""SELECT channel_id, day, hours, open_time IS NOT NULL AS setting FROM {P}.agg_daily
+                            WHERE hours IS NOT NULL AND day <= %s AND day > %s ORDER BY day""", (upto, upto - timedelta(days=14)))
+    except Exception:  # noqa: BLE001
+        return {}
+    for r in rows:
+        x = out.setdefault(r["channel_id"], {"week": {}, "last": None, "n": defaultdict(int), "setting": False})
+        x["week"][r["day"].isoweekday()] = x["last"] = r["hours"]
+        x["setting"] = r["setting"]  # typed into BotFood, not read from the merchant app
+        x["n"]["; ".join(f"{a:%H:%M} - {b:%H:%M}" for a, b in shifts(r["hours"]))] += 1
+    for x in out.values():
+        x["usual"] = max(x["n"].items(), key=lambda kv: kv[1])[0]
+        x["kinds"] = len(x["n"])
+    return out
+
+
+def checked(checks: list[dict], day: date) -> Optional[dict]:
+    """The check of the team that holds on a day (the latest not after it). Pure (tested)."""
+    hit = [c for c in checks if c["valid_from"] <= day]
+    return max(hit, key=lambda c: c["valid_from"]) if hit else None
+
+
 def opening(d_from: date, d_to: date, channel: Optional[str] = None) -> dict:
+    """The reference is the opening hours of the merchant app (2026-11-25): what the team checked in the app, else the hours
+    of the day in BotFood's report, else the hours last known of the weekday."""
     g = grace()
     now = datetime.now(WIB)
     chans = [c for c in _channels() if not channel or c["channel"] == channel]
@@ -350,10 +395,8 @@ def opening(d_from: date, d_to: date, channel: Optional[str] = None) -> dict:
         ev[e["channel_id"]].append(e)
     handlers = _handlers(d_from, d_to)
     from app import aggregator_quality
-    try:
-        own = aggregator_quality.hours()  # the hours the team entered, for the outlets BotFood has none for
-    except Exception:  # noqa: BLE001 - before migration 151
-        own = {}
+    own, checks = aggregator_quality.hours(), aggregator_quality.hours_checks()
+    known = app_hours(d_to)
     first_event = db.fetchrow(f"SELECT min(at) AS a FROM {P}.agg_status_event")["a"]
     daily = {(r["channel_id"], r["day"]): r for r in db.fetch(
         f"SELECT * FROM {P}.agg_daily WHERE day BETWEEN %s AND %s", (d_from, d_to))}
@@ -368,23 +411,41 @@ def opening(d_from: date, d_to: date, channel: Optional[str] = None) -> dict:
                 break
             todays = [e for e in es if day0 <= e["at"].astimezone(WIB) < day1]
             before = [e for e in es if e["at"] < day0]
-            ot = next((e["open_time"] for e in reversed(todays) if e["open_time"]), None) or c["open_time"]
-            ct = next((e["close_time"] for e in reversed(todays) if e["close_time"]), None) or c["close_time"]
             rep = daily.get((c["id"], d))
-            mine = own.get(c["branch_code"]) if c["branch_code"] else None
-            if mine:  # entered on the outlet's clock; everything here is WIB
-                ahead = wib_shift().get(c["branch_code"], 0)
-                mine = {**mine, "open_time": _to_wib(mine["open_time"], ahead), "close_time": _to_wib(mine["close_time"], ahead)}
-            if mine:
-                ot, ct = ot or mine["open_time"], ct or mine["close_time"]
+            code = c["branch_code"]
+            ahead = wib_shift().get(code, 0) if code else 0  # the hours are on the outlet's clock, the times BotFood saw in WIB
+            chk = checked(checks.get((code, c["channel"]), []), d) if code else None
+            app = known.get(c["id"])
+            text, src = (rep or {}).get("hours"), None
+            if text:
+                src = "botfood" if rep["open_time"] else "app"
+            elif app:
+                text, src = app["week"].get(d.isoweekday()) or app["last"], "botfood" if app["setting"] else "app"
+            if chk and chk["status"] == "diff":
+                text, src = f"{chk['open_time']:%H:%M} - {chk['close_time']:%H:%M}", "team"
+            elif chk and text:
+                src = "ok"
+            if not shifts(text):  # no report with hours yet
+                ot = next((e["open_time"] for e in reversed(todays) if e["open_time"]), None) or c["open_time"]
+                ct = next((e["close_time"] for e in reversed(todays) if e["close_time"]), None) or c["close_time"]
+                mine = own.get(code) if code else None
+                if not ot and mine:
+                    ot, ct, src = mine["open_time"], mine["close_time"], "team"
+                text = f"{ot:%H:%M} - {ct:%H:%M}" if ot and ct else None
+                src = src or ("botfood" if text else None)
+            sh = [(_to_wib(x, ahead), _to_wib(y, ahead)) for x, y in shifts(text)]
+            text = "; ".join(f"{x:%H:%M} - {y:%H:%M}" for x, y in sh)
+            ot, ct = (sh[0][0], sh[-1][1]) if sh else (None, None)
             if rep:  # a past day: BotFood's own report
-                ot, ct = rep["open_time"] or ot, rep["close_time"] or ct
-                if mine and not rep["open_time"]:  # its stretches against the hours of the team
-                    rep = {**rep, "open_time": ot, "close_time": ct, "open_state": None if rep["open_state"] != "not_open" or stretches(rep.get("timeline")) else "not_open"}
-                r = {**from_daily(rep, g), "source": "report", "itemsPct": float(rep["items_pct"]) if rep["items_pct"] is not None else None}
+                use = {**rep, "hours": text, "open_time": ot, "close_time": ct}
+                if src == "team" or ahead:  # its state is against other hours (WITA hours against WIB times in Bali)
+                    use["open_state"] = None if rep["open_state"] != "not_open" or stretches(rep.get("timeline")) else "not_open"
+                r = {**from_daily(use, g), "source": "report", "itemsPct": float(rep["items_pct"]) if rep["items_pct"] is not None else None}
             else:
                 have = first_event is not None and day1 > first_event.astimezone(WIB)
-                r = {**day_row(todays, before[-1]["is_open"] if before else None, d, ot, ct, g, now, have), "source": "live", "itemsPct": None}
+                r = {**day_row(todays, before[-1]["is_open"] if before else None, d, ot, ct, g, now, have, breaks_of(text)), "source": "live", "itemsPct": None}
+            r["hoursFrom"] = src
+            r["hours"] = [f"{x:%H:%M} – {y:%H:%M}" for x, y in sh]
             rows.append({"day": d.isoformat(), "channelId": c["id"], "outlet": c["branch_name"] or c["name"], "branchCode": c["branch_code"],
                          "platform": c["channel"], "openTime": ot.strftime("%H:%M") if ot else None, "closeTime": ct.strftime("%H:%M") if ct else None,
                          "events": len(todays), "member": handlers.get((d, c["branch_code"])) if c["branch_code"] else None, **r})
@@ -447,17 +508,26 @@ def oos(d_from: date, d_to: date, channel: Optional[str] = None, packaging: bool
     start = _at(d_from, dtime(0))
     end = min(_at(d_to, dtime(0)) + timedelta(days=1), now)
     from app import aggregator_quality
-    try:
-        own = aggregator_quality.hours()
-    except Exception:  # noqa: BLE001 - before migration 151
-        own = {}
+    own, checks, known = aggregator_quality.hours(), aggregator_quality.hours_checks(), app_hours(d_to)
+    spans: dict[int, tuple] = {}
 
     def span(c: dict) -> tuple[Optional[dtime], Optional[dtime]]:
-        if c["open_time"] and c["close_time"]:
-            return c["open_time"], c["close_time"]
-        m = own.get(c["branch_code"])
-        ahead = wib_shift().get(c["branch_code"], 0)
-        return (_to_wib(m["open_time"], ahead), _to_wib(m["close_time"], ahead)) if m else (None, None)
+        if c["id"] not in spans:
+            code = c["branch_code"]
+            ahead = wib_shift().get(code, 0) if code else 0
+            chk = checked(checks.get((code, c["channel"]), []), d_to) if code else None
+            sh = shifts((known.get(c["id"]) or {}).get("usual"))
+            m = own.get(code) if code else None
+            if chk and chk["status"] == "diff":
+                v = chk["open_time"], chk["close_time"]
+            elif sh:
+                v = sh[0][0], sh[-1][1]
+            elif c["open_time"] and c["close_time"]:
+                v = c["open_time"], c["close_time"]
+            else:
+                v = (m["open_time"], m["close_time"]) if m else (None, None)
+            spans[c["id"]] = (_to_wib(v[0], ahead), _to_wib(v[1], ahead))
+        return spans[c["id"]]
 
     def keep(cat: str) -> bool:
         return packaging or "PACKAGING" not in cat

@@ -106,3 +106,41 @@ def test_time_out_of_stock_counts_the_opening_hours_only():
     assert open_minutes(at(24, 23), at(25, 6), _time(7), _time(22)) == 0
     assert open_minutes(at(24, 21), at(25, 8), None, None) == 660  # no hours known: every minute
     assert open_minutes(at(25, 8), at(24, 8), None, None) == 0
+
+
+# ---------------------------------------------------------------- hours of the merchant app (2026-11-25)
+
+from datetime import date  # noqa: E402
+
+from app.aggregator_reports import breaks_of, checked, shifts  # noqa: E402
+
+FRIDAY = "12:45 - 21:00; 08:00 - 11:45;"
+
+
+def test_the_shifts_of_a_day_are_put_in_order():
+    assert shifts(FRIDAY) == [(time(8), time(11, 45)), (time(12, 45), time(21))]
+    assert breaks_of(FRIDAY) == [(time(11, 45), time(12, 45))] and breaks_of("08:00 - 22:00;") == []
+    assert shifts(None) == [] and shifts("-") == []
+
+
+def test_the_planned_break_is_no_pause():
+    r = from_daily({**rep("on_time", "08:06 - 12:06; 13:06 - 21:06; ", "12:06 - 13:06;", ot=None, ct=None), "hours": FRIDAY}, 15)
+    assert r["status"] == "on_time" and r["pauseMin"] == 21 and r["earlyMin"] is None
+
+
+def test_the_hours_of_the_app_decide_without_hours_in_botfood():
+    r = from_daily({**rep("late", "08:26 - 21:26; ", None, ot=None, ct=None), "hours": "08:00 - 22:00;"}, 15)
+    assert r["status"] == "late" and r["lateMin"] == 26 and r["earlyMin"] == 34 and r["closedAt"] == "21:26"
+
+
+def test_the_check_that_holds_on_a_day():
+    cs = [{"valid_from": date(2026, 11, 20), "status": "diff"}, {"valid_from": date(2026, 11, 10), "status": "ok"}]
+    assert checked(cs, date(2026, 11, 25))["status"] == "diff" and checked(cs, date(2026, 11, 15))["status"] == "ok"
+    assert checked(cs, date(2026, 11, 1)) is None and checked([], date(2026, 11, 1)) is None
+
+
+def test_open_after_midnight_is_the_night_before():
+    r = from_daily({**rep("late", "00:00 - 00:20; 10:20 - 22:20; ", "00:20 - 10:20;"), "hours": "08:00 - 22:00;"}, 15)
+    assert r["openedAt"] == "10:20" and r["lateMin"] == 140 and r["earlyMin"] is None
+    r = from_daily({**rep("on_time", "00:00 - 22:20; ", None), "hours": "08:00 - 22:00;"}, 15)
+    assert r["openedAt"] is None and r["status"] == "on_time"

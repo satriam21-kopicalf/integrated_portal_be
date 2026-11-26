@@ -182,8 +182,9 @@ def test_premix_is_entered_like_the_stock_opname_wip():
                            {"code": None, "name": "Air", "isStock": False, "perGram": 0.4}]}
     unit, grams, comps = waste.explode(item, None, waste.Decimal("3"))
     assert unit == "Porsi" and grams == 345 and [c["grams"] for c in comps] == [207, 138]
+    assert waste.explode(item, "gram", waste.Decimal("10.01"))[2][0]["grams"] == 6.01  # 6.006 g → 6.01, rounded up
     unit, grams, comps = waste.explode(item, "gram", waste.Decimal("10.5"))
-    assert unit == "Gram" and grams == waste.Decimal("10.5") and comps[0]["grams"] == 7  # 6.3 g → 7
+    assert unit == "Gram" and grams == waste.Decimal("10.5") and comps[0]["grams"] == 6.3  # 2 decimals (2026-11-26)
     try:
         waste.explode(item, "Pail", waste.Decimal(1))
         raise AssertionError("unknown unit accepted")

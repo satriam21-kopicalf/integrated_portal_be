@@ -101,7 +101,7 @@ def facility_type(branch_code: str) -> str:
 
 
 def explode(item: dict, uom: str, qty: Decimal) -> tuple[str, Decimal, list[dict]]:
-    """(unit, grams of WIP, grams per ingredient rounded up as the premix calculator) of `qty` `uom` of a premix."""
+    """(unit, grams of WIP, grams per ingredient rounded up to 2 decimals) of `qty` `uom` of a premix."""
     units = item.get("units") or [{"uom": item["unit"], "grams": 1.0}]
     unit = next((u for u in units if u["uom"].lower() == str(uom or item["unit"]).lower()), None)
     if unit is None:
@@ -109,7 +109,8 @@ def explode(item: dict, uom: str, qty: Decimal) -> tuple[str, Decimal, list[dict
     grams = qty * Decimal(str(unit["grams"]))
 
     def up(v: Decimal) -> Decimal:
-        return (v - Decimal("0.001")).quantize(Decimal(1), rounding=ROUND_CEILING) if v > 0 else Decimal(0)
+        # 2 decimals, rounded up (2026-11-26, Cost Control; whole grams before)
+        return (v - Decimal("0.00001")).quantize(Decimal("0.01"), rounding=ROUND_CEILING) if v > 0 else Decimal(0)
     comps = [{"code": c.get("code"), "name": c["name"], "isStock": c.get("isStock", True),
               "grams": float(up(grams * Decimal(str(c["perGram"]))))} for c in item.get("components") or []]
     return unit["uom"], grams.quantize(Decimal("0.001")), comps

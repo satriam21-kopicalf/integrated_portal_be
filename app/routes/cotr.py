@@ -260,6 +260,14 @@ def driver_void(sale_id: str, body: ReasonIn, request: Request, user: dict = Dep
     return out
 
 
+@router.post("/driver/start-from-hrms")
+def driver_start_from_hrms(request: Request, user: dict = Depends(driver_only)):
+    """The shift starts from the HRMS punch-in: no second check in in the driver app (2026-11-26)."""
+    out = _call(cotr.start_from_hrms, user)
+    _log(request, user, "cotr.shift.start_hrms", "COTR shift dimulai dari absensi HRMS", {})
+    return out
+
+
 @router.post("/driver/product-request")
 def driver_product_request(body: ReloadIn, request: Request, user: dict = Depends(driver_only)):
     """The products the driver asks to bring today, before the shift (migration 159)."""

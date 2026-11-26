@@ -312,6 +312,7 @@ def today_of(user: dict) -> dict:
         "shift": shift,
         "dispatch": _dispatch_view(dispatch_of(d["code"], today())),
         "productRequest": _product_request(d["code"], today()),
+        "hrmsIn": (hrms_punch(user) or {}).get("at"),
         "stock": stock_now(s["start_stock"], reloads, sales) if s else {},
         "sales": [_sale_view(x) for x in sales],
         "reloads": [_reload_view(x) for x in reloads],
@@ -381,6 +382,54 @@ def confirm_dispatch(user: dict, counts: dict, note: Optional[str]) -> dict:
     return today_of(user)
 
 
+def hrms_punch(user: dict) -> Optional[dict]:
+    """Today's punch-in of the driver in the HRMS attendance app (sk_hrms, face and GPS checked there): {at, lat, lng} or
+    None (not linked, not punched, or before HRMS is reachable)."""
+    try:
+        r = db.fetchrow("""SELECT a.clock_in, a.latitude, a.longitude FROM sk_hrms.attendance_records a
+                             JOIN integration_portal.user_account u ON u.hrms_employee_id::text = a.employee_id::text
+                            WHERE u.id::text = %s AND a.date = %s AND a.clock_in IS NOT NULL""", (str(user["id"]), today()))
+    except Exception:  # noqa: BLE001 - HRMS is extra: the check in of the app stays
+        return None
+    if not r:
+        return None
+    return {"at": r["clock_in"].strftime("%H:%M"), "lat": float(r["latitude"]) if r["latitude"] is not None else None,
+            "lng": float(r["longitude"]) if r["longitude"] is not None else None}
+
+
+def _open_shift_row(conn, d: dict, x: dict) -> dict:
+    """The shift of today from the accepted assignment `x` (its final cups are the start stock) with the accessories on the fleet."""
+    s = conn.execute(
+        f"""INSERT INTO {P}.cotr_shift (driver_code, day, pool_code, fleet_code, start_stock, dispatch_id)
+            VALUES (%s, %s, %s, %s, %s, %s) RETURNING *""",
+        (d["code"], today(), d["pool_code"], d["fleet_code"], Jsonb(x["final_lines"]), x["id"])).fetchone()
+    if d["fleet_code"]:  # the accessories on the fleet now go with this shift (migration 080)
+        conn.execute(f"""INSERT INTO {P}.cotr_shift_accessory (shift_id, accessory_code, fleet_code, qty)
+                         SELECT %s, accessory_code, fleet_code, qty FROM {P}.cotr_fleet_accessory
+                          WHERE fleet_code = %s AND removed_on IS NULL ON CONFLICT DO NOTHING""", (s["id"], d["fleet_code"]))
+    return s
+
+
+def start_from_hrms(user: dict) -> dict:
+    """2026-11-26: a driver who punched in the HRMS attendance app does not check in again in the driver app: the shift
+    starts from the accepted assignment, the punch stands for the check in (time and place; its photo is the face of HRMS)."""
+    d = require_driver(user)
+    punch = hrms_punch(user)
+    if not punch:
+        raise CotrError("Belum absen masuk di HRMS hari ini: check in lewat aplikasi")
+    with db.transaction() as conn:
+        if conn.execute(f"SELECT 1 FROM {P}.cotr_shift WHERE driver_code = %s AND day = %s FOR UPDATE", (d["code"], today())).fetchone():
+            raise CotrError("Shift hari ini sudah dimulai")
+        x = conn.execute(f"SELECT * FROM {P}.cotr_dispatch WHERE driver_code = %s AND day = %s", (d["code"], today())).fetchone()
+        if not x or x["status"] != "accepted":
+            raise CotrError("Cek dulu produk yang di-assign storage sampai sesuai")
+        s = _open_shift_row(conn, d, x)
+        conn.execute(f"""INSERT INTO {P}.cotr_check_in (shift_id, kind, latitude, longitude, stock, note)
+                         VALUES (%s, 'start', %s, %s, %s, %s)""",
+                     (s["id"], punch["lat"], punch["lng"], Jsonb(x["final_lines"]), f"Absensi HRMS {punch['at']}"))
+    return today_of(user)
+
+
 def check_in(user: dict, kind: str, photo: str, lat: float, lng: float, accuracy: Optional[float], stock: dict,
              note: Optional[str], waste: Optional[dict] = None, cupping: Optional[dict] = None,
              cash_actual: Optional[float] = None, cash_spent: Optional[float] = None, signature: Optional[str] = None,
@@ -404,14 +453,7 @@ def check_in(user: dict, kind: str, photo: str, lat: float, lng: float, accuracy
             if not sign:
                 raise CotrError("Tanda tangan wajib diisi")
             counted = x["final_lines"]
-            s = conn.execute(
-                f"""INSERT INTO {P}.cotr_shift (driver_code, day, pool_code, fleet_code, start_stock, dispatch_id)
-                    VALUES (%s, %s, %s, %s, %s, %s) RETURNING *""",
-                (d["code"], today(), d["pool_code"], d["fleet_code"], Jsonb(counted), x["id"])).fetchone()
-            if d["fleet_code"]:  # the accessories on the fleet now go with this shift (migration 080)
-                conn.execute(f"""INSERT INTO {P}.cotr_shift_accessory (shift_id, accessory_code, fleet_code, qty)
-                                 SELECT %s, accessory_code, fleet_code, qty FROM {P}.cotr_fleet_accessory
-                                  WHERE fleet_code = %s AND removed_on IS NULL ON CONFLICT DO NOTHING""", (s["id"], d["fleet_code"]))
+            s = _open_shift_row(conn, d, x)
         else:
             if not s or s["status"] != "open":
                 raise CotrError("Belum ada shift yang berjalan")

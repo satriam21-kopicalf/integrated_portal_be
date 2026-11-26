@@ -311,6 +311,7 @@ def today_of(user: dict) -> dict:
         "menus": [{"code": m["code"], "name": m["name"], "price": float(m["price"])} for m in menus(active_only=True)],
         "shift": shift,
         "dispatch": _dispatch_view(dispatch_of(d["code"], today())),
+        "productRequest": _product_request(d["code"], today()),
         "stock": stock_now(s["start_stock"], reloads, sales) if s else {},
         "sales": [_sale_view(x) for x in sales],
         "reloads": [_reload_view(x) for x in reloads],
@@ -477,6 +478,32 @@ def void_sale(user: dict, sale_id: str, reason: str) -> dict:
                            WHERE id = %s AND shift_id = %s AND voided_at IS NULL RETURNING id""", (reason, sale_id, s["id"]))
     if not row:
         raise CotrError("Transaksi tidak ditemukan atau sudah dibatalkan")
+    return today_of(user)
+
+
+def _product_request(driver_code: str, day: date) -> Optional[dict]:
+    try:
+        x = db.fetchrow(f"SELECT * FROM {P}.cotr_product_request WHERE driver_code = %s AND day = %s", (driver_code, day))
+    except Exception:  # noqa: BLE001 - before migration 159
+        return None
+    return {"lines": x["lines"], "note": x["note"], "at": _iso(x["at"])} if x else None
+
+
+def request_products(user: dict, lines: dict, note: Optional[str]) -> dict:
+    """The driver asks the products to bring today before the shift (migration 159), while the storage has not assigned
+    them yet or the assignment is not accepted: replaced when sent again."""
+    d = require_driver(user)
+    if shift_of(d["code"], today()):
+        raise CotrError("Shift sudah dimulai: ajukan lewat Reload")
+    disp = dispatch_of(d["code"], today())
+    if disp and disp["status"] == "accepted":
+        raise CotrError("Produk hari ini sudah diterima")
+    asked = clean_stock(lines, _menu_map())
+    if not asked:
+        raise CotrError("Isi jumlah produk yang akan dibawa")
+    db.fetchrow(f"""INSERT INTO {P}.cotr_product_request (day, driver_code, pool_code, lines, note) VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (day, driver_code) DO UPDATE SET lines = EXCLUDED.lines, note = EXCLUDED.note, at = now() RETURNING day""",
+                (today(), d["code"], d["pool_code"], Jsonb(asked), (note or "").strip()[:500] or None))
     return today_of(user)
 
 
@@ -1205,12 +1232,17 @@ def storage_day(day: date, pool: Optional[str]) -> dict:
     prev = {x["driver_code"]: x["final_lines"] or x["lines"] for x in db.fetch(
         f"""SELECT DISTINCT ON (driver_code) driver_code, lines, final_lines FROM {P}.cotr_dispatch
              WHERE day < %s AND driver_code = ANY(%s) ORDER BY driver_code, day DESC""", (day, codes))}
+    try:  # the products the drivers asked for (migration 159)
+        asked = {x["driver_code"]: {"lines": x["lines"], "note": x["note"], "at": _iso(x["at"])} for x in db.fetch(
+            f"SELECT * FROM {P}.cotr_product_request WHERE day = %s AND driver_code = ANY(%s)", (day, codes))}
+    except Exception:  # noqa: BLE001
+        asked = {}
     rows = []
     for d in drivers:
         s = shifts.get(d["code"])
         rows.append({"code": d["code"], "name": d["name"], "nickname": d["nickname"], "pool": d["pool_code"], "fleet": d["fleet_code"],
                      "status": d["status"], "dispatch": _dispatch_view(disp.get(d["code"])), "previous": prev.get(d["code"]),
-                     "shift": s["status"] if s else None})
+                     "shift": s["status"] if s else None, "request": asked.get(d["code"])})
     advice = suggestions(day, codes)
     for r in rows:
         r["advice"] = advice.get(r["code"])

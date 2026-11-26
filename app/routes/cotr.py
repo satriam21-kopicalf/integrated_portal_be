@@ -260,6 +260,14 @@ def driver_void(sale_id: str, body: ReasonIn, request: Request, user: dict = Dep
     return out
 
 
+@router.post("/driver/product-request")
+def driver_product_request(body: ReloadIn, request: Request, user: dict = Depends(driver_only)):
+    """The products the driver asks to bring today, before the shift (migration 159)."""
+    out = _call(cotr.request_products, user, body.lines, body.note)
+    _log(request, user, "cotr.product_request", "COTR request produk", {"lines": body.lines})
+    return out
+
+
 @router.post("/driver/reloads")
 def driver_reload(body: ReloadIn, user: dict = Depends(driver_only)):
     return _call(cotr.request_reload, user, body.lines, body.note)

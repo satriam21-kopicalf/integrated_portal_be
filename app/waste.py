@@ -274,6 +274,7 @@ def with_values(rows: list[dict]) -> list[dict]:
 
     for r, v in zip(rows, views):
         total, sources, missing = 0.0, set(), 0
+        priced: dict[str, tuple[float, float]] = {}  # ingredient code → (price, value): the breakdown of a premix (2026-11-26)
         for code, qty, unit, recipe in entry_parts(r):
             p, src = price(code, r["business_date"]) if code else (None, None)
             q = base_qty(units, code, qty, unit, recipe) if code else None
@@ -282,6 +283,11 @@ def with_values(rows: list[dict]) -> list[dict]:
                 continue
             total += q * p
             sources.add(src)
+            if r["scope"] == "premix" and code:
+                priced[code] = (p, round(q * p, 2))
+        if r["scope"] == "premix" and v.get("ingredients"):
+            v["ingredients"] = [{**x, "price": priced.get(x.get("code"), (None, None))[0], "value": priced.get(x.get("code"), (None, None))[1]}
+                                for x in v["ingredients"]]
         if not sources:
             v.update(value=None, unitPrice=None, priceSource="none")
             continue

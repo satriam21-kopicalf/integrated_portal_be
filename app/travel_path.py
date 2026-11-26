@@ -12,6 +12,8 @@ Findings   every NOK, with a deadline by its category (hours, or before the next
 Settings   sessions (window, branch groups), score and deadlines: Branch Groups → Travel Path."""
 import copy
 import json
+import os
+import secrets
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -205,20 +207,74 @@ def gaps(items: list[dict], answers: dict, photos: list[dict]) -> list[dict]:
     return out
 
 
+SHARE_BASE = os.getenv("PORTAL_PUBLIC_URL", "https://portal.kopicalf.co.id").rstrip("/")
+BAND_TEXT = {"standard": "Standar", "repair": "Perlu perbaikan", "failed": "Tidak lulus"}
+
+
+def share_url(token: Optional[str]) -> Optional[str]:
+    return f"{SHARE_BASE}/share/travel/{token}" if token else None
+
+
+def evaluation(r: dict, items: list[dict], cfg: dict) -> list[str]:
+    """The automatic evaluation of a sent report (pure, tested): the band against the thresholds, the critical findings,
+    the zones with the most findings, what was repaired at once, the timing and the place."""
+    c = r.get("counts") or {}
+    a = r.get("answers") or {}
+    out = []
+    score = c.get("score")
+    if score is None:
+        out.append("Belum ada area yang dinilai.")
+    elif score >= cfg["standard"]:
+        out.append(f"Skor {score:g}% memenuhi standar ({cfg['standard']:g}%).")
+    elif score >= cfg["pass"]:
+        out.append(f"Skor {score:g}% di bawah standar {cfg['standard']:g}%: perlu perbaikan.")
+    else:
+        out.append(f"Skor {score:g}% di bawah batas lulus {cfg['pass']:g}%: tidak lulus.")
+    nok = [it for it in items if (a.get(it["key"]) or {}).get("rating") == "NOK"]
+    crit = [it for it in nok if it.get("category") == CRITICAL]
+    if crit:
+        out.append(f"{len(crit)} temuan Kritikal ({', '.join(it['label'] for it in crit[:3])}); skor dibatasi {cfg['criticalCap']:g}%.")
+    zones: dict[str, int] = {}
+    for it in nok:
+        zones[it.get("section_title") or "-"] = zones.get(it.get("section_title") or "-", 0) + 1
+    if zones:
+        worst = sorted(zones.items(), key=lambda x: -x[1])[:2]
+        out.append("Temuan terbanyak: " + ", ".join(f"{z} ({n})" for z, n in worst) + ".")
+    fixed = sum(1 for it in nok if (a.get(it["key"]) or {}).get("fix"))
+    if nok:
+        out.append(f"{fixed} dari {len(nok)} temuan langsung diperbaiki; sisanya wajib ditutup dengan foto after sebelum tenggat.")
+    if not nok and score is not None:
+        out.append("Tidak ada temuan.")
+    if r.get("late"):
+        out.append("Dikirim setelah jam sesi berakhir.")
+    if r.get("report_late"):
+        out.append(f"Dikirim lebih dari {cfg['reportMinutes']} menit setelah foto terakhir.")
+    if r.get("outside_radius"):
+        out.append(f"Dikirim di luar radius outlet ({r.get('distance_m') or '?'} m).")
+    return out
+
+
 def report_text(r: dict, items: list[dict], cfg: dict) -> str:
-    """The message of the SOP for the group chat."""
+    """The message of the SOP for the group chat, with the automatic evaluation and the link to every photo."""
     at = (r["submitted_at"] or r["updated_at"]).astimezone(WIB)
     c = r["counts"] or {}
     a = r["answers"] or {}
     na = [it["label"] for it in items if (a.get(it["key"]) or {}).get("rating") == "NA"]
     found = [(it, a[it["key"]]) for it in items if (a.get(it["key"]) or {}).get("rating") == "NOK"]
-    lines = [f"TRAVEL PATH — {r['branch_name']}", f"Sesi           : {r['session_label']}", f"Tanggal / jam  : {at:%d/%m/%Y} · {at:%H.%M} WIB",
+    band = f" · {BAND_TEXT.get(r.get('band'), '')}" if r.get("band") else ""
+    lines = [f"*TRAVEL PATH — {r['branch_name']}*", f"Sesi           : {r['session_label']}", f"Tanggal / jam  : {at:%d/%m/%Y} · {at:%H.%M} WIB",
              f"Pelaksana      : {' & '.join(x for x in (r['crew'], r['supervisor']) if x)}",
              f"Area diperiksa : {c.get('done', 0)} / {c.get('total', 0)}  ·  N/A: {', '.join(na) or '-'}",
-             f"Skor           : {c['score']:g}%" if c.get("score") is not None else "Skor           : -", "Temuan         :" + ("" if found else " -")]
+             (f"Skor           : *{c['score']:g}%*{band}" if c.get("score") is not None else "Skor           : -"), "Temuan         :" + ("" if found else " -")]
     for n, (it, x) in enumerate(found, start=1):
-        fix = f" — {x['fix']}" if x.get("fix") else ""
+        fix = f" — diperbaiki: {x['fix']}" if x.get("fix") else ""
         lines.append(f"  {n}. [{it.get('category') or '-'}] {it['label']}: {x.get('note') or '-'}{fix}")
+    lines.append("")
+    lines.append("*Evaluasi*")
+    lines += [f"• {e}" for e in evaluation(r, items, cfg)]
+    url = share_url(r.get("share_token"))
+    if url:
+        lines += ["", f"Lampiran foto: {url}"]
     lines.append("cc " + " ".join("@" + v for v in dict.fromkeys(cfg["escalation"].values()) if v))
     return "\n".join(lines)
 
@@ -227,7 +283,7 @@ def report_text(r: dict, items: list[dict], cfg: dict) -> str:
 
 COLS = f"""r.id::text, r.branch_code, r.branch_name, r.branch_group, r.day, r.session, r.session_label, r.status, r.crew, r.supervisor,
     r.started_name, r.started_at, r.updated_at, r.submitted_name, r.submitted_at, r.window_end, r.late, r.report_late, r.answers, r.counts, r.score,
-    r.band, r.distance_m, r.outside_radius, (SELECT count(*) FROM {TP} p WHERE p.report_id = r.id)::int AS photo_count"""
+    r.band, r.distance_m, r.outside_radius, r.share_token, (SELECT count(*) FROM {TP} p WHERE p.report_id = r.id)::int AS photo_count"""
 
 
 def _iso(v: Optional[datetime]) -> Optional[str]:
@@ -240,7 +296,7 @@ def _view(r: dict) -> dict:
             "startedBy": r["started_name"], "startedAt": _iso(r["started_at"]), "updatedAt": _iso(r["updated_at"]), "submittedBy": r["submitted_name"],
             "submittedAt": _iso(r["submitted_at"]), "windowEnd": _iso(r["window_end"]), "late": r["late"], "reportLate": r["report_late"],
             "counts": r["counts"], "score": float(r["score"]) if r["score"] is not None else None, "band": r["band"],
-            "distanceM": r["distance_m"], "outsideRadius": r["outside_radius"], "photoCount": r["photo_count"]}
+            "distanceM": r["distance_m"], "outsideRadius": r["outside_radius"], "photoCount": r["photo_count"], "shareUrl": share_url(r.get("share_token"))}
 
 
 def _row(report_id: str) -> Optional[dict]:
@@ -301,7 +357,25 @@ def full(report_id: str) -> dict:
     else:
         out["findings"] = findings("f.report_id::text = %s", (report_id,))
         out["text"] = report_text(r, items, cfg)
+        out["evaluation"] = evaluation(r, items, cfg)
     return out
+
+
+def shared(token: str) -> Optional[dict]:
+    """A sent report opened from its link (no sign-in): no ids of people, no place."""
+    row = db.fetchrow(f"SELECT r.id::text FROM {T} r WHERE r.share_token = %s AND r.status = 'SUBMITTED'", (token,))
+    if not row:
+        return None
+    out = full(row["id"])
+    for k in ("id", "distanceM", "startedBy", "submittedBy", "shareUrl"):
+        out.pop(k, None)
+    out["photos"] = [{k: v for k, v in p.items() if k not in ("distanceM",)} for p in out["photos"]]
+    return out
+
+
+def shared_photo(token: str, photo_id: str) -> Optional[dict]:
+    return db.fetchrow(f"""SELECT p.photo, p.photo_type FROM {TP} p JOIN {T} r ON r.id = p.report_id
+                           WHERE r.share_token = %s AND r.status = 'SUBMITTED' AND p.id::text = %s""", (token, photo_id))
 
 
 def outlets_for(user: dict) -> list[dict]:
@@ -489,9 +563,9 @@ def submit(user: dict, report_id: str, lat: Optional[float], lng: Optional[float
     with db.transaction() as conn:
         row = conn.execute(
             f"""UPDATE {T} SET status = 'SUBMITTED', submitted_at = now(), submitted_by = %s, submitted_name = %s, updated_at = now(), counts = %s::jsonb,
-                    score = %s, band = %s, late = %s, report_late = %s, latitude = %s, longitude = %s, accuracy_m = %s, distance_m = %s, outside_radius = %s
+                    score = %s, band = %s, late = %s, report_late = %s, share_token = %s, latitude = %s, longitude = %s, accuracy_m = %s, distance_m = %s, outside_radius = %s
                 WHERE id::text = %s AND status = 'DRAFT' RETURNING id""",
-            (user["id"], name, json.dumps(c), c["score"], c["band"], late, report_late, lat, lng, accuracy, j["distance_m"], j["outside_radius"],
+            (user["id"], name, json.dumps(c), c["score"], c["band"], late, report_late, secrets.token_urlsafe(16), lat, lng, accuracy, j["distance_m"], j["outside_radius"],
              report_id)).fetchone()
         if row is None:
             raise TravelError("Laporan ini sudah dikirim")

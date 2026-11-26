@@ -108,7 +108,19 @@ def test_the_message_for_the_group_chat():
          "answers": {"a": {"rating": "OK"}, "b": {"rating": "NOK", "note": "Sabun kosong", "fix": "refill 10.35"}, "c": {"rating": "NA", "note": "x"}}}
     t = tp.report_text(r, ITEMS, CFG)
     assert "TRAVEL PATH — Joglo" in t and "26/11/2026 · 10.00 WIB" in t and "Ani & Budi" in t and "3 / 4  ·  N/A: C" in t
-    assert "1. [Mayor] B: Sabun kosong — refill 10.35" in t and "@Head Operasional @Area Supervisor @Supervisor Outlet" in t
+    assert "1. [Mayor] B: Sabun kosong — diperbaiki: refill 10.35" in t and "@Head Operasional @Area Supervisor @Supervisor Outlet" in t
+    assert "*Evaluasi*" in t and "Lampiran foto" not in t
+    t = tp.report_text({**r, "share_token": "abc"}, ITEMS, CFG)
+    assert t.endswith("@Supervisor Outlet") and "Lampiran foto: https://portal.kopicalf.co.id/share/travel/abc" in t
+
+
+def test_the_automatic_evaluation():
+    r = {"counts": {"score": 66.7}, "answers": {"a": {"rating": "NOK", "note": "x"}, "b": {"rating": "NOK", "note": "y", "fix": "ok"}}, "late": True, "outside_radius": True, "distance_m": 420}
+    items = [{**ITEMS[0], "section_title": "Zona 1"}, {**ITEMS[1], "section_title": "Zona 1"}]
+    e = tp.evaluation(r, items, CFG)
+    assert "tidak lulus" in e[0] and "1 temuan Kritikal (A)" in e[1] and e[2] == "Temuan terbanyak: Zona 1 (2)."
+    assert "1 dari 2 temuan langsung diperbaiki" in e[3] and "setelah jam sesi" in e[4] and "420 m" in e[5]
+    assert "memenuhi standar" in tp.evaluation({"counts": {"score": 100}, "answers": {}}, ITEMS, CFG)[0]
 
 
 def test_notices():

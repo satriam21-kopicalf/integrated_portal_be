@@ -183,6 +183,23 @@ def reopen(finding_id: str, body: NoteIn, request: Request, user: dict = Depends
     return out
 
 
+@router.get("/api/public/travel/{token}")
+def shared(token: str) -> dict:
+    """A sent Travel Path from its link in the WhatsApp group: anyone may open it (2026-11-26)."""
+    out = tp.shared(token)
+    if out is None:
+        raise HTTPException(404, detail="Link tidak ditemukan")
+    return out
+
+
+@router.get("/api/public/travel/{token}/photos/{photo_id}")
+def shared_photo(token: str, photo_id: str, w: Optional[int] = Query(None, ge=48, le=1600)) -> Response:
+    row = tp.shared_photo(token, photo_id)
+    if row is None:
+        raise HTTPException(404, detail="Foto tidak ditemukan")
+    return image_response(row["photo"], row["photo_type"], w, "private, max-age=3600")
+
+
 @router.get("/api/travel-photos/{photo_id}")
 def photo(photo_id: str, request: Request, w: Optional[int] = Query(None, ge=48, le=1600), user: dict = Depends(current_user)) -> Response:
     row = tp.photo(photo_id)

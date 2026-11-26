@@ -270,6 +270,25 @@ def scan_outlets() -> int:
         found = [*found, *travel_path.scan()]
     except Exception:  # noqa: BLE001 - the Travel Path is extra
         logger.exception("travel path notices")
+    try:  # SO Daily auto-submit at 07:00 WIB (2026-11-26): to the accounts of the outlet, a summary for Cost Control
+        from app import so_autosubmit
+        notes = so_autosubmit.run()
+        if notes:
+            places = sorted({n["place"] for n in notes})
+            who: dict[str, list[str]] = {}
+            for r in db.fetch(f"""SELECT ub.branch_code AS b, u.id::text AS u FROM {P}.user_branch ub JOIN {P}.user_account u ON u.id = ub.user_id
+                                   WHERE u.is_active AND ub.branch_code = ANY(%s) AND (u.role = 'outlet' OR (u.role = 'user' AND
+                                         (SELECT count(*) FROM {P}.user_branch x WHERE x.user_id = u.id) <= %s))""", (places, PIC_PLACES)):
+                who.setdefault(r["b"], []).append(r["u"])
+            for n in notes:
+                found += [{**{k: v for k, v in n.items() if k != "place"}, "dedup": f"{n['dedup']}:{u}", "branch": n["place"], "user": u} for u in who.get(n["place"], [])]
+            auto, gone = sum(n["kind"] == "so_auto" for n in notes), sum(n["kind"] == "so_missing" for n in notes)
+            day = datetime.now(ZoneInfo("Asia/Jakarta")).date()
+            found.append({"dedup": f"so_daily_sum:{day}:{auto}:{gone}", "kind": "so_daily_sum", "severity": "warn",
+                          "title": f"SO Daily: {auto} di-submit otomatis 07:00, {gone} outlet belum SO",
+                          "body": ", ".join(n["body"].split(" · ")[0] for n in notes)[:500], "link": "/cost-control/monitor"})
+    except Exception:  # noqa: BLE001 - extra: never stop the bell
+        logger.exception("so daily auto-submit")
     with db.transaction() as conn:
         for a in found:
             added += _add(conn, a)

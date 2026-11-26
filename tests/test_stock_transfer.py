@@ -41,7 +41,7 @@ def test_the_stock_of_the_source_is_information_only(source, monkeypatch):
     """2026-11-26: no transfer moves the stock; the stock of the source never limits a request."""
     assert st.stock([B])[B]["items"]["RM-MILK"]["available"] == 1000.0  # the count only
     assert st.moves(None, None, [B]) == [] and st.linked_grs() == []
-    with pytest.raises(st.TransferError, match="tidak ditemukan di master"):
+    with pytest.raises(st.TransferError, match="tidak ada di template"):
         _request(monkeypatch, [{"code": "RM-MILK", "qty": 5000}])
     with pytest.raises(st.TransferError, match="foto evidence dan tanda tangan"):
         _request(monkeypatch, [{"code": "RM-MILK", "qty": 100}], photo=False)
@@ -76,7 +76,7 @@ def test_only_my_outlet_asks_and_never_itself(source, monkeypatch):
 def test_cost_control_adjusts_the_quantities_with_a_note(monkeypatch):
     monkeypatch.setattr(st, "is_approver", lambda user: True)
     monkeypatch.setattr(st, "_load", lambda tid: {"id": tid, "number": "TS-1", "status": "submitted", "to_branch": A, "from_branch": B, "requested_by": "u"})
-    monkeypatch.setattr(st.db, "fetch", lambda q, p=None: [{"item_code": "RM-MILK", "item_name": "Fresh Milk", "qty": 500}])
+    monkeypatch.setattr(st.db, "fetch", lambda q, p=None: [{"item_code": "RM-MILK", "item_name": "Fresh Milk", "qty": 500, "pack_qty": 1, "factor": 500}])
     user = {"id": "cc", "username": "cc"}
     with pytest.raises(st.TransferError, match="alasan penyesuaian"):
         st.decide(user, "t1", True, None, {"RM-MILK": 300})
@@ -98,12 +98,14 @@ def test_an_approved_transfer_leaves_the_source_and_reaches_the_requester_only_w
 
 def test_the_gr_of_a_received_transfer_is_matched_with_esb(monkeypatch):
     """2026-11-07 (migration 079): waiting until ESB syncs it, then matched or the differences per material."""
-    items = [{"code": "RM-MILK", "name": "Fresh Milk", "qty": 500.0}]
+    items = [{"code": "RM-MILK", "name": "Fresh Milk", "qty": 500.0, "unit": "GR"}]
+    from app import menu_costing as mc
+    monkeypatch.setattr(mc, "item_units", lambda codes: {"RM-MILK": ("GR", {"GR": 1.0, "PCS@500GR": 500.0})})
     monkeypatch.setattr(st.db, "fetchrow", lambda q, p=None: None)
     assert st.gr_check("GR-1", A, items)["status"] == "waiting"
     monkeypatch.setattr(st.db, "fetchrow", lambda q, p=None: {"doc_num": "GR-1", "doc_date": None, "branch_code": A, "status_name": "Finished"})
-    monkeypatch.setattr(st.db, "fetch", lambda q, p=None: [{"product_code": "RM-MILK", "qty": 500}])
+    monkeypatch.setattr(st.db, "fetch", lambda q, p=None: [{"product_code": "RM-MILK", "uom": "PCS@500GR", "qty": 1}])  # a GR in the whole unit (2026-11-26)
     assert st.gr_check("GR-1", A, items)["status"] == "matched"
     assert st.gr_check("GR-1", B, items)["status"] == "otherBranch"
-    monkeypatch.setattr(st.db, "fetch", lambda q, p=None: [{"product_code": "RM-MILK", "qty": 450}])
+    monkeypatch.setattr(st.db, "fetch", lambda q, p=None: [{"product_code": "RM-MILK", "uom": "GR", "qty": 450}])
     assert st.gr_check("GR-1", A, items)["diffs"] == [{"code": "RM-MILK", "name": "Fresh Milk", "transfer": 500.0, "gr": 450.0}]

@@ -76,6 +76,27 @@ def prices(codes: list[str], day: Optional[date] = None) -> dict[str, float]:
     return out
 
 
+def template() -> dict[str, dict]:
+    """{item code: {name, category, unit (base), pack (the whole unit), factor}}: the materials of a transfer and their unit,
+    from the stock opname template of HUB WH / HUB CK (2026-11-26); without a pack of its own an item is asked in its base
+    unit (factor 1)."""
+    out: dict[str, dict] = {}
+    for r in db.fetch(
+            """SELECT DISTINCT ON (i.code) i.code, i.name, upper(coalesce(i.base_uom, '')) AS unit, coalesce(c.name, '') AS category,
+                      upper(coalesce(cli.pack_uom, cli.esb_uom)) AS pack, u.factor
+                 FROM kc_inventory.count_list cl
+                 JOIN kc_inventory.count_list_item cli ON cli.list_id = cl.id AND cli.is_active
+                 JOIN kc_master.item i ON i.id = cli.item_id AND coalesce(i.is_active, true)
+                 LEFT JOIN kc_master.item_category c ON c.id = i.category_id
+                 LEFT JOIN kc_master.item_uom u ON u.item_id = i.id AND u.is_active AND upper(u.uom) = upper(coalesce(cli.pack_uom, cli.esb_uom))
+                WHERE cl.facility_type IN ('HUB_WH', 'HUB_CK') AND cl.is_active
+                ORDER BY i.code, (cli.pack_uom IS NULL), cli.pack_uom, cli.esb_uom"""):
+        packed = bool(r["pack"] and r["factor"])
+        out[r["code"]] = {"code": r["code"], "name": r["name"], "category": r["category"], "unit": r["unit"],
+                          "pack": r["pack"] if packed else r["unit"], "factor": _f(r["factor"]) if packed else 1.0}
+    return out
+
+
 def stock(branches: Optional[list[str]], exclude: Optional[str] = None) -> dict[str, dict]:
     """{branch: {so: {date, refs}, items: {code: {so, in, out, pending, available, unit}}}} from the latest portal
     stock opname of each branch (the last LATEST_SO_DAYS days). `exclude`: a transfer left out of the pending (its own)."""
@@ -267,16 +288,16 @@ def create(user: dict, body: dict) -> dict:
     if not body.get("photo") or not body.get("signature"):
         raise TransferError("Lampirkan foto evidence dan tanda tangan sebelum submit")
     src = (stock([from_b]).get(from_b) or {"items": {}})["items"]
-    info = items_info([ln["code"] for ln in lines])
+    tpl = template()
     clean = []
     for ln in lines:
         code, qty = str(ln["code"]), _f(ln.get("qty"))
-        it, meta = src.get(code), info.get(code)
+        it, meta = src.get(code), tpl.get(code)
         if not meta:
-            raise TransferError(f"Material {code} tidak ditemukan di master item")
+            raise TransferError(f"Material {code} tidak ada di template Transfer Stock (SO HUB WH / HUB CK)")
         if qty <= 0:
             raise TransferError(f"Qty {meta['name']} harus lebih dari 0")
-        clean.append((code, meta["name"], (it or {}).get("unit") or meta["unit"], qty, it["available"] if it else None))
+        clean.append((code, meta["name"], meta["unit"], qty, it["available"] if it else None, meta["pack"], meta["factor"]))
     pt, photo = parse_photo(body["photo"])
     st, sign = parse_photo(body["signature"])
     with db.transaction() as conn:
@@ -286,9 +307,12 @@ def create(user: dict, body: dict) -> dict:
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id::text, number""",
             (_number(conn), to_b, every.get(to_b) or to_b, from_b, every[from_b], (body.get("note") or "").strip()[:500] or None,
              user["id"], _who(user), photo, pt, sign, st)).fetchone()
-        for i, (code, name, unit, qty, avail) in enumerate(clean, 1):
-            conn.execute(f"""INSERT INTO {T_LINE} (transfer_id, line_no, item_code, item_name, unit, qty, requested_qty, available)
-                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""", (row["id"], i, code, name, unit, qty, qty, avail))
+        for i, (code, name, unit, qty, avail, pack, factor) in enumerate(clean, 1):
+            base = round(qty * factor, 6)
+            conn.execute(f"""INSERT INTO {T_LINE} (transfer_id, line_no, item_code, item_name, unit, qty, requested_qty, available,
+                                                   pack_uom, pack_factor, pack_qty, requested_pack_qty)
+                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                         (row["id"], i, code, name, unit, base, base, avail, pack, factor, qty, qty))
     return detail(row["id"])
 
 
@@ -316,14 +340,14 @@ def decide(user: dict, transfer_id: str, approve: bool, note: Optional[str], qty
         raise TransferError("Tulis alasan penolakan")
     changes: list[tuple[float, str]] = []
     if approve and qty:
-        lines = {r["item_code"]: r for r in db.fetch(f"SELECT item_code, item_name, qty FROM {T_LINE} WHERE transfer_id::text = %s", (transfer_id,))}
+        lines = {r["item_code"]: r for r in db.fetch(f"SELECT item_code, item_name, qty, pack_qty, coalesce(pack_factor, 1) AS factor FROM {T_LINE} WHERE transfer_id::text = %s", (transfer_id,))}
         for code, q in qty.items():
             if code not in lines:
                 raise TransferError("Material tidak ada di transfer ini")
             q = _f(q)
             if q <= 0:
                 raise TransferError(f"Qty {lines[code]['item_name']} harus lebih dari 0")
-            if abs(q - _f(lines[code]["qty"])) > 1e-9:
+            if abs(q - _f(lines[code]["pack_qty"] if lines[code]["pack_qty"] is not None else lines[code]["qty"])) > 1e-9:
                 changes.append((q, code))
         if changes and not note:
             raise TransferError("Tulis alasan penyesuaian qty")
@@ -332,8 +356,9 @@ def decide(user: dict, transfer_id: str, approve: bool, note: Optional[str], qty
                          ("approved" if approve else "rejected", note, _who(user), transfer_id, list(PENDING))).rowcount
         if not n:
             raise TransferError("Transfer ini sudah diputuskan")
-        for q, code in changes:
-            conn.execute(f"UPDATE {T_LINE} SET qty = %s WHERE transfer_id::text = %s AND item_code = %s", (q, transfer_id, code))
+        for q, code in changes:  # q in the whole unit; qty in the base unit
+            conn.execute(f"UPDATE {T_LINE} SET pack_qty = %s, qty = %s * coalesce(pack_factor, 1) WHERE transfer_id::text = %s AND item_code = %s",
+                         (q, q, transfer_id, code))
     return detail(transfer_id)
 
 
@@ -425,6 +450,9 @@ def detail(transfer_id: str) -> dict:
     lines = db.fetch(f"SELECT * FROM {T_LINE} WHERE transfer_id::text = %s ORDER BY line_no", (transfer_id,))
     est = prices([ln["item_code"] for ln in lines]) if r["status"] not in ("received", "processed") else {}
     v["items"] = [{"code": ln["item_code"], "name": ln["item_name"], "unit": ln["unit"], "qty": _f(ln["qty"]),
+                   "pack": ln.get("pack_uom") or ln["unit"], "factor": _f(ln.get("pack_factor")) or 1.0,
+                   "packQty": _f(ln["pack_qty"]) if ln.get("pack_qty") is not None else _f(ln["qty"]),
+                   "requestedPack": _f(ln["requested_pack_qty"]) if ln.get("requested_pack_qty") is not None else None,
                    "requested": _f(ln["requested_qty"]) if ln.get("requested_qty") is not None else _f(ln["qty"]),
                    "available": _f(ln["available"]) if ln["available"] is not None else None,
                    "price": _f(ln["price"]) if ln["price"] is not None else est.get(ln["item_code"]),
@@ -449,14 +477,20 @@ def gr_check(number: str, branch: str, items: list[dict]) -> dict:
     out = {"number": head["doc_num"], "date": head["doc_date"].isoformat() if head["doc_date"] else None, "esbStatus": head["status_name"]}
     if head["branch_code"] != branch:
         return {**out, "status": "otherBranch", "branch": head["branch_code"]}
+    from app import menu_costing as mc
+    lines = {(ln["product_code"], ln["uom"]): _f(ln["qty"]) for ln in db.fetch(
+        f"""SELECT product_code, upper(coalesce(uom_name, '')) AS uom, sum(qty) AS qty FROM {SCHEMA}.erp_document_lines
+             WHERE module = 'goods_receipt' AND doc_num = %s AND line_type = 'detail' GROUP BY 1, 2""", (head["doc_num"],))}
+    codes = sorted({c for c, _ in lines} | {i["code"] for i in items})
+    packs = mc.item_units(codes)
+    unit = {i["code"]: i["unit"] for i in items}
     got: dict[str, float] = {}
-    for ln in db.fetch(f"""SELECT product_code, sum(qty) AS qty FROM {SCHEMA}.erp_document_lines
-                            WHERE module = 'goods_receipt' AND doc_num = %s AND line_type = 'detail' GROUP BY 1""", (head["doc_num"],)):
-        got[ln["product_code"]] = _f(ln["qty"]) or 0.0
+    for c in {c for c, _ in lines}:  # in the base unit of the transfer (2026-11-26: a GR in CTN against a transfer in GR)
+        got[c] = mc._bought(lines, c, unit.get(c) or (packs.get(c) or ("",))[0], None, packs.get(c))
     diffs = []
     for i in items:
         q = got.pop(i["code"], None)
-        if q is None or abs(q - (i["qty"] or 0)) > 1e-6:
+        if q is None or abs(q - (i["qty"] or 0)) > max(1e-6, abs(i["qty"] or 0) * 0.001):
             diffs.append({"code": i["code"], "name": i["name"], "transfer": i["qty"], "gr": q})
     diffs += [{"code": c, "name": c, "transfer": None, "gr": q} for c, q in got.items()]
     return {**out, "status": "mismatch" if diffs else "matched", "diffs": diffs}
@@ -533,17 +567,16 @@ def form(user: dict) -> dict:
 
 
 def available_of(branch: str) -> dict:
-    """The materials of the request form: every item of the source's last count, with its stock (any, none or minus) as
-    information for Cost Control; never a limit (2026-11-26)."""
+    """The materials of the request form (2026-11-26): every material of the template (SO HUB WH / HUB CK) in its whole unit,
+    with the stock of the source from its last count converted to it, as information only."""
     s = stock([branch]).get(branch)
-    if not s:
-        return {"so": None, "items": []}
-    codes = sorted(s["items"])
-    info = items_info(codes)
-    items = [{"code": c, "name": (info.get(c) or {}).get("name") or c, "category": (info.get(c) or {}).get("category") or "",
-              "unit": it["unit"], "available": round(it["available"], 3)} for c, it in s["items"].items() if c in info]
+    items = []
+    for code, t in template().items():
+        it = (s or {"items": {}})["items"].get(code)
+        items.append({"code": code, "name": t["name"], "category": t["category"], "unit": t["pack"], "base": t["unit"], "factor": t["factor"],
+                      "available": round(it["available"] / t["factor"], 3) if it else None})
     items.sort(key=lambda x: (x["category"], x["name"]))
-    return {"so": s["so"], "items": items}
+    return {"so": s["so"] if s else None, "items": items}
 
 
 def file_of(transfer_id: str, kind: str) -> Optional[dict]:

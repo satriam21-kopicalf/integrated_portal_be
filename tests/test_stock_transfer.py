@@ -61,7 +61,7 @@ def test_only_an_approved_transfer_is_processed_with_its_esb_number(monkeypatch)
     with pytest.raises(st.TransferError, match="sudah di-approve"):
         st.process({"id": "cc", "username": "cc"}, "t1", "TRF-1", None)
     state["status"] = "approved"
-    with pytest.raises(st.TransferError, match="nomor dokumen"):
+    with pytest.raises(st.TransferError, match="nomor GR ESB"):
         st.process({"id": "cc", "username": "cc"}, "t1", "  ", None)
 
 

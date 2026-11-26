@@ -338,7 +338,8 @@ def decide(user: dict, transfer_id: str, approve: bool, note: Optional[str], qty
 
 
 def process(user: dict, transfer_id: str, esb_number: Optional[str], note: Optional[str]) -> dict:
-    """Cost Control made the approved transfer in ESB: its document number, and the transfer is done."""
+    """Cost Control made the approved transfer in ESB (PR > PO > SL > GD > GR through the virtual warehouse): the GR number at the
+    destination, matched with the GR synced from ESB (gr_check), and the transfer is done."""
     if not is_approver(user):
         raise TransferError("Akun Anda bukan approver Transfer Stock (Monitoring Stock → Pengaturan)")
     t = _load(transfer_id)
@@ -346,7 +347,7 @@ def process(user: dict, transfer_id: str, esb_number: Optional[str], note: Optio
         raise TransferError("Hanya transfer yang sudah di-approve yang bisa ditandai diproses ESB")
     number = (esb_number or "").strip().upper()[:60]
     if not number:
-        raise TransferError("Isi nomor dokumen transfer di ESB")
+        raise TransferError("Isi nomor GR ESB di outlet tujuan")
     taken = db.fetchrow(f"SELECT number FROM {T} WHERE esb_number = %s AND id::text <> %s", (number, transfer_id))
     if taken:
         raise TransferError(f"Nomor ESB {number} sudah dipakai untuk transfer {taken['number']}")
@@ -431,8 +432,8 @@ def detail(transfer_id: str) -> dict:
                   for ln in lines]
     if v["value"] is None:
         v["estimate"] = round(sum(i["value"] or 0 for i in v["items"]), 2)
-    if r.get("gr_number"):
-        v["gr"] = gr_check(r["gr_number"], r["to_branch"], v["items"])
+    if r.get("gr_number") or r.get("esb_number"):  # the ESB GR at the destination (PR > PO > SL > GD > GR through the virtual WH)
+        v["gr"] = gr_check(r.get("gr_number") or r["esb_number"], r["to_branch"], v["items"])
     return v
 
 

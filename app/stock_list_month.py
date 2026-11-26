@@ -96,11 +96,12 @@ def suggestions(month: str, branches: Optional[list[str]]) -> dict:
     return {"month": month, "data": sorted(rows, key=lambda x: -x["value"])}
 
 
-def stock_list(month: str, branches: Optional[list[str]], usage: str = "recipe") -> dict:
-    key = f"{usage}:{month}:{','.join(sorted(branches)) if branches is not None else '*'}"
+def stock_list(month: str, branches: Optional[list[str]], usage: str = "recipe", until: Optional[date] = None) -> dict:
+    """`until`: a day of the month to stop at (2026-11-26): the Ending Stock is the latest checkpoint count up to it."""
+    key = f"{usage}:{month}:{until or ''}:{','.join(sorted(branches)) if branches is not None else '*'}"
     hit = _cache.get(key)
     if hit is None:
-        hit = _build(month, branches, usage)
+        hit = _build(month, branches, usage, until)
         _cache.set(key, hit, CACHE_S)
     return hit
 
@@ -167,13 +168,15 @@ def _to(mc, packs: dict, code: str, qty: float, unit: str, target: str) -> float
     return q if q is not None else 0.0
 
 
-def _build(month: str, branches: Optional[list[str]], usage: str = "recipe") -> dict:
+def _build(month: str, branches: Optional[list[str]], usage: str = "recipe", until_day: Optional[date] = None) -> dict:
     from app import menu_costing as mc
     from app import running_stock, stock_moves, stock_transit
     from app import stock_transfer as st
     first, last = month_bounds(month)
     today = date.today()
-    upto = min(today, last)
+    upto = min(today, last, until_day or last)
+    if upto < first:
+        upto = first
     # Previous Balance: the count closest to the last day of the month before (back to the 29th, never after the 1st)
     prev = mc.stock_at(first - timedelta(days=1), first - timedelta(days=1), branches, back=3)
     prev = {b: v for b, v in prev.items() if date.fromisoformat(v["date"][:10]) <= first}

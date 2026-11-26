@@ -68,6 +68,11 @@ class ReceiveIn(BaseModel):
     grNumber: Optional[str] = Field(None, max_length=60)
 
 
+class ProcessIn(BaseModel):
+    esbNumber: str = Field(min_length=1, max_length=60)
+    note: Optional[str] = Field(None, max_length=500)
+
+
 class LabelIn(BaseModel):
     label: Optional[str] = None
     note: Optional[str] = Field(None, max_length=300)
@@ -259,6 +264,13 @@ def transfer_lines(ids: str = Query(..., max_length=40_000), _: dict = Depends(r
 def decide(transfer_id: str, body: DecideIn, request: Request, user: dict = Depends(require_page(TRANSFER))) -> dict:
     t = _run(st.decide, user, transfer_id, body.approve, body.note, body.qty)
     _log(request, user, "decide", t, "di-approve Cost Control" if body.approve else "ditolak Cost Control")
+    return t
+
+
+@router.post("/api/monitoring/stock/transfers/{transfer_id}/process")
+def process(transfer_id: str, body: ProcessIn, request: Request, user: dict = Depends(require_page(TRANSFER))) -> dict:
+    t = _run(st.process, user, transfer_id, body.esbNumber, body.note)
+    _log(request, user, "process", t, f"diproses di ESB {t['esb']['number'] if t.get('esb') else ''}")
     return t
 
 

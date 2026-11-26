@@ -12,7 +12,7 @@ bell (app/alerts.py `health_alerts`) and the "Sources" line of every Cost Contro
     gr           Good Receipts: New for more than 2 days, corrected but not Finished, unusual lines of 7 days
     prices       Pricelist: materials used without a price (none at all / only the ESB HPP)
     recipes      menus sold in 7 days without a recipe card (left out of the system usage and the estimate)
-    transfers    Transfer Stock not finished (requested, accepted, approved but not received)
+    transfers    Transfer Stock not finished (waiting for Cost Control, approved but not processed in ESB)
 Status: ok · warn (look at it) · high (the figures are wrong until fixed) · error (the check itself failed).
 """
 import logging
@@ -230,10 +230,10 @@ def transfers() -> dict:
                           WHERE status IN ('submitted', 'accepted', 'approved') GROUP BY 1""")
     by = {r["status"]: int(r["n"]) for r in rows}
     n = sum(by.values())
-    status = "warn" if by.get("accepted") or by.get("approved") else "ok"
+    waiting = by.get("submitted", 0) + by.get("accepted", 0)
+    status = "warn" if n else "ok"
     return card("transfers", status, str(n),
-                f"{by.get('submitted', 0)} diajukan · {by.get('accepted', 0)} menunggu Cost Control · {by.get('approved', 0)} dalam perjalanan "
-                "(barang yang belum diterima tidak ada di stok kedua outlet)",
+                f"{waiting} menunggu approval Cost Control · {by.get('approved', 0)} di-approve, belum diproses di ESB",
                 "Portal Transfer Stock", "/cost-control/stock-transfer", byStatus=by)
 
 

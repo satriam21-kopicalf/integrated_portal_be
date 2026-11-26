@@ -4,17 +4,16 @@ Stock List   the stock of a branch from its latest stock opname in the portal (k
              unit + WIP), with the transfers received since that count (in / out) and the transfers still on their way
              out (requested, accepted, approved): available = SO + in − out − pending out. Valued with the Pricelist
              (else the ESB HPP).
-Transfer     the requester (outlet A, a PIC of A or the outlet account) asks outlet B for materials: the exact
-             quantities (no partial transfer), each one at most what B has available; a material B has none of (≤ 0)
-             cannot be asked. A photo and a signature come with the request.
-               submitted  → B accepts or declines with a note (the stock does not move)
-               accepted   → Cost Control (the approvers set in Monitoring Stock → Settings) approves or rejects; when
-                            approving it may adjust the quantities to the need of the outlets (migration 076, a note
-                            required, the requested quantity kept), within what the source has
-               approved   → A receives the goods with a clear photo of them: only then the stock moves (B out, A in),
-                            valued with the Pricelist of that day (app/stock_moves.py transferIn / transferOut)
-             A request is cancelled by A while B has not answered. Recorded in the portal only: Cost Control labels
-             each transfer whether it is to be entered in ESB (esb_label esb | portal).
+Transfer     the destination outlet (a PIC of it or the outlet account) asks the materials it needs from another outlet,
+             with a photo and a signature (2026-11-26, the flow of Cost Control, migration 155):
+               submitted  → pending: Cost Control (the approvers of Monitoring Stock → Settings) approves or rejects; when
+                            approving it may adjust the quantities (a note required, the requested quantity kept)
+               approved   → Cost Control makes the transfer in ESB and marks it processed with the ESB document number
+               processed  → done
+             The destination cancels while it is pending. The source outlet only sees it. The stock of the source when
+             asked is shown, never a limit. For now a transfer moves no stock in the portal (COUNTS_STOCK): ESB holds it.
+             Before 2026-11-26 the source accepted first and the destination received the goods with a photo and the ESB
+             GR (accepted / declined / received): those transfers stay as they were.
 """
 from datetime import date, timedelta
 from typing import Any, Optional
@@ -26,6 +25,9 @@ from app.pic_checkin import _names, branch_options, parse_photo
 
 P = "integration_portal"
 T, T_LINE, T_APPROVER = f"{P}.stock_transfer", f"{P}.stock_transfer_line", f"{P}.stock_transfer_approver"
+# 2026-11-26: Cost Control: no transfer moves the stock of the portal for now (the reservation, the stock list, the
+# moves, the ratio); ESB holds the movement. True brings the counting of before back.
+COUNTS_STOCK = False
 PENDING = ("submitted", "accepted")  # asked, not approved yet: reserved at the source, not available any more
 # 2026-11-07: the stock leaves the source when Cost Control approves (cc_at); it reaches the requester only when received
 # with the photo (received_at), so an approved transfer is out of the source and not yet in the requester
@@ -83,7 +85,10 @@ def stock(branches: Optional[list[str]], exclude: Optional[str] = None) -> dict[
     for b, c in counts.items():
         out[b] = {"so": {"date": c["date"], "refs": c["refs"]},
                   "items": {code: {"so": q, "in": 0.0, "out": 0.0, "pending": 0.0, "unit": u} for code, (q, u) in c["items"].items()}}
-    if not out:
+    if not out or not COUNTS_STOCK:
+        for s in out.values():
+            for it in s["items"].values():
+                it["available"] = round(it["so"], 6)
         return out
     codes = list(out)
     rows = db.fetch(
@@ -121,6 +126,8 @@ def moves_before(starts: dict[str, date], cutoffs: dict) -> dict[str, dict[str, 
     """{branch: {kind: {(item, UNIT): signed qty}}} of the transfers of the SO day that happened before the SO was sent
     (moves() counts them by day): taken off again, the count already holds them (2026-11-08)."""
     out: dict[str, dict[str, dict[tuple[str, str], float]]] = {}
+    if not COUNTS_STOCK:
+        return out
     for b, cut in cutoffs.items():
         for r in db.fetch(
                 f"""SELECT x.kind, l.item_code, l.unit, sum(x.sign * l.qty) AS qty
@@ -259,22 +266,17 @@ def create(user: dict, body: dict) -> dict:
         raise TransferError("Material yang sama dipilih dua kali")
     if not body.get("photo") or not body.get("signature"):
         raise TransferError("Lampirkan foto evidence dan tanda tangan sebelum submit")
-    src = stock([from_b]).get(from_b)
-    if not src:
-        raise TransferError(f"{every[from_b]} belum punya Stock Opname di portal dalam {LATEST_SO_DAYS} hari terakhir")
+    src = (stock([from_b]).get(from_b) or {"items": {}})["items"]
     info = items_info([ln["code"] for ln in lines])
     clean = []
     for ln in lines:
         code, qty = str(ln["code"]), _f(ln.get("qty"))
-        it = src["items"].get(code)
-        name = (info.get(code) or {}).get("name") or code
+        it, meta = src.get(code), info.get(code)
+        if not meta:
+            raise TransferError(f"Material {code} tidak ditemukan di master item")
         if qty <= 0:
-            raise TransferError(f"Qty {name} harus lebih dari 0")
-        if not it or it["available"] <= 0:
-            raise TransferError(f"Stok {name} di {every[from_b]} kosong atau minus: tidak bisa diambil")
-        if qty > it["available"] + 1e-9:
-            raise TransferError(f"Qty {name} melebihi stok {every[from_b]} ({it['available']:g} {it['unit']})")
-        clean.append((code, name, it["unit"], qty, it["available"]))
+            raise TransferError(f"Qty {meta['name']} harus lebih dari 0")
+        clean.append((code, meta["name"], (it or {}).get("unit") or meta["unit"], qty, it["available"] if it else None))
     pt, photo = parse_photo(body["photo"])
     st, sign = parse_photo(body["signature"])
     with db.transaction() as conn:
@@ -298,38 +300,17 @@ def _load(transfer_id: str) -> dict:
 
 
 def answer(user: dict, transfer_id: str, accept: bool, note: Optional[str]) -> dict:
-    """The source outlet checks the request: accept (the stock does not move yet) or decline, with a note."""
-    t = _load(transfer_id)
-    if t["from_branch"] not in _mine(user):
-        raise TransferError("Hanya outlet tujuan yang bisa memvalidasi pengajuan ini")
-    if t["status"] != "submitted":
-        raise TransferError("Pengajuan ini sudah divalidasi")
-    note = (note or "").strip()[:500] or None
-    if not note:
-        raise TransferError("Tulis alasan / catatan validasi")
-    if accept:  # still in stock (another request may have taken it meanwhile)
-        _check_available(transfer_id, t["from_branch"])
-    _exec(f"""UPDATE {T} SET status = %s, source_note = %s, source_by = %s, source_at = now() WHERE id::text = %s AND status = 'submitted'""",
-               ("accepted" if accept else "declined", note, _who(user), transfer_id))
-    return detail(transfer_id)
-
-
-def _check_available(transfer_id: str, from_b: str) -> None:
-    src = (stock([from_b], exclude=transfer_id).get(from_b) or {"items": {}})["items"]
-    for ln in db.fetch(f"SELECT item_code, item_name, unit, qty FROM {T_LINE} WHERE transfer_id::text = %s", (transfer_id,)):
-        avail = (src.get(ln["item_code"]) or {}).get("available", 0.0)
-        if _f(ln["qty"]) > avail + 1e-9:
-            raise TransferError(f"Stok {ln['item_name']} tidak cukup lagi ({avail:g} {ln['unit']} tersedia)")
+    raise TransferError("Sejak 26 Nov 2026 outlet asal tidak perlu memvalidasi: Cost Control yang menyetujui")
 
 
 def decide(user: dict, transfer_id: str, approve: bool, note: Optional[str], qty: Optional[dict[str, float]] = None) -> dict:
-    """Cost Control approves or rejects a transfer the source accepted; `qty` {item code: quantity}: the quantities
-    adjusted when approving (each > 0 and at most what the source has; a note required when one changes)."""
+    """Cost Control approves or rejects a pending transfer; `qty` {item code: quantity}: the quantities adjusted when
+    approving (each > 0; a note required when one changes). A transfer the source accepted before 2026-11-26 too."""
     if not is_approver(user):
         raise TransferError("Akun Anda bukan approver Transfer Stock (Monitoring Stock → Pengaturan)")
     t = _load(transfer_id)
-    if t["status"] != "accepted":
-        raise TransferError("Hanya transfer yang sudah disetujui outlet tujuan yang bisa di-approve")
+    if t["status"] not in PENDING:
+        raise TransferError("Transfer ini sudah diputuskan")
     note = (note or "").strip()[:500] or None
     if not approve and not note:
         raise TransferError("Tulis alasan penolakan")
@@ -346,65 +327,57 @@ def decide(user: dict, transfer_id: str, approve: bool, note: Optional[str], qty
                 changes.append((q, code))
         if changes and not note:
             raise TransferError("Tulis alasan penyesuaian qty")
-    if approve:
-        with db.transaction() as conn:  # the adjusted quantities first, then the stock check counts them
-            for q, code in changes:
-                conn.execute(f"UPDATE {T_LINE} SET qty = %s WHERE transfer_id::text = %s AND item_code = %s", (q, transfer_id, code))
-        try:
-            _check_available(transfer_id, t["from_branch"])
-        except TransferError:
-            if changes:  # back to what it was: nothing approved
-                with db.transaction() as conn:
-                    for _, code in changes:
-                        conn.execute(f"UPDATE {T_LINE} SET qty = requested_qty WHERE transfer_id::text = %s AND item_code = %s", (transfer_id, code))
-            raise
-    _exec(f"""UPDATE {T} SET status = %s, cc_note = %s, cc_by = %s, cc_at = now() WHERE id::text = %s AND status = 'accepted'""",
-               ("approved" if approve else "rejected", note, _who(user), transfer_id))
+    with db.transaction() as conn:
+        n = conn.execute(f"""UPDATE {T} SET status = %s, cc_note = %s, cc_by = %s, cc_at = now() WHERE id::text = %s AND status = ANY(%s)""",
+                         ("approved" if approve else "rejected", note, _who(user), transfer_id, list(PENDING))).rowcount
+        if not n:
+            raise TransferError("Transfer ini sudah diputuskan")
+        for q, code in changes:
+            conn.execute(f"UPDATE {T_LINE} SET qty = %s WHERE transfer_id::text = %s AND item_code = %s", (q, transfer_id, code))
     return detail(transfer_id)
 
 
-def receive(user: dict, transfer_id: str, photo: Optional[str], note: Optional[str], gr_number: Optional[str] = None) -> dict:
-    """The requester receives the goods: a clear photo and the ESB GR number first; the stock of the requester moves now,
-    valued today (the source already gave it at the approval)."""
+def process(user: dict, transfer_id: str, esb_number: Optional[str], note: Optional[str]) -> dict:
+    """Cost Control made the approved transfer in ESB: its document number, and the transfer is done."""
+    if not is_approver(user):
+        raise TransferError("Akun Anda bukan approver Transfer Stock (Monitoring Stock → Pengaturan)")
     t = _load(transfer_id)
-    if t["to_branch"] not in _mine(user):
-        raise TransferError("Hanya outlet peminta yang bisa menerima barang ini")
     if t["status"] != "approved":
-        raise TransferError("Barang bisa diterima setelah transfer di-approve Cost Control")
-    if not photo:
-        raise TransferError("Lampirkan foto barang yang diterima terlebih dahulu")
-    gr = (gr_number or "").strip().upper()
-    if not gr:
-        raise TransferError("Isi nomor Good Receipt (GR) ESB dari penerimaan barang ini")
-    taken = db.fetchrow(f"SELECT number FROM {T} WHERE gr_number = %s AND id::text <> %s", (gr, transfer_id))
+        raise TransferError("Hanya transfer yang sudah di-approve yang bisa ditandai diproses ESB")
+    number = (esb_number or "").strip().upper()[:60]
+    if not number:
+        raise TransferError("Isi nomor dokumen transfer di ESB")
+    taken = db.fetchrow(f"SELECT number FROM {T} WHERE esb_number = %s AND id::text <> %s", (number, transfer_id))
     if taken:
-        raise TransferError(f"GR {gr} sudah dipakai untuk transfer {taken['number']}")
-    pt, data = parse_photo(photo)
+        raise TransferError(f"Nomor ESB {number} sudah dipakai untuk transfer {taken['number']}")
     lines = db.fetch(f"SELECT line_no, item_code, qty FROM {T_LINE} WHERE transfer_id::text = %s", (transfer_id,))
     price = prices([ln["item_code"] for ln in lines])
     total = 0.0
     with db.transaction() as conn:
-        for ln in lines:
+        for ln in lines:  # the value of the day it was processed (the exports; it moves no stock)
             p = price.get(ln["item_code"])
             v = round(_f(ln["qty"]) * p, 2) if p is not None else None
             total += v or 0.0
-            conn.execute(f"UPDATE {T_LINE} SET price = %s, value = %s WHERE transfer_id::text = %s AND line_no = %s",
-                         (p, v, transfer_id, ln["line_no"]))
-        conn.execute(f"""UPDATE {T} SET status = 'received', receive_photo = %s, receive_photo_type = %s, receive_note = %s,
-                             received_by = %s, received_at = now(), value = %s, gr_number = %s WHERE id::text = %s AND status = 'approved'""",
-                     (data, pt, (note or "").strip()[:500] or None, _who(user), round(total, 2), gr, transfer_id))
-    from app import running_stock
-    running_stock.clear()
+            conn.execute(f"UPDATE {T_LINE} SET price = %s, value = %s WHERE transfer_id::text = %s AND line_no = %s", (p, v, transfer_id, ln["line_no"]))
+        n = conn.execute(f"""UPDATE {T} SET status = 'processed', esb_number = %s, esb_note = %s, esb_by = %s, esb_at = now(), value = %s,
+                                 esb_label = 'esb', esb_label_by = %s, esb_label_at = now() WHERE id::text = %s AND status = 'approved'""",
+                         (number, (note or "").strip()[:500] or None, _who(user), round(total, 2), _who(user), transfer_id)).rowcount
+        if not n:
+            raise TransferError("Transfer ini sudah diproses")
     return detail(transfer_id)
+
+
+def receive(user: dict, transfer_id: str, photo: Optional[str], note: Optional[str], gr_number: Optional[str] = None) -> dict:
+    raise TransferError("Sejak 26 Nov 2026 outlet tidak perlu konfirmasi terima: Cost Control memproses transfer di ESB")
 
 
 def cancel(user: dict, transfer_id: str) -> dict:
     t = _load(transfer_id)
     if t["to_branch"] not in _mine(user):
         raise TransferError("Hanya outlet peminta yang bisa membatalkan")
-    if t["status"] != "submitted":
-        raise TransferError("Pengajuan yang sudah divalidasi outlet tujuan tidak bisa dibatalkan")
-    _exec(f"UPDATE {T} SET status = 'cancelled' WHERE id::text = %s AND status = 'submitted'", (transfer_id,))
+    if t["status"] not in PENDING:
+        raise TransferError("Transfer yang sudah diputuskan Cost Control tidak bisa dibatalkan")
+    _exec(f"UPDATE {T} SET status = 'cancelled' WHERE id::text = %s AND status = ANY(%s)", (transfer_id, list(PENDING)))
     return detail(transfer_id)
 
 
@@ -421,7 +394,7 @@ def label(user: dict, transfer_id: str, value: Optional[str], note: Optional[str
 COLS = """t.id::text, t.number, t.to_branch, t.to_name, t.from_branch, t.from_name, t.status, t.note, t.requested_by::text,
     t.requested_name, t.requested_at, t.source_note, t.source_by, t.source_at, t.cc_note, t.cc_by, t.cc_at, t.receive_note,
     t.received_by, t.received_at, t.value, t.esb_label, t.esb_label_note, t.esb_label_by, t.esb_label_at,
-    t.receive_photo IS NOT NULL AS received_photo, t.gr_number,
+    t.receive_photo IS NOT NULL AS received_photo, t.gr_number, t.esb_number, t.esb_note, t.esb_by, t.esb_at,
     (SELECT count(*) FROM {line} l WHERE l.transfer_id = t.id)::int AS lines,
     (SELECT sum(l.qty) FROM {line} l WHERE l.transfer_id = t.id) AS qty"""
 
@@ -439,6 +412,7 @@ def _view(r: dict) -> dict:
             "received": {"note": r["receive_note"], "by": r["received_by"], "at": _iso(r["received_at"])} if r["received_at"] else None,
             "value": _f(r["value"]) if r["value"] is not None else None,
             "grNumber": r.get("gr_number"),
+            "esb": {"number": r["esb_number"], "note": r["esb_note"], "by": r["esb_by"], "at": _iso(r["esb_at"])} if r.get("esb_at") else None,
             "esbLabel": {"value": r["esb_label"], "note": r["esb_label_note"], "by": r["esb_label_by"], "at": _iso(r["esb_label_at"])} if r["esb_label"] else None}
 
 
@@ -448,7 +422,7 @@ def detail(transfer_id: str) -> dict:
         raise TransferError("Transfer tidak ditemukan")
     v = _view(r)
     lines = db.fetch(f"SELECT * FROM {T_LINE} WHERE transfer_id::text = %s ORDER BY line_no", (transfer_id,))
-    est = prices([ln["item_code"] for ln in lines]) if r["status"] != "received" else {}
+    est = prices([ln["item_code"] for ln in lines]) if r["status"] not in ("received", "processed") else {}
     v["items"] = [{"code": ln["item_code"], "name": ln["item_name"], "unit": ln["unit"], "qty": _f(ln["qty"]),
                    "requested": _f(ln["requested_qty"]) if ln.get("requested_qty") is not None else _f(ln["qty"]),
                    "available": _f(ln["available"]) if ln["available"] is not None else None,
@@ -488,6 +462,8 @@ def gr_check(number: str, branch: str, items: list[dict]) -> dict:
 
 
 def linked_grs() -> list[str]:
+    if not COUNTS_STOCK:  # no transfer brings goods in: the GR counts as a purchase
+        return []
     """The ESB GRs entered on received transfers: the transfer brings their goods in, so they are not counted again."""
     try:
         return [r["gr_number"] for r in db.fetch(f"SELECT gr_number FROM {T} WHERE status = 'received' AND gr_number IS NOT NULL")]
@@ -508,7 +484,7 @@ def listing(date_from: date, date_to: date, branches: Optional[list[str]] = None
     rows = db.fetch(f"SELECT {COLS.format(line=T_LINE)} FROM {T} t WHERE {' AND '.join(where)} ORDER BY t.requested_at DESC LIMIT %(lim)s", params)
     data = [_view(r) for r in rows]
     by = lambda s: sum(1 for d in data if d["status"] == s)  # noqa: E731
-    return {"data": data, "summary": {"total": len(data), **{s: by(s) for s in ("submitted", "accepted", "declined", "approved", "rejected", "received", "cancelled")},
+    return {"data": data, "summary": {"total": len(data), **{s: by(s) for s in ("submitted", "accepted", "declined", "approved", "rejected", "processed", "received", "cancelled")},
                                       "value": round(sum(d["value"] or 0 for d in data), 2),
                                       "unlabelled": sum(1 for d in data if d["status"] == "received" and not d["esbLabel"])},
             "truncated": len(rows) >= limit}
@@ -552,19 +528,19 @@ def form(user: dict) -> dict:
     incoming = listing(d_from, d_to, codes, side="from", limit=100)["data"]
     return {"branches": [{"code": b["code"], "name": b["name"]} for b in mine], "sources": every,
             "requests": outgoing, "incoming": incoming,
-            "todo": {"answer": sum(1 for t in incoming if t["status"] == "submitted"),
-                     "receive": sum(1 for t in outgoing if t["status"] == "approved")}}
+            "todo": {"answer": 0, "receive": 0, "pending": sum(1 for t in outgoing if t["status"] in PENDING)}}
 
 
 def available_of(branch: str) -> dict:
-    """The materials a source outlet has available (> 0), for the request form."""
+    """The materials of the request form: every item of the source's last count, with its stock (any, none or minus) as
+    information for Cost Control; never a limit (2026-11-26)."""
     s = stock([branch]).get(branch)
     if not s:
         return {"so": None, "items": []}
     codes = sorted(s["items"])
     info = items_info(codes)
     items = [{"code": c, "name": (info.get(c) or {}).get("name") or c, "category": (info.get(c) or {}).get("category") or "",
-              "unit": it["unit"], "available": round(it["available"], 3)} for c, it in s["items"].items() if it["available"] > 0]
+              "unit": it["unit"], "available": round(it["available"], 3)} for c, it in s["items"].items() if c in info]
     items.sort(key=lambda x: (x["category"], x["name"]))
     return {"so": s["so"], "items": items}
 
@@ -601,7 +577,10 @@ def set_approvers(user: dict, ids: list[str]) -> list[dict]:
 
 def moves(d_from: date, d_to: date, branches: list[str]) -> list[dict]:
     """The transfers of the period (app/stock_moves.py): per branch, item and unit, in (+) or out (−). Out of the source on
-    the day Cost Control approved; in the requester on the day it was received (with the photo)."""
+    the day Cost Control approved; in the requester on the day it was received (with the photo). None while COUNTS_STOCK
+    is off."""
+    if not COUNTS_STOCK:
+        return []
     return db.fetch(
         f"""SELECT x.branch, x.kind, l.item_code, l.unit, sum(x.sign * l.qty) AS qty
               FROM {T} t JOIN {T_LINE} l ON l.transfer_id = t.id

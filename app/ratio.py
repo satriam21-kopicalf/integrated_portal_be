@@ -311,7 +311,11 @@ def gr_purchases(start: date, end: date, codes: Optional[list[str]]) -> tuple[di
 
 
 def transfers(start: date, end: date, codes: Optional[list[str]]) -> dict[str, float]:
-    """{branch: value in − value out} of the Transfer Stock received in the period (portal, TITO)."""
+    """{branch: value in − value out} of the Transfer Stock received in the period (portal, TITO); none while the
+    transfers move no stock (stock_transfer.COUNTS_STOCK, 2026-11-26)."""
+    from app import stock_transfer
+    if not stock_transfer.COUNTS_STOCK:
+        return {}
     try:
         rows = db.fetch(f"""SELECT to_branch, from_branch, coalesce(value, 0) AS value FROM {PORTAL}.stock_transfer
                              WHERE status = 'received' AND (received_at AT TIME ZONE 'Asia/Jakarta')::date BETWEEN %s AND %s""", (start, end))

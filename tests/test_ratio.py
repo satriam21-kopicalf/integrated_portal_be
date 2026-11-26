@@ -47,6 +47,8 @@ def test_ratio_page_needs_its_page(anon, store, page_access, monkeypatch):
 
 
 def test_purchases_basis_gr_groups_by_category_and_counts_the_transfers(monkeypatch):
+    from app import stock_transfer
+    monkeypatch.setattr(stock_transfer, "COUNTS_STOCK", True)
     """2026-11-13: basis "gr" — the goods that came in, by the cost group of their ESB category; General Supplies apart
     from the COGS; Transfer Stock in − out in the usage. A category not set follows its supplier as the workbook."""
     mapping = {"PACKAGING": "gs", "SUSU": "bb"}

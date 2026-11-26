@@ -22,7 +22,8 @@ def source(monkeypatch):
     return rows
 
 
-def test_available_is_the_count_plus_in_less_out_and_pending(source):
+def test_available_is_the_count_plus_in_less_out_and_pending(source, monkeypatch):
+    monkeypatch.setattr(st, "COUNTS_STOCK", True)
     milk = st.stock([B])[B]["items"]["RM-MILK"]
     assert (milk["so"], milk["in"], milk["pending"], milk["available"]) == (1000.0, 200.0, 300.0, 900.0)
     assert st.stock([B], exclude="t1")[B]["items"]["RM-MILK"]["available"] == 1200.0  # its own request left out
@@ -36,13 +37,32 @@ def _request(monkeypatch, lines, photo=True):
     return st.create({"id": "u1", "username": "pic"}, body)
 
 
-def test_a_request_takes_at_most_what_the_source_has(source, monkeypatch):
-    with pytest.raises(st.TransferError, match="kosong atau minus"):
-        _request(monkeypatch, [{"code": "RM-SUGAR", "qty": 1}])
-    with pytest.raises(st.TransferError, match="melebihi stok"):
-        _request(monkeypatch, [{"code": "RM-MILK", "qty": 901}])
+def test_the_stock_of_the_source_is_information_only(source, monkeypatch):
+    """2026-11-26: no transfer moves the stock; the stock of the source never limits a request."""
+    assert st.stock([B])[B]["items"]["RM-MILK"]["available"] == 1000.0  # the count only
+    assert st.moves(None, None, [B]) == [] and st.linked_grs() == []
+    with pytest.raises(st.TransferError, match="tidak ditemukan di master"):
+        _request(monkeypatch, [{"code": "RM-MILK", "qty": 5000}])
     with pytest.raises(st.TransferError, match="foto evidence dan tanda tangan"):
         _request(monkeypatch, [{"code": "RM-MILK", "qty": 100}], photo=False)
+
+
+def test_the_old_steps_are_closed():
+    with pytest.raises(st.TransferError, match="tidak perlu memvalidasi"):
+        st.answer({}, "t1", True, "ok")
+    with pytest.raises(st.TransferError, match="tidak perlu konfirmasi terima"):
+        st.receive({}, "t1", "p", None, "GR")
+
+
+def test_only_an_approved_transfer_is_processed_with_its_esb_number(monkeypatch):
+    monkeypatch.setattr(st, "is_approver", lambda user: True)
+    state = {"status": "submitted"}
+    monkeypatch.setattr(st, "_load", lambda tid: {"id": tid, "number": "TS-1", "status": state["status"], "to_branch": A, "from_branch": B, "requested_by": "u"})
+    with pytest.raises(st.TransferError, match="sudah di-approve"):
+        st.process({"id": "cc", "username": "cc"}, "t1", "TRF-1", None)
+    state["status"] = "approved"
+    with pytest.raises(st.TransferError, match="nomor dokumen"):
+        st.process({"id": "cc", "username": "cc"}, "t1", "  ", None)
 
 
 def test_only_my_outlet_asks_and_never_itself(source, monkeypatch):
@@ -55,7 +75,7 @@ def test_only_my_outlet_asks_and_never_itself(source, monkeypatch):
 
 def test_cost_control_adjusts_the_quantities_with_a_note(monkeypatch):
     monkeypatch.setattr(st, "is_approver", lambda user: True)
-    monkeypatch.setattr(st, "_load", lambda tid: {"id": tid, "number": "TS-1", "status": "accepted", "to_branch": A, "from_branch": B, "requested_by": "u"})
+    monkeypatch.setattr(st, "_load", lambda tid: {"id": tid, "number": "TS-1", "status": "submitted", "to_branch": A, "from_branch": B, "requested_by": "u"})
     monkeypatch.setattr(st.db, "fetch", lambda q, p=None: [{"item_code": "RM-MILK", "item_name": "Fresh Milk", "qty": 500}])
     user = {"id": "cc", "username": "cc"}
     with pytest.raises(st.TransferError, match="alasan penyesuaian"):
@@ -66,7 +86,8 @@ def test_cost_control_adjusts_the_quantities_with_a_note(monkeypatch):
         st.decide(user, "t1", True, "kurangi", {"RM-SUGAR": 1})
 
 
-def test_an_approved_transfer_leaves_the_source_and_reaches_the_requester_only_when_received(source):
+def test_an_approved_transfer_leaves_the_source_and_reaches_the_requester_only_when_received(source, monkeypatch):
+    monkeypatch.setattr(st, "COUNTS_STOCK", True)
     """2026-11-07: out of the source from the Cost Control approval, in the requester only once received."""
     at = datetime(2026, 11, 3, tzinfo=timezone.utc)
     source.append({"id": "t3", "status": "approved", "to_branch": B, "from_branch": B, "received_at": None, "cc_at": at,

@@ -18,6 +18,8 @@ from reportlab.lib.units import mm
 from reportlab.platypus import CondPageBreak, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 WIB = ZoneInfo("Asia/Jakarta")
+LOGO = __import__("pathlib").Path(__file__).parent / "static" / "calf-logo.png"  # 782 x 414, the Kopi Calf logo
+COMPANY = "Calf Coffee & Milkbar"
 # Atlassian colours (the Jira look of the portal)
 INK, SUBTLE, LINE, BLUE = colors.HexColor("#172B4D"), colors.HexColor("#626F86"), colors.HexColor("#DCDFE4"), colors.HexColor("#0C66E4")
 RED, AMBER, GREEN, SUNKEN = colors.HexColor("#C9372C"), colors.HexColor("#B38600"), colors.HexColor("#1F845A"), colors.HexColor("#F7F8F9")
@@ -233,21 +235,36 @@ def build(a: date, z: date, platform: Optional[str] = None) -> bytes:
     title = f"Laporan Aggregator Insight · {a:%d/%m/%Y} – {z:%d/%m/%Y}{' · ' + platform if platform else ''}"
 
     def page(c, doc):
+        """The letterhead (2026-11-27): the Kopi Calf logo, the company and the report, its period and when it was made;
+        a blue rule under it; the footer with the page and the note that the report is internal."""
         c.saveState()
+        top = 297 * mm
+        if LOGO.is_file():
+            c.drawImage(str(LOGO), 15 * mm, top - 24 * mm, width=30 * mm, height=30 * mm * 414 / 782, mask="auto")
+        c.setFillColor(INK)
+        c.setFont("Helvetica-Bold", 13)
+        c.drawRightString(195 * mm, top - 13 * mm, "Laporan Aggregator Insight")
+        c.setFont("Helvetica", 8.5)
+        c.setFillColor(SUBTLE)
+        c.drawRightString(195 * mm, top - 18 * mm, f"{COMPANY} · Tim Aggregator")
+        c.drawRightString(195 * mm, top - 22.5 * mm, f"Periode {a:%d %b %Y} – {z:%d %b %Y}{' · ' + platform if platform else ' · semua platform'}")
+        c.setStrokeColor(BLUE)
+        c.setLineWidth(2.2)
+        c.line(15 * mm, top - 27 * mm, 195 * mm, top - 27 * mm)
+        c.setStrokeColor(LINE)
+        c.setLineWidth(0.6)
+        c.line(15 * mm, top - 28.2 * mm, 195 * mm, top - 28.2 * mm)
+        c.line(15 * mm, 13 * mm, 195 * mm, 13 * mm)
         c.setFont("Helvetica", 7)
         c.setFillColor(SUBTLE)
-        c.drawString(15 * mm, 9 * mm, f"{title} · dibuat otomatis {made:%d/%m/%Y %H:%M} WIB dari data portal")
+        c.drawString(15 * mm, 9 * mm, f"Dokumen internal {COMPANY} · dibuat otomatis {made:%d/%m/%Y %H:%M} WIB dari data portal")
         c.drawRightString(195 * mm, 9 * mm, f"Halaman {doc.page}")
-        c.setStrokeColor(BLUE)
-        c.setLineWidth(2)
-        c.line(15 * mm, 287 * mm, 195 * mm, 287 * mm)
         c.restoreState()
 
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm, topMargin=14 * mm, bottomMargin=15 * mm, title=title, author="Portal Kopi Calf")
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm, topMargin=34 * mm, bottomMargin=17 * mm, title=title, author="Portal Kopi Calf")
     rv, so, v, c, oo = f["reviews"], f["opening"], f["void"], f["complaints"], f["oos"]
     on = _pct(so["onTime"], so["counted"])
-    el: list = [Paragraph("Laporan Aggregator Insight", S["h1"]),
-                Paragraph(f"Periode {a:%d %b %Y} – {z:%d %b %Y}{' · ' + platform if platform else ' · semua platform'} · semua jam WIB", S["small"]), Spacer(0, 6)]
+    el: list = [Paragraph(f"Dibuat {made:%d %B %Y, %H:%M} WIB · semua jam dalam WIB", S["small"]), Spacer(0, 4)]
 
     el.append(Paragraph("Ringkasan", S["h2"]))
     el.append(_kpis([

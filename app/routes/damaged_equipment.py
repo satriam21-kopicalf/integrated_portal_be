@@ -348,6 +348,10 @@ class CostItemIn(BaseModel):
     qty: float = Field(1, gt=0, le=1e6)
     estAmount: Optional[float] = Field(None, ge=0, le=1e12)
     actualAmount: Optional[float] = Field(None, ge=0, le=1e12)
+    # migration 142: the Jenis Transaksi of Fund Request (it was dropped here, so every line was refused; fixed 2026-11-27)
+    transactionId: Optional[int] = None
+    # migration 163: the material of the catalog of Building & Renovation
+    materialId: Optional[int] = None
 
 
 class LaborIn(BaseModel):

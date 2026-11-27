@@ -24,3 +24,10 @@ def test_price_empty_or_wrong():
 def test_age():
     assert bd.age_days(date(2026, 9, 1), date(2026, 11, 27)) == 87
     assert bd.age_days(None) is None
+
+
+def test_cost_line_keeps_its_jenis_transaksi_and_material():
+    """The route model must carry transactionId (required by save_cost_item) and materialId (2026-11-27)."""
+    from app.routes.damaged_equipment import CostItemIn
+    d = CostItemIn(description="ACP Taco", transactionId=5, materialId=9).model_dump()
+    assert d["transactionId"] == 5 and d["materialId"] == 9

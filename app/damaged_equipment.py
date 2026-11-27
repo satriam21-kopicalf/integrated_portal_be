@@ -1290,9 +1290,14 @@ def overview(date_from: date, date_to: date, branches: Optional[list[str]]) -> d
 # ---------------------------------------------------------------- cost lines & labour
 
 def cost_items(request_id: str) -> list[dict]:
-    rows = db.fetch(f"""SELECT c.*, o.name AS transaction_name FROM {P}.de_cost_item c
-                        LEFT JOIN {P}.fund_option o ON o.id = c.transaction_id WHERE c.request_id::text = %s ORDER BY c.id""", (request_id,))
+    rows = db.fetch(f"""SELECT c.*, o.name AS transaction_name, m.price AS catalog_price, m.price_on AS catalog_on, m.unit AS catalog_unit
+                          FROM {P}.de_cost_item c
+                          LEFT JOIN {P}.fund_option o ON o.id = c.transaction_id
+                          LEFT JOIN {P}.building_material m ON m.id = c.material_id
+                         WHERE c.request_id::text = %s ORDER BY c.id""", (request_id,))
     return [{"id": r["id"], "kind": r["kind"], "transactionId": r["transaction_id"], "transactionName": r["transaction_name"],
+             "materialId": r.get("material_id"), "catalogPrice": _num(r.get("catalog_price")), "catalogOn": _iso(r.get("catalog_on")),
+             "catalogUnit": r.get("catalog_unit"),
              "description": r["description"], "qty": _num(r["qty"]), "estAmount": _num(r["est_amount"]),
              "actualAmount": _num(r["actual_amount"]), "by": r["created_by"], "at": _iso(r["updated_at"])} for r in rows]
 
@@ -1407,17 +1412,27 @@ def save_cost_item(user: dict, request_id: str, item_id: Optional[int], body: di
     if qty <= 0 or qty > 1e6:
         raise DeError("Qty tidak valid")
     est, act = _amount(body.get("estAmount")), _amount(body.get("actualAmount"))
+    # 2026-11-27 (migration 163): a line chosen from the material catalog of Building & Renovation
+    material = int(body["materialId"]) if body.get("materialId") else None
+    if material and not db.fetchrow(f"SELECT 1 AS ok FROM {P}.building_material WHERE id = %s", (material,)):
+        raise DeError("Material katalog tidak ditemukan")
     by = user.get("full_name") or user["username"]
     with db.transaction() as conn:
         if item_id is None:
-            conn.execute(f"""INSERT INTO {P}.de_cost_item (request_id, kind, transaction_id, description, qty, est_amount, actual_amount, created_by)
-                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""", (request_id, kind, trx, desc, qty, est, act, by))
+            line_id = conn.execute(f"""INSERT INTO {P}.de_cost_item (request_id, kind, transaction_id, description, qty, est_amount, actual_amount, created_by, material_id)
+                                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                                   (request_id, kind, trx, desc, qty, est, act, by, material)).fetchone()["id"]
         else:
             n = conn.execute(f"""UPDATE {P}.de_cost_item SET kind = %s, transaction_id = %s, description = %s, qty = %s, est_amount = %s,
-                                 actual_amount = %s, created_by = %s, updated_at = now() WHERE id = %s AND request_id::text = %s""",
-                             (kind, trx, desc, qty, est, act, by, item_id, request_id)).rowcount
+                                 actual_amount = %s, created_by = %s, material_id = %s, updated_at = now() WHERE id = %s AND request_id::text = %s""",
+                             (kind, trx, desc, qty, est, act, by, material, item_id, request_id)).rowcount
             if not n:
                 raise LookupError("Baris biaya tidak ditemukan")
+            line_id = item_id
+        if material and act is not None:  # the price paid, into the history for the Building team (the catalog price stays theirs)
+            from app import building
+            req = get_row(request_id) or {}
+            building.record_invoice_price(conn, material, line_id, act / qty, by, " · ".join(str(x) for x in (req.get("number"), req.get("branch_name") or req.get("branch_code")) if x))
         _event(conn, request_id, user, "COST", None, None, None,
                {"item": desc, "estAmount": est, "actualAmount": act, "action": "add" if item_id is None else "edit"})
     recompute(request_id)

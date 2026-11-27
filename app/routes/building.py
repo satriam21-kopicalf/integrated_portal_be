@@ -4,6 +4,7 @@
     POST   /api/building/materials                   a material {group, category, spec, detail, unit, price, priceOn, vendorId | vendor, note, repeat}
     PUT    /api/building/materials/{id}              the same, plus {active}
     GET    /api/building/materials/{id}/prices       the price history
+    GET    /api/building/pick?q=                     the materials matching q, for a cost line (page mon.building or mon.damaged-equipment)
     POST   /api/building/vendors                     a store / supplier {kind, name, location, goods, contactName, phone, maps, website, bank, accountNo, accountName, note}
     PUT    /api/building/vendors/{id}                the same, plus {active}
 """
@@ -83,3 +84,10 @@ def edit_vendor(vendor_id: int, request: Request, body: Any = Body(...), user: d
     out = _run(bd.save_vendor, user, vendor_id, _body(body))
     activity.record("building.vendor", user=user, request=request, page="/monitoring/building", summary=f"Mengubah {out['kindLabel'].lower()} {out['name']}")
     return out
+
+
+@router.get("/api/building/pick")
+def pick(request: Request, q: str = "", user: dict = Depends(current_user)) -> list[dict]:
+    if not (has_page(user, PAGE) or has_page(user, "mon.damaged-equipment")):
+        deny(request, user)
+    return bd.search(q[:100])

@@ -173,3 +173,35 @@ def summary() -> dict:
     v = db.fetchrow(f"""SELECT count(*) FILTER (WHERE kind = 'STORE' AND is_active) AS stores, count(*) FILTER (WHERE kind = 'SUPPLIER' AND is_active) AS suppliers
                           FROM {P}.building_vendor""")
     return {k: int(x or 0) for k, x in {**r, **v}.items()}
+
+
+# ---------------------------------------------------------------- the catalog in other forms (Maintenance & Procurement)
+
+def label_of(r: dict) -> str:
+    """The description of a cost line from a material: "ACP Taco 1100 Series (lbr)"."""
+    unit = f" ({r['unit']})" if r.get("unit") else ""
+    return " ".join(x for x in (r["category"], r.get("spec"), r.get("detail")) if x)[:190] + unit
+
+
+def search(q: str, limit: int = 20) -> list[dict]:
+    """The materials matching every word of `q` (category, brand / size, detail, store), the priced and recent first."""
+    words = [w for w in " ".join((q or "").split()).lower().split(" ") if w][:6]
+    if not words:
+        return []
+    where = " AND ".join(["lower(concat_ws(' ', m.category, m.spec, m.detail, m.grp, coalesce(v.name, m.vendor_text))) LIKE %s"] * len(words))
+    today = _today()
+    rows = db.fetch(f"""SELECT m.*, v.name AS vendor_name, v.phone AS vendor_phone FROM {P}.building_material m
+                          LEFT JOIN {P}.building_vendor v ON v.id = m.vendor_id
+                         WHERE m.is_active AND {where}
+                         ORDER BY (m.price IS NULL), m.price_on DESC NULLS LAST, m.category, m.spec LIMIT %s""", (*[f"%{w}%" for w in words], limit))
+    return [{**_material_view(r, today), "label": label_of(r)} for r in rows]
+
+
+def record_invoice_price(conn, material_id: int, item_id: int, unit_price: float, by: str, note: str) -> None:
+    """The actual price per unit of a cost line, into the history of its material (one row per line, kept up to date)."""
+    conn.execute(f"""INSERT INTO {P}.building_price (material_id, price, price_on, source, note, created_by, de_cost_item_id)
+                     VALUES (%s, %s, %s, 'INVOICE', %s, %s, %s)
+                     ON CONFLICT (de_cost_item_id) WHERE de_cost_item_id IS NOT NULL
+                     DO UPDATE SET material_id = EXCLUDED.material_id, price = EXCLUDED.price, price_on = EXCLUDED.price_on, note = EXCLUDED.note,
+                                   created_by = EXCLUDED.created_by""",
+                 (material_id, round(unit_price, 2), _today(), note[:300], by, item_id))

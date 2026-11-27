@@ -43,6 +43,7 @@ from app.routes.damaged_equipment import router as damaged_equipment_router
 from app.routes.pengajuan import router as pengajuan_router
 from app.routes.visit_forms import router as visit_forms_router
 from app.routes.travel_path import router as travel_path_router
+from app.routes.building import router as building_router
 from app.routes.branch_groups import router as branch_groups_router
 from app.routes.rating import router as rating_router
 from app.routes.cotr import public_router as cotr_public_router, router as cotr_router
@@ -158,6 +159,7 @@ app.include_router(stock_opname_router, dependencies=signed_in)  # stock opname 
 app.include_router(waste_router)  # waste (migration 040): pages waste, cc.waste-monitor, cc.waste-review
 app.include_router(branch_groups_router)  # Monitoring → Branch groups / Overview: before /api/monitoring/{form}
 app.include_router(pic_checkin_router)  # PIC Check In: before the generic form routes
+app.include_router(building_router)  # Building & Renovation (migration 162)
 app.include_router(travel_path_router)  # Travel Path (migration 153): before the generic form routes
 app.include_router(visit_forms_router)  # Monitoring Product / Outlet forms and monitoring: before the generic routes
 app.include_router(damaged_equipment_router)  # Form & Monitoring → Damaged Equipment; /api/public/de/* = share links (no sign-in)

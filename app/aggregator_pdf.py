@@ -21,7 +21,7 @@ WIB = ZoneInfo("Asia/Jakarta")
 LOGO = __import__("pathlib").Path(__file__).parent / "static" / "calf-logo.png"  # 782 x 414, the Kopi Calf logo
 COMPANY = "Calf Coffee & Milkbar"
 # Atlassian colours (the Jira look of the portal)
-INK, SUBTLE, LINE, BLUE = colors.HexColor("#172B4D"), colors.HexColor("#626F86"), colors.HexColor("#DCDFE4"), colors.HexColor("#0C66E4")
+INK, SUBTLE, LINE, BLUE = colors.HexColor("#172B4D"), colors.HexColor("#626F86"), colors.HexColor("#DCDFE4"), colors.HexColor("#0B1385")  # BLUE: the Kopi Calf navy
 RED, AMBER, GREEN, SUNKEN = colors.HexColor("#C9372C"), colors.HexColor("#B38600"), colors.HexColor("#1F845A"), colors.HexColor("#F7F8F9")
 PLATFORM_COLOR = {"GoFood": colors.HexColor("#00AA13"), "GrabFood": colors.HexColor("#00B14F"), "ShopeeFood": colors.HexColor("#EE4D2D")}
 
@@ -280,7 +280,7 @@ def build(a: date, z: date, platform: Optional[str] = None) -> bytes:
 
     el.append(Paragraph("Analisis & rekomendasi", S["h2"]))
     if recs:
-        tone = {"HIGH": ("#FFECEB", "#AE2E24", "PRIORITAS"), "MEDIUM": ("#FFF7D6", "#7F5F01", "PERLU"), "LOW": ("#E9F2FF", "#0055CC", "INFO")}
+        tone = {"HIGH": ("#FFECEB", "#AE2E24", "PRIORITAS"), "MEDIUM": ("#FFF7D6", "#7F5F01", "PERLU"), "LOW": ("#EEF0FB", "#080E63", "INFO")}
         rows = [[Paragraph(f'<font color="{tone[s][1]}"><b>{tone[s][2]}</b></font>', S["small"]),
                  Paragraph(f"<b>{t}</b><br/>{d}", S["p"])] for s, t, d in recs]
         tb = Table(rows, colWidths=[22 * mm, 158 * mm])

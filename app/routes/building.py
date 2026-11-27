@@ -8,7 +8,7 @@
     POST   /api/building/vendors                     a store / supplier {kind, name, location, goods, contactName, phone, maps, website, bank, accountNo, accountName, note}
     PUT    /api/building/vendors/{id}                the same, plus {active}
 
-Projects (app/building_project.py, migration 164); the RAB is approved with page mon.building-approve (or a superadmin):
+Projects (app/building_project.py, migration 164); the RAB is approved by management (the approvers, migration 165):
     GET    /api/building/projects                    every project with its RAB total, actual and progress
     POST   /api/building/projects                    {kind, name, branchCode | locationName, address, city, areaM2, businessUnit, picName, contractor, planStart, planEnd, budget, note}
     GET    /api/building/projects/{id}               the project, RAB (sections, lines, versions), stages, reports, S-curve
@@ -24,6 +24,7 @@ Projects (app/building_project.py, migration 164); the RAB is approved with page
     PUT    /api/building/projects/{id}/stages        {stages: [{id?, name, weight, planStart, planEnd}]}
     POST   /api/building/projects/{id}/progress      {stageId, progress, note, reportedOn, photos: [data URL]}
     GET    /api/building/photos/{photoId}
+    GET    /api/building/approvers                   who approves the RAB (management, migration 165); PUT {ids} superadmin only
 """
 from typing import Any, Optional
 
@@ -38,7 +39,6 @@ from app.routes.auth import current_user
 
 router = APIRouter(tags=["building"])
 PAGE = "mon.building"
-APPROVE = "mon.building-approve"
 CAMEL = {"contactName": "contact_name", "accountNo": "account_no", "accountName": "account_name"}
 
 
@@ -121,7 +121,8 @@ def _log(request: Request, user: dict, pid: str, text: str) -> None:
 
 
 def _project(out: dict, user: dict) -> dict:
-    out["canApprove"] = user.get("role") == "superadmin" or has_page(user, APPROVE)
+    out["canApprove"] = bp.can_approve(user)
+    out["approvers"] = [a["name"] for a in bp.approvers()]
     return out
 
 
@@ -129,7 +130,7 @@ def _project(out: dict, user: dict) -> dict:
 def project_list(request: Request, user: dict = Depends(current_user)) -> dict:
     _need(request, user)
     return {"data": bp.projects(), "kinds": bp.KINDS, "status": bp.STATUS, "sections": list(bp.SECTIONS),
-            "canApprove": user.get("role") == "superadmin" or has_page(user, APPROVE)}
+            "canApprove": bp.can_approve(user), "approvers": bp.approvers(), "canSetApprovers": user.get("role") == "superadmin"}
 
 
 @router.post("/api/building/projects", status_code=201)
@@ -216,7 +217,7 @@ def rab_submit(pid: str, request: Request, user: dict = Depends(current_user)) -
 
 @router.post("/api/building/projects/{pid}/rab/decide")
 def rab_decide(pid: str, request: Request, body: Any = Body(...), user: dict = Depends(current_user)) -> dict:
-    if not (user.get("role") == "superadmin" or has_page(user, APPROVE)):
+    if not bp.can_approve(user):  # management only (migration 165)
         deny(request, user)
     b = _body(body)
     out = _run(bp.rab_decide, user, pid, bool(b.get("approve")), b.get("note"))
@@ -263,3 +264,21 @@ def progress_photo(photo_id: str, request: Request, user: dict = Depends(current
     if f is None or not f["path"].exists():
         raise HTTPException(404, detail="Foto tidak ditemukan")
     return FileResponse(f["path"], media_type=f["mime"], headers={"Cache-Control": "private, max-age=86400"})
+
+
+@router.get("/api/building/approvers")
+def approvers_get(request: Request, user: dict = Depends(current_user)) -> dict:
+    _need(request, user)
+    return {"approvers": bp.approvers(), "candidates": bp.candidates() if user.get("role") == "superadmin" else []}
+
+
+@router.put("/api/building/approvers")
+def approvers_set(request: Request, body: Any = Body(...), user: dict = Depends(current_user)) -> dict:
+    if user.get("role") != "superadmin":
+        deny(request, user)
+    ids = _body(body).get("ids")
+    if not isinstance(ids, list):
+        raise HTTPException(422, detail="Daftar approver tidak valid")
+    out = _run(bp.set_approvers, user, ids)
+    activity.record("building.approvers", user=user, request=request, page="/monitoring/building", summary=f"Approver RAB: {', '.join(a['name'] for a in out) or '-'}")
+    return {"approvers": out, "candidates": bp.candidates()}

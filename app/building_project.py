@@ -508,3 +508,37 @@ def photo(photo_id: str) -> Optional[dict]:
     from app.damaged_equipment import media_root
     r = db.fetchrow(f"SELECT path, mime FROM {P}.building_photo WHERE id::text = %s", (photo_id,))
     return {"path": media_root() / r["path"], "mime": r["mime"]} if r else None
+
+
+# ---------------------------------------------------------------- who approves the RAB (migration 165)
+
+def approvers() -> list[dict]:
+    row = db.fetchrow(f"SELECT value FROM {P}.building_setting WHERE key = 'rab_approvers'")
+    ids = [str(x) for x in (row["value"] if row else [])]
+    if not ids:
+        return []
+    return [{"id": str(r["id"]), "name": r["full_name"] or r["username"], "jobTitle": r["job_title"]}
+            for r in db.fetch(f"SELECT id, username, full_name, job_title FROM {P}.user_account WHERE id::text = ANY(%s) ORDER BY full_name", (ids,))]
+
+
+def can_approve(user: dict) -> bool:
+    """Management (the list); with nobody listed, the superadmins."""
+    ids = [a["id"] for a in approvers()]
+    return str(user["id"]) in ids if ids else user.get("role") == "superadmin"
+
+
+def set_approvers(user: dict, ids: list[str]) -> list[dict]:
+    import json
+    ids = sorted({str(i) for i in ids})[:20]
+    if ids and len(db.fetch(f"SELECT id FROM {P}.user_account WHERE is_active AND id::text = ANY(%s)", (ids,))) != len(ids):
+        raise BuildingError("Akun approver tidak ditemukan")
+    db.fetchrow(f"""INSERT INTO {P}.building_setting (key, value, updated_by) VALUES ('rab_approvers', %s::jsonb, %s)
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now() RETURNING key""",
+                (json.dumps(ids), _by(user)))
+    return approvers()
+
+
+def candidates() -> list[dict]:
+    return [{"id": str(r["id"]), "name": r["full_name"] or r["username"], "jobTitle": r["job_title"], "department": r["department"]}
+            for r in db.fetch(f"""SELECT id, username, full_name, job_title, department FROM {P}.user_account
+                                   WHERE is_active AND role IN ('superadmin', 'admin', 'user') ORDER BY full_name NULLS LAST""")]

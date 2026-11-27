@@ -73,7 +73,7 @@ NEEDED_ON = {"MARKETING": "Tanggal dibutuhkan", "EVENT": "Tanggal event", "BILL"
 DOC_TYPES = {"NOTA": "Nota", "KWITANSI": "Kwitansi", "INVOICE": "Invoice", "STRUK": "Struk", "TRANSFER": "Bukti transfer",
              "FOTO": "Foto barang", "QUOTE": "Penawaran harga", "OTHER": "Lainnya"}
 # 2026-11-24 (migration 144): the whole life — Pending → Approved → In Progress (money out, proof awaited) → Verifikasi → Done
-STATUS_LABEL = {"DRAFT": "Draf", "SUBMITTED": "Pending", "REVISION": "Revisi", "APPROVED": "Approved",
+STATUS_LABEL = {"DRAFT": "Draf", "SUBMITTED": "Pending", "REVISION": "Revisi", "APPROVED": "Menunggu Transfer",
                 "PAID": "In Progress", "VERIFYING": "Verifikasi", "DONE": "Done", "REJECTED": "Ditolak",
                 "CANCELLED": "Dibatalkan"}
 EDITABLE = ("DRAFT", "REVISION")
@@ -379,6 +379,18 @@ def current_step(row: dict, steps: Optional[list[dict]] = None) -> Optional[dict
     if row["status"] in ("APPROVED", "VERIFYING"):  # Finance: the payment, then the proof
         return _pay(steps)
     return None
+
+
+def sees(user: dict, row: dict, steps: list[dict]) -> bool:
+    """2026-11-27 (Finance): a request still in approval (Pending / Revisi) is shown only to the approvers it has reached
+    (the step waiting and the ones before it); Finance and the other monitors see it once every approval is given. The
+    superadmins see everything. Pure (tested)."""
+    if user.get("role") == "superadmin" or row["status"] not in ("SUBMITTED", "REVISION"):
+        return True
+    me = str(user["id"])
+    appr = _approvals(steps)
+    reached = appr[:min(max(int(row.get("approval_step") or 1), 1), len(appr))] if appr else []
+    return any(u["id"] == me for s in reached for u in s["users"])
 
 
 def approver_of_any(user: dict) -> bool:
@@ -1063,7 +1075,7 @@ def add_note(user: dict, pengajuan_id: str, note: str) -> dict:
     return full(pengajuan_id)
 
 
-def monitor(date_from: date, date_to: date, branches: Optional[list[str]], units: Optional[list[str]] = None) -> dict:
+def monitor(date_from: date, date_to: date, branches: Optional[list[str]], units: Optional[list[str]] = None, user: Optional[dict] = None) -> dict:
     """Sent pengajuan of the period (first sending, WIB days) and every one still open, with their expenses."""
     where = ["p.status <> 'DRAFT'",
              "((p.first_submitted_at AT TIME ZONE 'Asia/Jakarta')::date BETWEEN %(a)s AND %(b)s OR p.status = ANY(%(open)s))"]
@@ -1092,6 +1104,12 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], units
                               FROM {P}.pengajuan_file f WHERE f.pengajuan_id::text = ANY(%s) GROUP BY 1""", (ids,)):
             stats[s["pid"]] = s
     flows = {(flow_key(r), r["unit"]): steps_of(r) for r in {(flow_key(x), x["unit"]): x for x in rows}.values()}
+    # in approval and not reached by this user: not listed, only counted (the cash Finance will be asked for)
+    hidden = [r for r in rows if user is not None and not sees(user, r, flows[(flow_key(r), r["unit"])])]
+    gone = {r["id"] for r in hidden}
+    rows = [r for r in rows if r["id"] not in gone]
+    pipeline = {"count": len(hidden), "amount": float(sum((r["requested_amount"] or 0) for r in hidden)),
+                "byUnit": {u: sum(1 for r in hidden if (r["unit"] or "CALF") == u) for u in sorted({r["unit"] or "CALF" for r in hidden})}}
     twins = twin_ids()
     refs = weekly_averages(sorted({r["branch_code"] for r in rows if r["kind"] == "PETTY_CASH"}))
     data = []
@@ -1110,7 +1128,7 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], units
         v["reusedFiles"] = stats.get(r["id"], {}).get("reused", 0)
         data.append(v)
     from app import fund_options
-    return {"data": data, "categories": CATEGORIES, "kinds": KINDS, "docTypes": DOC_TYPES, "statusLabel": STATUS_LABEL,
+    return {"data": data, "pipeline": pipeline, "categories": CATEGORIES, "kinds": KINDS, "docTypes": DOC_TYPES, "statusLabel": STATUS_LABEL,
             "options": fund_options.all_options(), "kindLabels": kind_labels()}
 
 

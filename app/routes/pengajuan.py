@@ -70,7 +70,7 @@ def _team_row(request: Request, user: dict, pengajuan_id: str) -> dict:
     row = pg.get_row(pengajuan_id)
     scope = allowed_branches()
     if row is None or row["status"] == "DRAFT" or (scope is not None and row["branch_code"] and row["branch_code"] not in scope) \
-            or not fund_units.in_monitor(user, row):
+            or not fund_units.in_monitor(user, row) or not pg.sees(user, row, pg.steps_of(row)):
         raise HTTPException(404, detail="Pengajuan tidak ditemukan")
     return row
 
@@ -272,7 +272,7 @@ def monitor(request: Request, dateFrom: Optional[date] = Query(None), dateTo: Op
     mine = fund_units.monitors(user)
     units = [u for u in fund_units.units() if mine is None or u["code"] in mine]
     shown = [u["code"] for u in units] if not unit or unit == "ALL" else [unit] if unit in {u["code"] for u in units} else []
-    res = pg.monitor(start, end, branches, shown)
+    res = pg.monitor(start, end, branches, shown, user)
     part = fund_units.receives_only(user)
     if part:
         res["data"] = [x for x in res["data"] if x["unit"] not in part or x["kind"] == "INTERCOMPANY"]

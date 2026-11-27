@@ -69,6 +69,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("mon.wwwr", "WW-WR", "Operations"),
     ("mon.damaged-equipment", "Maintenance Request", "Operations"),
     ("mon.building", "Building & Renovation", "Operations"),  # migration 162: material catalog, stores & suppliers
+    ("mon.building-approve", "Building · approve RAB", "Operations"),  # migration 164: not a menu entry, the RAB approval
     ("mon.branch-groups", "Branch groups", "Operations"),
     # Form Pengajuan (2026-10-28): the monitoring and its two approval steps (not menu entries of their own)
     ("mon.pengajuan", "Pengajuan", "Operations"),

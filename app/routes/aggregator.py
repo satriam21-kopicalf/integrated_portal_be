@@ -356,3 +356,15 @@ def complaint_evidence_file(evidence_id: str, _: dict = Depends(TICKET)):
     if f is None or not f["path"].exists():
         raise HTTPException(404, detail="Bukti tidak ditemukan")
     return FileResponse(f["path"], media_type=f["mime"], headers={"Cache-Control": "private, max-age=86400"})
+
+
+@router.get("/report.pdf")
+def report_pdf(request: Request, date_from: Optional[date] = Query(None, alias="dateFrom"), date_to: Optional[date] = Query(None, alias="dateTo"),
+               platform: PLATFORM = None, user: dict = Depends(require_page("agg.reports", "agg.overview"))):
+    """The report of a period as a PDF: summary, charts, analysis & recommendations, the outlets to look at (app/aggregator_pdf.py)."""
+    from fastapi.responses import Response
+    from app import aggregator_pdf
+    a, z = _range(date_from, date_to)
+    data = aggregator_pdf.build(a, z, platform)
+    activity.record("aggregator", user=user, request=request, page="/aggregator-insight/reports", summary=f"Laporan PDF {a} – {z}")
+    return Response(data, media_type="application/pdf", headers={"Content-Disposition": f'inline; filename="Aggregator Insight {a} - {z}.pdf"', "Cache-Control": "no-store"})

@@ -13,6 +13,7 @@ from datetime import date, timedelta
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app import activity, aggregator, aggregator_reports
@@ -56,6 +57,12 @@ def context(_: dict = Depends(VIEW)):
             "groups": sorted(set(groups.values())), "unmapped": st["unmapped"], "reviewsFrom": st["reviewsFrom"],
             "freshness": {"synced": st["syncedMedian"], "oldest": st["syncedOldest"], "global": done("global"), "histories": done("histories"),
                           "reviews": done("reviews"), "daily": done("daily"), "errors": [k for k, v in st["pulls"].items() if v["error"]]}}
+
+
+@router.get("/status-now")
+def status_now(_: dict = Depends(OPENING)):
+    """Every outlet x platform now: OPEN / HOLD (closed inside its hours) / CLOSE (outside them), since when (2026-11-27)."""
+    return aggregator_reports.now_status()
 
 
 @router.get("/opening")
@@ -129,6 +136,14 @@ class ComplaintPatch(BaseModel):
     category: Optional[str] = Field(None, max_length=60)
     resolution: Optional[str] = Field(None, max_length=2000)
     compensation: Optional[float] = None
+    # migration 167: the details of the handling
+    action: Optional[str] = Field(None, max_length=20)
+    rootCause: Optional[str] = Field(None, max_length=20)
+    contacted: Optional[bool] = None
+    contactVia: Optional[str] = Field(None, max_length=20)
+    replyText: Optional[str] = Field(None, max_length=2000)
+    compBearer: Optional[str] = Field(None, max_length=20)
+    esbBill: Optional[str] = Field(None, max_length=60)
 
 
 @router.patch("/complaints/{complaint_id}")
@@ -308,3 +323,36 @@ class Map(BaseModel):
 def set_map(bf_branch_id: int, body: Map, user: dict = Depends(EDIT)):
     aggregator.set_branch(user, bf_branch_id, body.branch_code)
     return {"ok": True}
+
+
+
+# ---------------------------------------------------------------- a ticket: details, evidence, history (migration 167)
+
+@router.get("/complaints/{complaint_id}")
+def complaint_get(complaint_id: int, _: dict = Depends(TICKET)):
+    return _ask(quality.complaint, complaint_id)
+
+
+@router.post("/complaints/{complaint_id}/evidence", status_code=201)
+async def complaint_evidence(complaint_id: int, request: Request, kind: str = Query(..., max_length=10), name: Optional[str] = Query(None, max_length=200),
+                             note: Optional[str] = Query(None, max_length=500), user: dict = Depends(TICKET)):
+    """Raw body: the file (image or PDF, 10 MB at most)."""
+    data = await request.body()
+    out = _ask(quality.add_evidence, user, complaint_id, kind, data, name, note)
+    activity.record("aggregator", user=user, request=request, page="/aggregator-insight/complaints", summary=f"Bukti komplain #{complaint_id}: {kind}")
+    return out
+
+
+@router.delete("/complaints/{complaint_id}/evidence/{evidence_id}")
+def complaint_evidence_remove(complaint_id: int, evidence_id: str, request: Request, user: dict = Depends(TICKET)):
+    out = _ask(quality.remove_evidence, user, complaint_id, evidence_id)
+    activity.record("aggregator", user=user, request=request, page="/aggregator-insight/complaints", summary=f"Bukti komplain #{complaint_id} dihapus")
+    return out
+
+
+@router.get("/evidence/{evidence_id}")
+def complaint_evidence_file(evidence_id: str, _: dict = Depends(TICKET)):
+    f = quality.evidence_file(evidence_id)
+    if f is None or not f["path"].exists():
+        raise HTTPException(404, detail="Bukti tidak ditemukan")
+    return FileResponse(f["path"], media_type=f["mime"], headers={"Cache-Control": "private, max-age=86400"})

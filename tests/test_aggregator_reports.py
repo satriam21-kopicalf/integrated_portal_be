@@ -144,3 +144,14 @@ def test_open_after_midnight_is_the_night_before():
     assert r["openedAt"] == "10:20" and r["lateMin"] == 140 and r["earlyMin"] is None
     r = from_daily({**rep("on_time", "00:00 - 22:20; ", None), "hours": "08:00 - 22:00;"}, 15)
     assert r["openedAt"] is None and r["status"] == "on_time"
+
+
+def test_status_now_open_hold_close():
+    from datetime import time as t
+    from app import aggregator_reports as rep
+    h = [(t(7), t(22))]
+    assert rep.state_of(True, h, t(23)) == ("OPEN", None)
+    assert rep.state_of(False, h, t(16, 40)) == ("HOLD", None)
+    assert rep.state_of(False, h, t(22, 30)) == ("CLOSE", None)
+    assert rep.state_of(False, [], t(12)) == ("CLOSE", "hours")
+    assert rep.within(t(1), [(t(10), t(2))]) and not rep.within(t(3), [(t(10), t(2))])

@@ -30,3 +30,12 @@ def test_esb_usage_first_then_the_rest():
 def test_items_nothing_explains():
     rows = [{"code": "CLIP", "system": 0.0, "actual": 30}, {"code": "MILK", "system": 5.0, "actual": 6}, {"code": "IDLE", "system": 0.0, "actual": 0}]
     assert unexplained(rows) == {"CLIP"}
+
+
+def test_ticket_done_needs_the_handling_and_evidence():
+    from app import aggregator_quality as q
+    full = {"action": "REFUND", "root_cause": "OUTLET", "contacted": True, "reply_text": None}
+    assert q.done_missing("Refund Rp 20.000", full, 1) == []
+    assert q.done_missing("ok", full, 0) == ["lampirkan minimal 1 bukti penanganan"]
+    assert "tulis balasan ulasan" in q.done_missing("ok", {**full, "action": "REPLY"}, 1)
+    assert len(q.done_missing(None, {"contacted": None}, 0)) == 5

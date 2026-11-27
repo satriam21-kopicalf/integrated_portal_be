@@ -33,6 +33,14 @@ TOPICS: list[tuple[str, str]] = [
 ]
 COMPLAINT_STATUS = ("open", "progress", "done")
 COMPLAINT_SOURCE = ("review", "chat", "app", "other")
+# migration 167 (2026-11-27): the details of the handling and its evidence
+ACTIONS = ("REFUND", "REPLACE", "VOUCHER", "APOLOGY", "REPLY", "OTHER")
+CAUSES = ("OUTLET", "DRIVER", "PLATFORM", "CUSTOMER", "UNKNOWN")
+CONTACTS = ("CHAT", "PHONE", "WHATSAPP", "REVIEW_REPLY")
+BEARERS = ("OUTLET", "COMPANY", "PLATFORM")
+EVIDENCE = ("CHAT", "REFUND", "VOUCHER", "REPLY", "PHOTO", "OTHER")
+MAX_EVIDENCE = 10
+MAX_EVIDENCE_BYTES = 10 * 1024 * 1024
 VOID_REASONS = ("Stok habis", "Outlet tutup / belum buka", "Salah input", "Driver tidak datang", "Customer batal", "Sistem / aplikasi", "Lainnya")
 
 
@@ -116,7 +124,10 @@ def _complaint(r: dict, names: dict[str, str], who: dict) -> dict:
             "detail": r["detail"], "status": r["status"], "resolution": r["resolution"], "compensation": float(r["compensation"]) if r["compensation"] is not None else None,
             "createdAt": iso(r["created_at"]), "createdBy": r["created_by_name"], "firstResponseAt": iso(r["first_response_at"]), "resolvedAt": iso(r["resolved_at"]),
             "responseMin": mins(r["first_response_at"]), "resolveMin": mins(r["resolved_at"]), "handledBy": r["handled_by_name"],
-            "member": who.get((r["happened_on"], r["branch_code"])) if r["branch_code"] else None}
+            "member": who.get((r["happened_on"], r["branch_code"])) if r["branch_code"] else None,
+            "action": r.get("action"), "rootCause": r.get("root_cause"), "contacted": r.get("contacted"), "contactVia": r.get("contact_via"),
+            "replyText": r.get("reply_text"), "compBearer": r.get("comp_bearer"), "esbBill": r.get("esb_bill"),
+            "evidence": int(r.get("evidence_n") or 0)}
 
 
 def _branch_names() -> dict[str, str]:
@@ -124,7 +135,8 @@ def _branch_names() -> dict[str, str]:
 
 
 def complaints(a: date, z: date, platform: Optional[str] = None) -> dict:
-    rows = db.fetch(f"""SELECT * FROM {P}.agg_complaint WHERE (happened_on BETWEEN %s AND %s OR status <> 'done') AND (%s::text IS NULL OR channel = %s)
+    rows = db.fetch(f"""SELECT c.*, (SELECT count(*) FROM {P}.agg_complaint_evidence e WHERE e.complaint_id = c.id) AS evidence_n
+                          FROM {P}.agg_complaint c WHERE (happened_on BETWEEN %s AND %s OR status <> 'done') AND (%s::text IS NULL OR channel = %s)
                         ORDER BY (status = 'done'), happened_on DESC, id DESC LIMIT 2000""", (a, z, platform, platform))
     names, who = _branch_names(), _handlers(a, z)
     data = [_complaint(r, names, who) for r in rows]
@@ -166,8 +178,10 @@ def create_complaint(user: dict, body: dict) -> dict:
             raise QualityError("Tanggal tidak boleh di masa depan")
         vals = (None, body["branchCode"], body["platform"], (body.get("orderNo") or "").strip()[:60] or None, day, body["source"],
                 (body.get("category") or topic(body["detail"]))[:60], body["detail"].strip()[:2000])
-    r = db.fetchrow(f"""INSERT INTO {P}.agg_complaint (review_id, branch_code, channel, order_no, happened_on, source, category, detail, created_by, created_by_name)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""", (*vals, user["id"], _who(user)))
+    with db.transaction() as conn:
+        r = conn.execute(f"""INSERT INTO {P}.agg_complaint (review_id, branch_code, channel, order_no, happened_on, source, category, detail, created_by, created_by_name)
+                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""", (*vals, user["id"], _who(user))).fetchone()
+        _ev(conn, r["id"], "CREATE", None, "open", "Dari ulasan" if rid else None, _who(user))
     return {"id": r["id"], "existing": False}
 
 
@@ -179,8 +193,11 @@ def update_complaint(user: dict, complaint_id: int, body: dict) -> dict:
     if status not in COMPLAINT_STATUS:
         raise QualityError("Status tidak dikenal")
     resolution = (body.get("resolution", cur["resolution"]) or "").strip()[:2000] or None
-    if status == "done" and not resolution:
-        raise QualityError("Tulis penyelesaiannya sebelum ditandai selesai")
+    details = handling(body, cur)
+    if status == "done":
+        missing = done_missing(resolution, details, evidence_count(complaint_id))
+        if missing:
+            raise QualityError("Belum bisa selesai: " + "; ".join(missing))
     comp = body.get("compensation", cur["compensation"])
     if comp is not None and float(comp) < 0:
         raise QualityError("Kompensasi tidak boleh minus")
@@ -188,8 +205,144 @@ def update_complaint(user: dict, complaint_id: int, body: dict) -> dict:
                         first_response_at = CASE WHEN %s <> 'open' THEN coalesce(first_response_at, now()) ELSE first_response_at END,
                         resolved_at = CASE WHEN %s = 'done' THEN coalesce(resolved_at, now()) ELSE NULL END WHERE id = %s RETURNING id""",
                 (status, (body.get("category") or cur["category"])[:60], resolution, comp, _who(user), status, status, complaint_id))
-    r = db.fetchrow(f"SELECT * FROM {P}.agg_complaint WHERE id = %s", (complaint_id,))
-    return _complaint(r, _branch_names(), {})
+    db.fetchrow(f"""UPDATE {P}.agg_complaint SET action = %s, root_cause = %s, contacted = %s, contact_via = %s, reply_text = %s, comp_bearer = %s,
+                           esb_bill = %s WHERE id = %s RETURNING id""",
+                (details["action"], details["root_cause"], details["contacted"], details["contact_via"], details["reply_text"], details["comp_bearer"],
+                 details["esb_bill"], complaint_id))
+    with db.transaction() as conn:
+        _ev(conn, complaint_id, "STATUS" if status != cur["status"] else "EDIT", cur["status"], status, resolution if status == "done" else None, _who(user))
+    return complaint(complaint_id)
+
+
+# ---------------------------------------------------------------- handling details & evidence (migration 167)
+
+def _ev(conn, cid: int, kind: str, frm: Optional[str], to: Optional[str], note: Optional[str], by: str) -> None:
+    conn.execute(f"INSERT INTO {P}.agg_complaint_event (complaint_id, kind, from_status, to_status, note, by_name) VALUES (%s, %s, %s, %s, %s, %s)",
+                 (cid, kind, frm, to, (note or "")[:500] or None, by))
+
+
+def handling(body: dict, cur: dict) -> dict:
+    """The details of the handling from the body (a field not sent keeps its value); values checked."""
+    def pick(key: str, col: str, allowed: tuple) -> Optional[str]:
+        v = body.get(key, cur.get(col))
+        if v in (None, ""):
+            return None
+        if v not in allowed:
+            raise QualityError("Pilihan tidak dikenal")
+        return v
+    contacted = body.get("contacted", cur.get("contacted"))
+    return {"action": pick("action", "action", ACTIONS), "root_cause": pick("rootCause", "root_cause", CAUSES),
+            "contacted": None if contacted is None else bool(contacted), "contact_via": pick("contactVia", "contact_via", CONTACTS),
+            "reply_text": ((body.get("replyText", cur.get("reply_text")) or "").strip()[:2000] or None),
+            "comp_bearer": pick("compBearer", "comp_bearer", BEARERS), "esb_bill": ((body.get("esbBill", cur.get("esb_bill")) or "").strip()[:60] or None)}
+
+
+def done_missing(resolution: Optional[str], d: dict, evidence: int) -> list[str]:
+    """What a ticket still needs to be done (pure, tested): the resolution, the action, the root cause, whether the
+    customer was contacted, and at least one evidence; a reply to the review when the action is a reply."""
+    out = []
+    if not resolution:
+        out.append("tulis penyelesaian")
+    if not d.get("action"):
+        out.append("pilih tindakan")
+    if not d.get("root_cause"):
+        out.append("pilih penyebab")
+    if d.get("contacted") is None:
+        out.append("isi apakah pelanggan dihubungi")
+    if d.get("action") == "REPLY" and not d.get("reply_text"):
+        out.append("tulis balasan ulasan")
+    if evidence < 1:
+        out.append("lampirkan minimal 1 bukti penanganan")
+    return out
+
+
+def evidence_count(cid: int) -> int:
+    return int(db.fetchrow(f"SELECT count(*) AS n FROM {P}.agg_complaint_evidence WHERE complaint_id = %s", (cid,))["n"])
+
+
+def complaint(cid: int) -> dict:
+    """One ticket with its review (when it came from one), its evidence and its history."""
+    r = db.fetchrow(f"""SELECT c.*, (SELECT count(*) FROM {P}.agg_complaint_evidence e WHERE e.complaint_id = c.id) AS evidence_n
+                          FROM {P}.agg_complaint c WHERE c.id = %s""", (cid,))
+    if r is None:
+        raise LookupError("Komplain tidak ditemukan")
+    out = _complaint(r, _branch_names(), {})
+    iso = lambda v: v.astimezone(WIB).isoformat() if v else None  # noqa: E731
+    out["files"] = [{"id": str(e["id"]), "kind": e["kind"], "mime": e["mime"], "bytes": e["bytes"], "fileName": e["file_name"], "note": e["note"],
+                     "by": e["created_by_name"], "at": iso(e["created_at"])}
+                    for e in db.fetch(f"SELECT * FROM {P}.agg_complaint_evidence WHERE complaint_id = %s ORDER BY created_at", (cid,))]
+    out["events"] = [{"kind": e["kind"], "from": e["from_status"], "to": e["to_status"], "note": e["note"], "by": e["by_name"], "at": iso(e["at"])}
+                     for e in db.fetch(f"SELECT * FROM {P}.agg_complaint_event WHERE complaint_id = %s ORDER BY at, id", (cid,))]
+    if r["review_id"]:
+        rv = db.fetchrow(f"""SELECT rating, comment, coalesce(ordered_at, created_at) AS at, order_id, item_name, customer_name, merchant_reply,
+                                    merchant_reply_at, tags FROM {P}.agg_review WHERE id = %s""", (r["review_id"],))
+        if rv:  # the reply seen in the merchant app (BotFood) beside the one the team wrote: they should match
+            out["review"] = {"rating": rv["rating"], "comment": rv["comment"], "at": iso(rv["at"]), "orderId": rv["order_id"], "item": rv["item_name"],
+                             "customer": rv["customer_name"], "appReply": rv["merchant_reply"], "appReplyAt": iso(rv["merchant_reply_at"]), "tags": rv["tags"]}
+    return out
+
+
+def _evidence_type(data: bytes, mime: str) -> tuple[str, str]:
+    sig = {b"\xff\xd8\xff": ("image/jpeg", "jpg"), b"\x89PNG": ("image/png", "png"), b"RIFF": ("image/webp", "webp"), b"%PDF": ("application/pdf", "pdf")}
+    for head, out in sig.items():
+        if data.startswith(head):
+            return out
+    raise QualityError("Bukti harus gambar (JPG, PNG, WebP) atau PDF")
+
+
+def add_evidence(user: dict, cid: int, kind: str, data: bytes, file_name: Optional[str], note: Optional[str]) -> dict:
+    import hashlib
+    import uuid
+    from app.damaged_equipment import media_root
+    if kind not in EVIDENCE:
+        raise QualityError("Jenis bukti tidak dikenal")
+    if not data or len(data) > MAX_EVIDENCE_BYTES:
+        raise QualityError("Ukuran bukti maksimal 10 MB")
+    if db.fetchrow(f"SELECT 1 AS ok FROM {P}.agg_complaint WHERE id = %s", (cid,)) is None:
+        raise LookupError("Komplain tidak ditemukan")
+    if evidence_count(cid) >= MAX_EVIDENCE:
+        raise QualityError(f"Maksimal {MAX_EVIDENCE} bukti per tiket")
+    mime, ext = _evidence_type(data, "")
+    if mime.startswith("image/"):
+        from app.thumbs import fit
+        small = fit(data)
+        if small is not None and len(small) < len(data):
+            data, mime, ext = small, "image/jpeg", "jpg"
+    sha = hashlib.sha256(data).hexdigest()
+    if db.fetchrow(f"SELECT 1 AS ok FROM {P}.agg_complaint_evidence WHERE complaint_id = %s AND sha256 = %s", (cid, sha)):
+        raise QualityError("Bukti yang sama sudah dilampirkan")
+    eid = str(uuid.uuid4())
+    rel = f"aggregator/{datetime.now(WIB):%Y/%m}/{eid}.{ext}"
+    path = media_root() / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    with db.transaction() as conn:
+        conn.execute(f"""INSERT INTO {P}.agg_complaint_evidence (id, complaint_id, kind, path, mime, bytes, sha256, file_name, note, created_by, created_by_name)
+                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                     (eid, cid, kind, rel, mime, len(data), sha, (file_name or "")[:200] or None, (note or "").strip()[:500] or None, user["id"], _who(user)))
+        conn.execute(f"UPDATE {P}.agg_complaint SET first_response_at = coalesce(first_response_at, now()), updated_at = now() WHERE id = %s", (cid,))
+        _ev(conn, cid, "EVIDENCE", None, None, f"{kind}{': ' + note.strip()[:200] if note and note.strip() else ''}", _who(user))
+    return complaint(cid)
+
+
+def remove_evidence(user: dict, cid: int, eid: str) -> dict:
+    from app.damaged_equipment import media_root
+    with db.transaction() as conn:
+        r = conn.execute(f"DELETE FROM {P}.agg_complaint_evidence WHERE id::text = %s AND complaint_id = %s RETURNING path, kind", (eid, cid)).fetchone()
+        if r is None:
+            raise LookupError("Bukti tidak ditemukan")
+        st = conn.execute(f"SELECT status FROM {P}.agg_complaint WHERE id = %s", (cid,)).fetchone()
+        if st and st["status"] == "done" and not conn.execute(f"SELECT 1 FROM {P}.agg_complaint_evidence WHERE complaint_id = %s", (cid,)).fetchone():
+            raise QualityError("Tiket selesai harus punya minimal 1 bukti: tambah bukti lain dulu")
+        _ev(conn, cid, "EVIDENCE_REMOVED", None, None, r["kind"], _who(user))
+    (media_root() / r["path"]).unlink(missing_ok=True)
+    return complaint(cid)
+
+
+def evidence_file(eid: str) -> Optional[dict]:
+    from app.damaged_equipment import media_root
+    r = db.fetchrow(f"SELECT path, mime, file_name FROM {P}.agg_complaint_evidence WHERE id::text = %s", (eid,))
+    return {"path": media_root() / r["path"], "mime": r["mime"], "name": r["file_name"]} if r else None
 
 
 # ---------------------------------------------------------------- void

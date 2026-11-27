@@ -599,3 +599,69 @@ def oos(d_from: date, d_to: date, channel: Optional[str] = None, packaging: bool
         "current": sorted(current, key=lambda r: (r["outlet"], r["platform"], r["category"], r["item"])),
         "items": items,
     }
+
+
+# ---------------------------------------------------------------- the status of every outlet now (2026-11-27)
+
+STATES = ("OPEN", "HOLD", "CLOSE")
+
+
+def within(now: dtime, hours: list[tuple[dtime, dtime]]) -> bool:
+    """Inside one of the day's shifts (a shift past midnight, e.g. 10:00 - 02:00, counts on both sides). Pure (tested)."""
+    for a, b in hours:
+        if a <= b and a <= now < b:
+            return True
+        if a > b and (now >= a or now < b):
+            return True
+    return False
+
+
+def state_of(is_open: Optional[bool], hours: list[tuple[dtime, dtime]], now: dtime) -> tuple[str, Optional[str]]:
+    """(OPEN | HOLD | CLOSE, why): open; closed inside its hours = HOLD (paused, temporarily closed, busy); closed outside
+    them = CLOSE. Closed with no hours known: CLOSE, said so. Pure (tested)."""
+    if is_open:
+        return "OPEN", None
+    if not hours:
+        return "CLOSE", "hours"
+    return ("HOLD", None) if within(now, hours) else ("CLOSE", None)
+
+
+def now_status(now: Optional[datetime] = None) -> dict:
+    """Every outlet x platform as BotFood last read it: OPEN / HOLD / CLOSE, since when (the last change of its status),
+    the hours of today in the outlet's clock (the team's check against the merchant app first, then the app's hours of
+    this weekday, then the usual ones) and how old BotFood's reading is."""
+    from app import aggregator_quality as q
+    now = (now or datetime.now(WIB)).astimezone(WIB)
+    today = now.date()
+    known, checks, ahead = app_hours(today), q.hours_checks(), wib_shift()
+    last = {r["channel_id"]: r for r in db.fetch(f"""SELECT DISTINCT ON (channel_id) channel_id, at, is_open FROM {P}.agg_status_event
+                                                    ORDER BY channel_id, at DESC""")}
+    rows = db.fetch(f"""SELECT c.id, c.name, c.channel, c.is_open, c.synced_at, c.items_total, c.items_active, m.branch_code, b.branch_name
+                          FROM {P}.agg_channel c LEFT JOIN {P}.agg_branch_map m ON m.bf_branch_id = c.bf_branch_id
+                          LEFT JOIN integration_esb.master_branches b ON b.branch_code = m.branch_code
+                         ORDER BY coalesce(b.branch_name, c.name), c.channel""")
+    out = []
+    for r in rows:
+        code = r["branch_code"]
+        shift = ahead.get(code or "", 0)
+        local = (now + timedelta(minutes=shift)).time().replace(second=0, microsecond=0)
+        k = checked(checks.get((code, r["channel"]), []), today) if code else None
+        if k and k.get("open_time") and k.get("close_time"):
+            hours, src = [(k["open_time"], k["close_time"])], "check"
+        else:
+            a = known.get(r["id"])
+            text = (a["week"].get(today.isoweekday()) or a["usual"]) if a else None
+            hours, src = (shifts(text) if text else []), ("app" if a else None)
+        state, why = state_of(r["is_open"], hours, local)
+        ev = last.get(r["id"])
+        since = ev["at"] if ev and bool(ev["is_open"]) == bool(r["is_open"]) else None
+        age = int((now - r["synced_at"]).total_seconds() // 60) if r["synced_at"] else None
+        out.append({"channelId": r["id"], "name": r["name"], "branchCode": code, "branchName": r["branch_name"], "platform": r["channel"],
+                    "state": state, "noHours": why == "hours", "since": since.isoformat() if since else None,
+                    "hours": "; ".join(f"{a:%H:%M} - {b:%H:%M}" for a, b in hours) or None, "hoursFrom": src,
+                    "zone": {0: "WIB", 60: "WITA", 120: "WIT"}.get(shift, "WIB"), "localNow": local.strftime("%H:%M"),
+                    "synced": r["synced_at"].isoformat() if r["synced_at"] else None, "syncAgeMin": age, "stale": age is None or age > 120,
+                    "items": r["items_total"], "itemsActive": r["items_active"]})
+    count = {st: sum(1 for x in out if x["state"] == st) for st in STATES}
+    return {"at": now.isoformat(), "count": count, "stale": sum(1 for x in out if x["stale"]), "unmapped": sum(1 for x in out if not x["branchCode"]),
+            "data": out}

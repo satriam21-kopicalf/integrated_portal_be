@@ -33,8 +33,10 @@ def compare(d_from: date, d_to: date, branches: Optional[list[str]]) -> dict:
     def at(code: str) -> dict:
         return out.setdefault(code, {"branchCode": code, "portalApproved": 0.0, "portalWaiting": 0.0, "portalEntries": 0, "portalUnpriced": 0,
                                      "journalValue": 0.0, "journalLines": 0, "billPortions": 0.0, "bills": 0, "same": []})
-    where = "business_date BETWEEN %s AND %s AND status <> 'rejected'" + ("" if branches is None else " AND branch_code = ANY(%s)")
-    args = (d_from, d_to) + (() if branches is None else (branches,))
+    from app import test_branches
+    # every branch: the dummy outlets of Cost Control stay out (2026-11-27)
+    where = "business_date BETWEEN %s AND %s AND status <> 'rejected'" + (" AND NOT (branch_code = ANY(%s))" if branches is None else " AND branch_code = ANY(%s)")
+    args = (d_from, d_to) + ((sorted(test_branches.sources()),) if branches is None else (branches,))
     portal_keys: dict[tuple, str] = {}
     for v in waste.with_values(db.fetch(f"SELECT {waste.LIGHT} FROM {waste.T} WHERE {where}", args)):
         b = at(v["branchCode"])

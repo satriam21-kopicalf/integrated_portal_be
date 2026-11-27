@@ -57,13 +57,15 @@ def limits(items: list[dict], med: dict[tuple[str, str], tuple[float, int]]) -> 
 
 def report(date_from: date, date_to: date, branches: Optional[list[str]]) -> list[dict]:
     """The Usage Management lines of the period (latest first), each judged."""
-    where = "u.business_date BETWEEN %(a)s AND %(b)s" + ("" if branches is None else " AND u.branch_code = ANY(%(br)s)")
+    from app import test_branches
+    # every branch: the dummy outlets of Cost Control stay out (2026-11-27)
+    where = "u.business_date BETWEEN %(a)s AND %(b)s" + (" AND NOT (u.branch_code = ANY(%(test)s))" if branches is None else " AND u.branch_code = ANY(%(br)s)")
     rows = db.fetch(f"""SELECT u.branch_code, u.branch_name, u.business_date, u.item_code, u.item_name, u.unit, u.qty::float AS qty,
                                u.category, u.note, u.photo IS NOT NULL AS has_photo, coalesce(u.full_name, u.username) AS by, u.updated_at,
                                (SELECT count(*) FROM {T_FIX} c WHERE c.branch_code = u.branch_code AND c.business_date = u.business_date
                                    AND c.item_code = u.item_code)::int AS fixes
                           FROM {T} u WHERE {where} ORDER BY u.business_date DESC, u.branch_name, u.item_name LIMIT {LIMIT}""",
-                    {"a": date_from, "b": date_to, "br": branches or []})
+                    {"a": date_from, "b": date_to, "br": branches or [], "test": sorted(test_branches.sources())})
     med = usual() if rows else {}
     out = []
     for r in rows:

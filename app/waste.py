@@ -521,6 +521,12 @@ def delete(user: dict, entry_id: str) -> Optional[dict]:
 
 # ---------------------------------------------------------------- monitoring & review
 
+def _tests() -> list[str]:
+    """The dummy outlets of Cost Control (DMY-…): never in a report of every branch."""
+    from app import test_branches
+    return sorted(test_branches.sources())
+
+
 def monitor(date_from: date, date_to: date, branches: Optional[list[str]], scope: str = "", category: str = "",
             status: str = "", user_id: str = "", limit: int = VALUE_ROWS, q: str = "") -> dict:
     # 2026-11-17: every entry of the period and filter is listed (was 2,000: a month of every outlet has ~9k); the page
@@ -530,10 +536,15 @@ def monitor(date_from: date, date_to: date, branches: Optional[list[str]], scope
     if branches is not None:
         where.append("e.branch_code = ANY(%(br)s)")
         params["br"] = branches
+    else:  # every branch: the dummy outlets of Cost Control stay out (app/test_branches.py, 2026-11-27)
+        where.append("NOT (e.branch_code = ANY(%(test)s))")
+        params["test"] = _tests()
+    # one or more of each, joined by "|" (2026-11-27: Cost Control picks several statuses at once)
     for key, value, allowed in (("scope", scope, SCOPES), ("status", status, STATUSES)):
-        if value and value in allowed:
-            where.append(f"e.{key} = %({key})s")
-            params[key] = value
+        picked = [v for v in (value or "").split("|") if v in allowed]
+        if picked:
+            where.append(f"e.{key} = ANY(%({key})s)")
+            params[key] = picked
     # one or more categories, joined by "|" (2026-11-12: Cost Control filters several at once)
     cats = [c.strip() for c in (category or "").split("|") if c.strip()]
     if cats:
@@ -719,6 +730,8 @@ def daily(date_from: date, date_to: date, branches: Optional[list[str]]) -> dict
     every = branch_options({}, every=True)
     if branches is not None:
         every = [b for b in every if b["code"] in set(branches)]
+    else:  # the dummy outlets of Cost Control stay out of every report (2026-11-27)
+        every = [b for b in every if b["code"] not in set(_tests())]
     p = {"a": date_from, "b": date_to, "br": [b["code"] for b in every]}
     # only the branches open in the period (2026-11-06): sales from 14 days before it, or a waste report in it; a
     # closed outlet is no branch that forgot its waste
@@ -877,8 +890,9 @@ def investigation(inv_id: str) -> Optional[dict]:
 
 def investigations(status: str, branches: Optional[tuple]) -> list[dict]:
     rows = db.fetch(f"""SELECT id::text, * FROM {T_INV} WHERE (%(st)s = '' OR status = %(st)s)
-                          AND (%(all)s OR branch_code = ANY(%(br)s)) ORDER BY report_no DESC LIMIT 500""",
-                    {"st": status if status in ("open", "closed") else "", "all": branches is None, "br": list(branches or [])})
+                          AND (%(all)s OR branch_code = ANY(%(br)s)) AND (NOT %(all)s OR NOT (branch_code = ANY(%(test)s)))
+                        ORDER BY report_no DESC LIMIT 500""",
+                    {"st": status if status in ("open", "closed") else "", "all": branches is None, "br": list(branches or []), "test": _tests()})
     counts = {r["inv"]: r["n"] for r in db.fetch(
         f"SELECT investigation_id::text AS inv, count(*)::int AS n FROM {T} WHERE investigation_id IS NOT NULL GROUP BY 1")}
     return [{**_inv_view(r), "entries": counts.get(r["id"], 0)} for r in rows]

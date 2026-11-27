@@ -85,9 +85,10 @@ def missing(day: date) -> list[dict]:
                           AND (l.qty_base IS NOT NULL OR coalesce(l.qty_wip, 0) > 0))""", (TYPE, day))}
     if not is_so_day(len({r["facility_id"] for r in regular}), len(done & {r["facility_id"] for r in regular})):
         return []
+    from app import test_branches
     seen: dict[str, dict] = {}
     for r in regular:
-        if r["facility_id"] not in done:
+        if r["facility_id"] not in done and not test_branches.is_test(r["place"]):  # the dummy outlets are never noted (2026-11-27)
             seen.setdefault(r["place"], {"place": r["place"], "name": r["name"]})
     return list(seen.values())
 

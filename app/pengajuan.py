@@ -43,11 +43,14 @@ MAX_AMOUNT = Decimal("1000000000000")
 MAX_BARISTAS = 20
 KINDS = {"PETTY_CASH": "Petty Cash Mingguan", "EMERGENCY": "Pembelian Darurat", "MARKETING": "Marketing & Promo",
          "EVENT": "Event & Bazar", "BILL": "Tagihan Outlet", "PERSONAL": "Pengajuan Personal",
-         "MAINTENANCE": "Maintenance", "PROCUREMENT": "Procurement", "VENDOR": "Pembayaran Vendor", "INTERCOMPANY": "Antar-PT"}
+         "MAINTENANCE": "Maintenance", "PROCUREMENT": "Procurement", "VENDOR": "Pembayaran Vendor", "INTERCOMPANY": "Antar-PT",
+         "BUILDING": "Building & Renovation"}
 TERMS = ("COD", "TOP", "CBD")
 ONE_AMOUNT = ("PERSONAL", "VENDOR", "INTERCOMPANY")  # no expense lines: one amount
 # asked by the Maintenance & Procurement team from a Damaged Equipment request, never from the outlet form (app/de_funds.py)
 DE_KINDS = ("MAINTENANCE", "PROCUREMENT")
+# asked from the RAB of a Building & Renovation project (app/building_project.py request_fund, migration 166), never from the form
+TEAM_KINDS = DE_KINDS + ("BUILDING",)
 OUTLET_KINDS = ("PETTY_CASH", "EMERGENCY", "MARKETING", "EVENT", "BILL")
 CATEGORIES_OF = {
     "PETTY_CASH": {"RAW": "Bahan baku", "OPERATIONAL": "Operasional outlet", "GAS_WATER": "Gas & air galon",
@@ -65,7 +68,7 @@ CATEGORIES_OF = {
 CATEGORIES_OF["VENDOR"] = CATEGORIES_OF["INTERCOMPANY"] = {}
 CATEGORIES_OF["PERSONAL"] = {}  # a personal request has one amount, no expense lines (2026-11-20)
 DE_CATEGORIES = {"MATERIAL": "Material / barang", "SERVICE": "Jasa vendor", "TRANSPORT": "Transport", "OTHER": "Lainnya"}
-CATEGORIES_OF.update({k: DE_CATEGORIES for k in DE_KINDS})
+CATEGORIES_OF.update({k: DE_CATEGORIES for k in TEAM_KINDS})
 CATEGORIES = {k: v for cats in CATEGORIES_OF.values() for k, v in cats.items()}
 RECEIPT_REQUIRED = ("PETTY_CASH", "EMERGENCY", "BILL")   # every line needs its receipt / invoice
 LINE_DATE_REQUIRED = ("PETTY_CASH", "EMERGENCY")
@@ -644,7 +647,7 @@ def previous_closing(branch_code: str, exclude: Optional[str] = None) -> Optiona
 
 
 def create_draft(user: dict, branch_code: Optional[str], kind: str = "PETTY_CASH", unit: Optional[str] = None) -> dict:
-    if kind not in KINDS or kind in DE_KINDS:  # Maintenance & Procurement funds come from their request (de_funds)
+    if kind not in KINDS or kind in TEAM_KINDS:  # Maintenance & Procurement funds from their request (de_funds), Building from its RAB
         raise PengajuanError("Jenis pengajuan tidak dikenal")
     if kind in ONE_AMOUNT:
         return create_personal(user, branch_code, kind, unit)
@@ -1450,7 +1453,7 @@ def list_names() -> dict[str, str]:
 def set_kind_label(user: dict, kind: str, label: Any) -> dict[str, str]:
     """The name of an outlet kind, or (LIST:<list>) the title of a list of the personal form."""
     from app import fund_options
-    if kind not in OUTLET_KINDS + DE_KINDS and kind not in {f"LIST:{k}" for k in fund_options.LISTS}:
+    if kind not in OUTLET_KINDS + TEAM_KINDS and kind not in {f"LIST:{k}" for k in fund_options.LISTS}:
         raise PengajuanError("Jenis pengajuan tidak dikenal")
     name = " ".join(str(label or "").split())[:60]
     if not name:

@@ -24,6 +24,7 @@ Projects (app/building_project.py, migration 164); the RAB is approved by manage
     PUT    /api/building/projects/{id}/stages        {stages: [{id?, name, weight, planStart, planEnd}]}
     POST   /api/building/projects/{id}/progress      {stageId, progress, note, reportedOn, photos: [data URL]}
     GET    /api/building/photos/{photoId}
+    POST   /api/building/projects/{id}/fund          {lineIds, payee: {type, bank, account, name}, note}: a Fund Request (kind BUILDING)
     GET    /api/building/approvers                   who approves the RAB (management, migration 165); PUT {ids} superadmin only
 """
 from typing import Any, Optional
@@ -282,3 +283,15 @@ def approvers_set(request: Request, body: Any = Body(...), user: dict = Depends(
     out = _run(bp.set_approvers, user, ids)
     activity.record("building.approvers", user=user, request=request, page="/monitoring/building", summary=f"Approver RAB: {', '.join(a['name'] for a in out) or '-'}")
     return {"approvers": out, "candidates": bp.candidates()}
+
+
+@router.post("/api/building/projects/{pid}/fund", status_code=201)
+def project_fund(pid: str, request: Request, body: Any = Body(...), user: dict = Depends(current_user)) -> dict:
+    _need(request, user)
+    b = _body(body)
+    ids = b.get("lineIds")
+    if not isinstance(ids, list) or not all(isinstance(i, int) for i in ids):
+        raise HTTPException(422, detail="Baris RAB tidak valid")
+    out = _run(bp.request_fund, user, pid, ids, b.get("payee") or {}, b.get("note"))
+    _log(request, user, pid, f"Mengajukan dana proyek {out['number']}: {len(ids)} baris RAB")
+    return _project(out, user)

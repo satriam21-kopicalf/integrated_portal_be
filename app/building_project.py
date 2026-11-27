@@ -266,10 +266,11 @@ def full(pid: str) -> dict:
     if r is None:
         raise LookupError("Proyek tidak ditemukan")
     sections = db.fetch(f"SELECT * FROM {P}.building_rab_section WHERE project_id::text = %s ORDER BY sort, id", (pid,))
-    lines = db.fetch(f"""SELECT l.*, v.name AS vendor_name, m.price AS catalog_price, m.price_on AS catalog_on
+    lines = db.fetch(f"""SELECT l.*, v.name AS vendor_name, m.price AS catalog_price, m.price_on AS catalog_on, f.number AS fund_number, f.status AS fund_status
                            FROM {P}.building_rab_line l
                            LEFT JOIN {P}.building_vendor v ON v.id = l.vendor_id
                            LEFT JOIN {P}.building_material m ON m.id = l.material_id
+                           LEFT JOIN {P}.pengajuan f ON f.id = l.fund_id
                           WHERE l.project_id::text = %s ORDER BY l.section_id, l.sort, l.id""", (pid,))
     stages = db.fetch(f"SELECT * FROM {P}.building_stage WHERE project_id::text = %s ORDER BY sort, id", (pid,))
     reports = db.fetch(f"""SELECT g.*, s.name AS stage_name,
@@ -289,13 +290,16 @@ def full(pid: str) -> dict:
                    "unitPrice": _f(ln["unit_price"]), "amount": round(float(ln["qty"]) * float(ln["unit_price"]), 2), "priceOn": _iso(ln["price_on"]),
                    "catalogPrice": _f(ln["catalog_price"]), "catalogOn": _iso(ln["catalog_on"]),
                    "vendorId": ln["vendor_id"], "vendor": ln["vendor_name"] or ln["vendor_text"], "note": ln["note"],
-                   "actualQty": _f(ln["actual_qty"]), "actualAmount": _f(ln["actual_amount"]), "updatedBy": ln["updated_by"]} for ln in lines],
+                   "actualQty": _f(ln["actual_qty"]), "actualAmount": _f(ln["actual_amount"]), "updatedBy": ln["updated_by"],
+                   "fundId": str(ln["fund_id"]) if ln.get("fund_id") else None, "fundNumber": ln.get("fund_number"),
+                   "fundStatus": ln.get("fund_status")} for ln in lines],
         "kinds": totals["kinds"], "bought": totals["bought"],
         "stages": [{"id": s["id"], "name": s["name"], "sort": s["sort"], "weight": _f(s["weight"]), "planStart": _iso(s["plan_start"]),
                     "planEnd": _iso(s["plan_end"]), "progress": _f(s["progress"]), "doneOn": _iso(s["done_on"]),
                     "late": bool(s["plan_end"] and float(s["progress"]) < 100 and s["plan_end"] < today)} for s in stages],
         "reports": [{"id": g["id"], "stageId": g["stage_id"], "stage": g["stage_name"], "progress": _f(g["progress"]), "note": g["note"],
                      "reportedOn": _iso(g["reported_on"]), "by": g["created_by"], "at": _iso(g["created_at"]), "photos": g["photos"]} for g in reports],
+        "funds": funds_of(pid),
         "versions": [{"version": x["version"], "total": _f(x["total"]), "by": x["approved_by"], "at": _iso(x["approved_at"]), "note": x["note"]} for x in versions],
         "plannedToday": planned_at(stages, today),
         "curve": curve(stages, reports, r["plan_start"], r["plan_end"], today),
@@ -542,3 +546,91 @@ def candidates() -> list[dict]:
     return [{"id": str(r["id"]), "name": r["full_name"] or r["username"], "jobTitle": r["job_title"], "department": r["department"]}
             for r in db.fetch(f"""SELECT id, username, full_name, job_title, department FROM {P}.user_account
                                    WHERE is_active AND role IN ('superadmin', 'admin', 'user') ORDER BY full_name NULLS LAST""")]
+
+
+# ---------------------------------------------------------------- the money: Fund Request from the RAB (migration 166)
+
+OPEN_FUND = ("REJECTED", "CANCELLED")  # a line asked by such a fund may be asked again
+LINE_CATEGORY = {"MATERIAL": "MATERIAL", "LABOUR": "SERVICE", "OTHER": "OTHER"}
+
+
+def funds_of(pid: str) -> list[dict]:
+    from app import pengajuan as pg
+    rows = db.fetch(f"""SELECT p.id::text, p.number, p.status, p.requested_amount, p.approved_amount, p.paid_amount, p.payee_name, p.payee_bank,
+                               p.submitted_at, p.full_name, (SELECT count(*) FROM {P}.building_rab_line l WHERE l.fund_id = p.id) AS lines
+                          FROM {P}.pengajuan p WHERE p.building_project_id::text = %s ORDER BY p.created_at DESC""", (pid,))
+    return [{"id": r["id"], "number": r["number"], "status": r["status"], "statusLabel": pg.STATUS_LABEL[r["status"]],
+             "requested": _f(r["requested_amount"]), "approved": _f(r["approved_amount"]), "paid": _f(r["paid_amount"]),
+             "payee": r["payee_name"], "bank": r["payee_bank"], "by": r["full_name"], "at": _iso(r["submitted_at"]), "lines": int(r["lines"])} for r in rows]
+
+
+def fund_lines(lines: list[dict], ids: list[int]) -> list[dict]:
+    """The Fund Request lines of the RAB lines chosen (pure, tested): one per line, qty × unit price."""
+    out = []
+    for ln in lines:
+        if ln["id"] not in ids:
+            continue
+        amount = round(float(ln["qty"]) * float(ln["unit_price"]), 2)
+        if amount <= 0:
+            continue
+        qty = float(ln["qty"])
+        unit = f" {ln['unit']}" if ln.get("unit") else ""
+        vendor = f" · {ln['vendor']}" if ln.get("vendor") else ""
+        out.append({"category": LINE_CATEGORY[ln["kind"]], "amount": Decimal(str(amount)),
+                    "description": f"{ln['description']} ({qty:g}{unit} × {float(ln['unit_price']):,.0f}){vendor}"[:300]})
+    return out
+
+
+def request_fund(user: dict, pid: str, line_ids: list[int], payee: dict, note: Optional[str]) -> dict:
+    """Ask Finance for the money of RAB lines of an approved RAB: a Fund Request (kind BUILDING) on the approval flow
+    management set for Building & Renovation; the lines are taken by it until it is rejected / cancelled."""
+    from app import fund_units
+    from app import pengajuan as pg
+    from app.de_funds import payee_of
+    ids = sorted({int(i) for i in line_ids})
+    if not ids:
+        raise BuildingError("Pilih baris RAB yang diajukan")
+    row = _row(pid)
+    if row["status"] in ("DONE", "CANCELLED"):
+        raise BuildingError("Proyek sudah selesai / dibatalkan")
+    if row["rab_status"] != "APPROVED":
+        raise BuildingError("Dana diajukan dari RAB yang sudah disetujui")
+    lines = db.fetch(f"""SELECT l.*, coalesce(v.name, l.vendor_text) AS vendor, f.status AS fund_status, f.number AS fund_number
+                           FROM {P}.building_rab_line l
+                           LEFT JOIN {P}.building_vendor v ON v.id = l.vendor_id
+                           LEFT JOIN {P}.pengajuan f ON f.id = l.fund_id
+                          WHERE l.project_id::text = %s AND l.id = ANY(%s)""", (pid, ids))
+    if len(lines) != len(ids):
+        raise BuildingError("Baris RAB tidak ditemukan")
+    taken = [f"{ln['description']} ({ln['fund_number']})" for ln in lines if ln["fund_status"] and ln["fund_status"] not in OPEN_FUND]
+    if taken:
+        raise BuildingError("Sudah diajukan: " + "; ".join(taken[:3]))
+    fl = fund_lines(lines, ids)
+    if not fl:
+        raise BuildingError("Baris yang dipilih tidak bernilai")
+    try:
+        bank, account, name, ptype = payee_of(payee)
+    except Exception as e:  # DeError: the same words
+        raise BuildingError(str(e)) from None
+    total = sum((x["amount"] for x in fl), Decimal(0))
+    branch = row["branch_code"]
+    place = row.get("location_name") or branch or ""
+    purpose = f"{row['number']} · {KINDS[row['kind']]} {row['name']}"[:300]
+    by = _by(user)
+    with db.transaction() as conn:
+        number = pg._next_number(conn)
+        fund_id = conn.execute(
+            f"""INSERT INTO {P}.pengajuan (user_id, username, full_name, branch_code, branch_name, kind, building_project_id, requester_name,
+                    number, first_submitted_at, status, approval_step, submitted_at, purpose, payee_bank, payee_account, payee_name, payee_type,
+                    va_provider, note, total_out, requested_amount)
+                VALUES (%s, %s, %s, %s, %s, 'BUILDING', %s, %s, %s, now(), 'SUBMITTED', 1, now(), %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id::text""",
+            (user["id"], user["username"], user.get("full_name"), branch, row.get("branch_name") or place or None, pid, by, number, purpose,
+             bank, account, name, ptype, bank if ptype == "VA" else None, _text(note, 2000), total, total)).fetchone()["id"]
+        for i, x in enumerate(fl):
+            conn.execute(f"INSERT INTO {P}.pengajuan_line (pengajuan_id, sort, category, description, amount) VALUES (%s, %s, %s, %s, %s)",
+                         (fund_id, i, x["category"], x["description"], x["amount"]))
+        conn.execute(f"UPDATE {P}.building_rab_line SET fund_id = %s::uuid WHERE project_id::text = %s AND id = ANY(%s)", (fund_id, pid, ids))
+        fund_units.stamp(conn, fund_id, fund_units.unit_of_branch(branch))
+        pg._event(conn, fund_id, user, "SUBMIT", "DRAFT", "SUBMITTED", None, {"requested": total, "lines": len(fl), "project": row["number"]})
+    return full(pid)
